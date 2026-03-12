@@ -117,6 +117,7 @@ jobs:
           # RUSTSEC-2025-0111: tokio-tar (from testcontainers, dev dependency only)
           # RUSTSEC-2025-0134: rustls-pemfile unmaintained (transitive dep, awaiting upstream fix)
           ignore: RUSTSEC-2023-0071, RUSTSEC-2025-0111, RUSTSEC-2025-0134
+          createIssues: false
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2

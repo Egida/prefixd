@@ -149,7 +149,7 @@ Target: Validated with real routers, stable API, production-proven. Operators tr
 
 - [ ] Arista + Cisco XR interop scenarios pass end-to-end in lab
 - [ ] Vendor capability matrix + reference import policy docs published
-- [ ] CVE gate + SBOM generation enabled in CI and green on `main`
+- [x] CVE gate + SBOM generation enabled in CI and green on `main`
 - [ ] Documentation accuracy review + demo video complete
 
 ### Vendor Interop (Priority)
@@ -165,8 +165,8 @@ Target: Validated with real routers, stable API, production-proven. Operators tr
 ### Dependency Security Cadence
 
 - [ ] Monthly GoBGP baseline bump policy (track upstream releases, especially parser hardening like v3.35.0)
-- [ ] CVE gate in CI (fail build on known vulnerabilities in dependency tree)
-- [ ] SBOM generation (CycloneDX or SPDX, published with releases)
+- [x] CVE gate in CI (cargo audit + bun audit gate Docker publishing; fail build on known vulnerabilities)
+- [x] SBOM generation (CycloneDX JSON, published as release artifact on version tags)
 - [ ] FlowSpec NLRI parser fuzz/regression tests (protect against malformed BGP update edge cases)
 
 ### Stability (Done)
