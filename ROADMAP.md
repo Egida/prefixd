@@ -148,7 +148,7 @@ Target: Validated with real routers, stable API, production-proven. Operators tr
 ### Release Gates (must all be true before tagging v1.0.0)
 
 - [ ] Arista + Cisco XR interop scenarios pass end-to-end in lab
-- [ ] Vendor capability matrix + reference import policy docs published
+- [x] Vendor capability matrix + reference import policy docs published
 - [x] CVE gate + SBOM generation enabled in CI and green on `main`
 - [ ] Documentation accuracy review + demo video complete
 
@@ -158,8 +158,8 @@ Target: Validated with real routers, stable API, production-proven. Operators tr
 - [ ] Arista cEOS / 7xxx (EOS 4.20+) — validate FlowSpec announce/withdraw/reconcile
 - [ ] Cisco XRd / IOS-XR (ASR 9000, NCS) — known FlowSpec quirks to document
 - [x] Juniper quirks documented (FlowSpec-only AFI-SAFI, import policy, no-validate)
-- [ ] Vendor capability matrix (what works, what doesn't, per vendor)
-- [ ] Reference import policies per vendor (copy-paste ready)
+- [x] Vendor capability matrix (what works, what doesn't, per vendor) — `docs/vendors.md`
+- [x] Reference import policies per vendor (copy-paste ready) — in `docs/vendors.md` and `docs/deployment.md`
 - [ ] Graceful degradation for unsupported features
 
 ### Dependency Security Cadence

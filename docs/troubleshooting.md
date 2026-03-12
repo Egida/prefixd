@@ -14,8 +14,8 @@ prefixdctl peers
 docker compose logs -f prefixd
 journalctl -u prefixd -f
 
-# Check metrics
-curl -s localhost:9090/metrics | grep prefixd_
+# Check metrics (via nginx proxy)
+curl -s localhost/metrics | grep prefixd_
 ```
 
 ---
@@ -394,7 +394,7 @@ http:
 
 **Check metrics:**
 ```bash
-curl -s localhost:9090/metrics | grep prefixd_http_request_duration
+curl -s localhost/metrics | grep prefixd_http_request_duration
 ```
 
 **Common causes:**
