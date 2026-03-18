@@ -100,6 +100,35 @@ function isSecretField(field: string): boolean {
   return ["webhook_url", "bot_token", "routing_key", "api_key", "secret"].includes(field)
 }
 
+function DestinationEventsFilter({ dest, onChange }: { dest: DraftDestination; onChange: (d: DraftDestination) => void }) {
+  const destEvents = dest.events ?? []
+  const toggleDestEvent = (event: string) => {
+    const next = destEvents.includes(event) ? destEvents.filter((e) => e !== event) : [...destEvents, event]
+    onChange({ ...dest, events: next })
+  }
+  return (
+    <div className="mt-3 pt-3 border-t border-border/50">
+      <Label className="text-[10px] text-muted-foreground">Per-Destination Events</Label>
+      <p className="text-[10px] text-muted-foreground mb-1.5">Override global filters for this destination. Empty = uses global.</p>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+        {EVENT_TYPES.map((event) => (
+          <div key={event} className="flex items-center gap-1.5">
+            <Checkbox
+              checked={destEvents.includes(event)}
+              onCheckedChange={() => toggleDestEvent(event)}
+              id={`dest-event-${dest._id}-${event}`}
+            />
+            <Label htmlFor={`dest-event-${dest._id}-${event}`} className="text-[10px] font-mono cursor-pointer">{event}</Label>
+          </div>
+        ))}
+      </div>
+      {destEvents.length === 0 && (
+        <p className="text-[10px] text-muted-foreground/60 font-mono mt-1">Using global events</p>
+      )}
+    </div>
+  )
+}
+
 function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange: (d: DraftDestination) => void }) {
   const update = (field: string, value: string) => onChange({ ...dest, [field]: value })
 
@@ -227,6 +256,9 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
           </div>
         </>
       )}
+      <div className="sm:col-span-2">
+        <DestinationEventsFilter dest={dest} onChange={onChange} />
+      </div>
     </div>
   )
 }
@@ -234,23 +266,32 @@ function DestinationForm({ dest, onChange }: { dest: DraftDestination; onChange:
 function ReadOnlyDestCard({ dest, testResult }: { dest: AlertingDestination; testResult?: AlertingTestResult }) {
   const summary = destSummary(dest)
   return (
-    <div className="flex items-center gap-3 bg-secondary/50 px-3 py-2.5">
-      <span className={cn("shrink-0 flex items-center justify-center h-6 w-8 text-[10px] font-bold font-mono", DEST_COLORS[dest.type] || DEST_COLORS.generic)}>
-        {DEST_ICONS[dest.type] || "?"}
-      </span>
-      <div className="flex-1 min-w-0">
-        <span className="text-xs font-mono font-medium">{DEST_LABELS[dest.type as DestType] ?? dest.type}</span>
-        {summary ? <span className="text-xs font-mono text-muted-foreground ml-2">{summary}</span> : null}
+    <div className="bg-secondary/50 px-3 py-2.5">
+      <div className="flex items-center gap-3">
+        <span className={cn("shrink-0 flex items-center justify-center h-6 w-8 text-[10px] font-bold font-mono", DEST_COLORS[dest.type] || DEST_COLORS.generic)}>
+          {DEST_ICONS[dest.type] || "?"}
+        </span>
+        <div className="flex-1 min-w-0">
+          <span className="text-xs font-mono font-medium">{DEST_LABELS[dest.type as DestType] ?? dest.type}</span>
+          {summary ? <span className="text-xs font-mono text-muted-foreground ml-2">{summary}</span> : null}
+        </div>
+        {testResult && (
+          testResult.status === "ok" ? (
+            <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
+          ) : (
+            <div className="flex items-center gap-1 shrink-0">
+              <XCircle className="h-4 w-4 text-destructive" />
+              {testResult.error ? <span className="text-[10px] text-destructive font-mono max-w-[150px] truncate">{testResult.error}</span> : null}
+            </div>
+          )
+        )}
       </div>
-      {testResult && (
-        testResult.status === "ok" ? (
-          <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
-        ) : (
-          <div className="flex items-center gap-1 shrink-0">
-            <XCircle className="h-4 w-4 text-destructive" />
-            {testResult.error ? <span className="text-[10px] text-destructive font-mono max-w-[150px] truncate">{testResult.error}</span> : null}
-          </div>
-        )
+      {dest.events && dest.events.length > 0 && (
+        <div className="flex flex-wrap gap-1 mt-1.5 ml-11">
+          {dest.events.map((e) => (
+            <Badge key={e} variant="outline" className="text-[9px] font-mono py-0">{e}</Badge>
+          ))}
+        </div>
       )}
     </div>
   )

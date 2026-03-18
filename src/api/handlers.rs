@@ -16,7 +16,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::db::ListParams;
+use crate::db::{ListParams, NotificationPreferences};
 use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackEventInput, FlowSpecAction, FlowSpecNlri,
     FlowSpecRule, MatchCriteria, Mitigation, MitigationIntent, MitigationStatus,
@@ -25,7 +25,7 @@ use crate::error::PrefixdError;
 use crate::guardrails::Guardrails;
 use crate::policy::PolicyEngine;
 
-use super::auth::require_auth;
+use super::auth::{require_auth, require_role};
 use crate::auth::AuthSession;
 
 fn encode_cursor(ts: &DateTime<Utc>) -> String {
@@ -2838,4 +2838,98 @@ pub async fn test_alerting(
         .collect();
 
     Ok(Json(serde_json::json!({ "results": outcomes })))
+}
+
+// ---------------------------------------------------------------------------
+// Notification preferences
+// ---------------------------------------------------------------------------
+
+#[utoipa::path(
+    get,
+    path = "/v1/preferences",
+    responses(
+        (status = 200, description = "Notification preferences", body = NotificationPreferences),
+        (status = 401, description = "Unauthorized"),
+    ),
+    tag = "preferences"
+)]
+pub async fn get_notification_preferences(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+) -> Result<Json<NotificationPreferences>, StatusCode> {
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    let operator = require_role(
+        &state,
+        &auth_session,
+        auth_header,
+        crate::domain::OperatorRole::Viewer,
+    )?;
+
+    let prefs = state
+        .repo
+        .get_notification_preferences(operator.operator_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .unwrap_or_default();
+
+    Ok(Json(prefs))
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/preferences",
+    request_body = NotificationPreferences,
+    responses(
+        (status = 200, description = "Preferences updated"),
+        (status = 400, description = "Invalid preferences"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    tag = "preferences"
+)]
+pub async fn update_notification_preferences(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+    Json(prefs): Json<NotificationPreferences>,
+) -> Result<StatusCode, StatusCode> {
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    let operator = require_role(
+        &state,
+        &auth_session,
+        auth_header,
+        crate::domain::OperatorRole::Viewer,
+    )?;
+
+    if let Some(start) = prefs.quiet_hours_start {
+        if !(0..=23).contains(&start) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    if let Some(end) = prefs.quiet_hours_end {
+        if !(0..=23).contains(&end) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+    let valid_events = [
+        "mitigation.created",
+        "mitigation.escalated",
+        "mitigation.withdrawn",
+        "mitigation.expired",
+        "config.reloaded",
+        "guardrail.rejected",
+    ];
+    for evt in &prefs.muted_events {
+        if !valid_events.contains(&evt.as_str()) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    state
+        .repo
+        .upsert_notification_preferences(operator.operator_id, &prefs)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::OK)
 }

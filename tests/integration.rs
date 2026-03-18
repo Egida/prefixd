@@ -1410,3 +1410,119 @@ async fn test_bulk_acknowledge_mitigations() {
     assert_eq!(json["acknowledged"], 0);
     assert_eq!(json["failed"], 1);
 }
+
+// ---------------------------------------------------------------------------
+// Per-destination event routing
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_alerting_config_per_destination_events_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let alerting_path = dir.path().join("alerting.yaml");
+    std::fs::write(
+        &alerting_path,
+        r#"
+destinations:
+  - type: generic
+    url: "https://example.com/all"
+  - type: generic
+    url: "https://example.com/critical"
+    events:
+      - mitigation.created
+      - mitigation.escalated
+events:
+  - mitigation.created
+  - mitigation.withdrawn
+"#,
+    )
+    .unwrap();
+
+    let config = prefixd::alerting::AlertingConfig::load(&alerting_path).unwrap();
+    assert_eq!(config.destinations.len(), 2);
+
+    // First dest has no per-destination events
+    assert!(config.destinations[0].events().is_empty());
+    // Second dest has per-destination events
+    assert_eq!(config.destinations[1].events().len(), 2);
+
+    // Save and reload
+    config.save(&alerting_path).unwrap();
+    let reloaded = prefixd::alerting::AlertingConfig::load(&alerting_path).unwrap();
+    assert_eq!(reloaded.destinations[1].events().len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// Notification preferences API
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_notification_preferences_get_default() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/preferences")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["muted_events"], serde_json::json!([]));
+    assert_eq!(json["quiet_hours_start"], serde_json::Value::Null);
+    assert_eq!(json["quiet_hours_end"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn test_notification_preferences_put_invalid_hour() {
+    let app = setup_app().await;
+
+    let body = serde_json::json!({
+        "muted_events": [],
+        "quiet_hours_start": 25,
+        "quiet_hours_end": 8,
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/preferences")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_notification_preferences_put_invalid_event() {
+    let app = setup_app().await;
+
+    let body = serde_json::json!({
+        "muted_events": ["not.a.real.event"],
+        "quiet_hours_start": null,
+        "quiet_hours_end": null,
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/preferences")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}

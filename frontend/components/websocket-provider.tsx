@@ -1,9 +1,10 @@
 "use client"
 
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from "react"
-import { useSWRConfig } from "swr"
+import useSWR, { useSWRConfig } from "swr"
 import { toast } from "sonner"
 import { WsMessage, WsMessageType, ConnectionState } from "@/hooks/use-websocket-types"
+import type { NotificationPreferences } from "@/lib/api"
 
 function getWsBase(): string {
   if (typeof window === "undefined") return "ws://127.0.0.1"
@@ -19,6 +20,32 @@ interface WebSocketContextValue {
   isConnected: boolean
 }
 
+const CRITICAL_EVENTS = new Set(["mitigation.created", "mitigation.escalated"])
+
+const WS_TO_ALERT_EVENT: Record<string, string> = {
+  MitigationCreated: "mitigation.created",
+  MitigationUpdated: "mitigation.escalated",
+  MitigationWithdrawn: "mitigation.withdrawn",
+  MitigationExpired: "mitigation.expired",
+  ResyncRequired: "config.reloaded",
+  EventIngested: "mitigation.created",
+}
+
+function shouldShowToast(wsType: string, prefs: NotificationPreferences | undefined): boolean {
+  if (!prefs) return true
+  const alertEvent = WS_TO_ALERT_EVENT[wsType]
+  if (!alertEvent) return true
+  if (prefs.muted_events.includes(alertEvent)) return false
+  if (prefs.quiet_hours_start !== null && prefs.quiet_hours_end !== null) {
+    const now = new Date().getUTCHours()
+    const start = prefs.quiet_hours_start
+    const end = prefs.quiet_hours_end
+    const inQuiet = start <= end ? (now >= start && now < end) : (now >= start || now < end)
+    if (inQuiet && !CRITICAL_EVENTS.has(alertEvent)) return false
+  }
+  return true
+}
+
 const WebSocketContext = createContext<WebSocketContextValue | null>(null)
 
 export function WebSocketProvider({ children }: { children: React.ReactNode }) {
@@ -31,6 +58,9 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
   const reconnectAttemptsRef = useRef(0)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const { mutate } = useSWRConfig()
+  const { data: notifPrefs } = useSWR<NotificationPreferences>("notification-preferences")
+  const notifPrefsRef = useRef(notifPrefs)
+  useEffect(() => { notifPrefsRef.current = notifPrefs }, [notifPrefs])
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -53,10 +83,13 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
           const message: WsMessage = JSON.parse(event.data)
           setLastMessage(message)
 
+          const prefs = notifPrefsRef.current
+          const showToast = shouldShowToast(message.type, prefs)
+
           // Handle ResyncRequired by invalidating SWR caches
           if (message.type === "ResyncRequired") {
             mutate(() => true) // Revalidate all keys
-            toast.info("Configuration reloaded from disk")
+            if (showToast) toast.info("Configuration reloaded from disk")
           }
 
           // Invalidate relevant caches based on message type
@@ -67,23 +100,25 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
             message.type === "MitigationExpired" ||
             message.type === "MitigationWithdrawn"
           ) {
-            // Toast notifications
-            if (message.type === "MitigationCreated" && message.mitigation) {
-              toast.error(`Mitigation Created: ${message.mitigation.victim_ip}`, {
-                description: `${message.mitigation.vector} • Action: ${message.mitigation.action_type}`
-              })
-            } else if (message.type === "MitigationUpdated" && message.mitigation) {
-              toast.warning(`Mitigation Escalated: ${message.mitigation.victim_ip}`, {
-                description: `${message.mitigation.vector} • New Action: ${message.mitigation.action_type}`
-              })
-            } else if (message.type === "MitigationWithdrawn" && message.mitigation_id) {
-              toast.success(`Mitigation Withdrawn`, {
-                description: `ID: ${message.mitigation_id.split("-")[0]}...`
-              })
-            } else if (message.type === "MitigationExpired" && message.mitigation_id) {
-              toast.info(`Mitigation Expired`, {
-                description: `ID: ${message.mitigation_id.split("-")[0]}...`
-              })
+            // Toast notifications (filtered by preferences)
+            if (showToast) {
+              if (message.type === "MitigationCreated" && message.mitigation) {
+                toast.error(`Mitigation Created: ${message.mitigation.victim_ip}`, {
+                  description: `${message.mitigation.vector} • Action: ${message.mitigation.action_type}`
+                })
+              } else if (message.type === "MitigationUpdated" && message.mitigation) {
+                toast.warning(`Mitigation Escalated: ${message.mitigation.victim_ip}`, {
+                  description: `${message.mitigation.vector} • New Action: ${message.mitigation.action_type}`
+                })
+              } else if (message.type === "MitigationWithdrawn" && message.mitigation_id) {
+                toast.success(`Mitigation Withdrawn`, {
+                  description: `ID: ${message.mitigation_id.split("-")[0]}...`
+                })
+              } else if (message.type === "MitigationExpired" && message.mitigation_id) {
+                toast.info(`Mitigation Expired`, {
+                  description: `ID: ${message.mitigation_id.split("-")[0]}...`
+                })
+              }
             }
 
             // Invalidate all mitigation-related keys (including those with params)

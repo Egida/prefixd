@@ -863,11 +863,15 @@ Returns configured alert destinations with secrets redacted.
     {
       "type": "pagerduty",
       "routing_key": "***",
-      "events_url": "https://events.pagerduty.com/v2/enqueue"
+      "events_url": "https://events.pagerduty.com/v2/enqueue",
+      "events": ["mitigation.created"]
     }
   ],
   "events": ["mitigation.created", "mitigation.escalated"]
 }
+```
+
+**Per-destination events:** Each destination may include an optional `events` array to override the global event filter. If present, only those event types are sent to that destination. If absent or empty, the destination inherits the global `events` list. See ADR 017.
 ```
 
 ### Update Alerting Config
@@ -1093,6 +1097,45 @@ Some handlers intentionally return status-only errors (no JSON body), especially
 | 429 | Too many requests (includes `retry_after_seconds`) |
 | 500 | Internal server error |
 | 503 | Service unavailable |
+
+### Notification Preferences
+
+```http
+GET /v1/preferences
+Authorization: Bearer <token>
+```
+
+Returns the current operator's notification preferences. Defaults to all toasts enabled, no quiet hours.
+
+**Response:**
+
+```json
+{
+  "muted_events": ["mitigation.expired", "config.reloaded"],
+  "quiet_hours_start": 2,
+  "quiet_hours_end": 8
+}
+```
+
+### Update Notification Preferences
+
+```http
+PUT /v1/preferences
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "muted_events": ["mitigation.expired"],
+  "quiet_hours_start": null,
+  "quiet_hours_end": null
+}
+```
+
+Updates the current operator's notification preferences. `muted_events` contains event type strings that should not produce dashboard toast notifications. `quiet_hours_start`/`quiet_hours_end` are UTC hours (0-23); during quiet hours, only critical events (`mitigation.created`, `mitigation.escalated`) produce toasts. Set both to `null` to disable quiet hours.
+
+**Validation:**
+- `quiet_hours_start`/`quiet_hours_end` must be 0-23 if present
+- `muted_events` entries must be valid event types (`mitigation.created`, `mitigation.escalated`, `mitigation.withdrawn`, `mitigation.expired`, `config.reloaded`, `guardrail.rejected`)
 
 ---
 

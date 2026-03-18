@@ -223,8 +223,8 @@ Target: Quality-of-life for operators during active incidents. These are the fea
 
 ### Notification Tuning
 
-- [ ] **Notification preferences** — Mute/filter WebSocket toasts, quiet hours (reduce alert fatigue)
-- [ ] **Per-destination event routing** — Route different event types to different alerting destinations
+- [x] **Notification preferences** — Mute/filter WebSocket toasts, quiet hours (reduce alert fatigue) — ADR 017, migration 006
+- [x] **Per-destination event routing** — Route different event types to different alerting destinations — ADR 017
 
 ### Pagination + Performance
 

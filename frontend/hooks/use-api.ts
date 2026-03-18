@@ -238,3 +238,13 @@ export function useIpHistory(ip: string | null) {
     }
   )
 }
+
+export function useNotificationPreferences() {
+  return useSWR(
+    "notification-preferences",
+    MOCK_MODE
+      ? async () => ({ muted_events: [], quiet_hours_start: null, quiet_hours_end: null })
+      : api.getNotificationPreferences,
+    { refreshInterval: 0, revalidateOnFocus: !MOCK_MODE }
+  )
+}

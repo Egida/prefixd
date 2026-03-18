@@ -577,6 +577,7 @@ export interface AlertingDestination {
   url?: string
   secret?: string
   headers?: Record<string, string>
+  events?: string[]
 }
 
 export interface AlertingConfigResponse {
@@ -619,4 +620,23 @@ export async function getIpHistory(ip: string, limit?: number): Promise<IpHistor
   if (limit) searchParams.set("limit", limit.toString())
   const query = searchParams.toString()
   return fetchApi<IpHistoryResponse>(`/v1/ip/${encodeURIComponent(ip)}/history${query ? `?${query}` : ""}`)
+}
+
+// Notification preferences
+
+export interface NotificationPreferences {
+  muted_events: string[]
+  quiet_hours_start: number | null
+  quiet_hours_end: number | null
+}
+
+export async function getNotificationPreferences(): Promise<NotificationPreferences> {
+  return fetchApi<NotificationPreferences>("/v1/preferences")
+}
+
+export async function updateNotificationPreferences(prefs: NotificationPreferences): Promise<void> {
+  await fetchApi<void>("/v1/preferences", {
+    method: "PUT",
+    body: JSON.stringify(prefs),
+  })
 }

@@ -237,26 +237,38 @@ pub enum DestinationConfig {
         webhook_url: String,
         #[serde(default)]
         channel: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<AlertEventType>,
     },
     Discord {
         webhook_url: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<AlertEventType>,
     },
     Teams {
         webhook_url: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<AlertEventType>,
     },
     Telegram {
         bot_token: String,
         chat_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<AlertEventType>,
     },
     Pagerduty {
         routing_key: String,
         #[serde(default = "default_pagerduty_url")]
         events_url: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<AlertEventType>,
     },
     Opsgenie {
         api_key: String,
         #[serde(default = "default_opsgenie_region")]
         region: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<AlertEventType>,
     },
     Generic {
         url: String,
@@ -264,6 +276,8 @@ pub enum DestinationConfig {
         secret: Option<String>,
         #[serde(default)]
         headers: HashMap<String, String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        events: Vec<AlertEventType>,
     },
 }
 
@@ -288,9 +302,27 @@ impl DestinationConfig {
         }
     }
 
+    pub fn events(&self) -> &[AlertEventType] {
+        match self {
+            Self::Slack { events, .. }
+            | Self::Discord { events, .. }
+            | Self::Teams { events, .. }
+            | Self::Telegram { events, .. }
+            | Self::Pagerduty { events, .. }
+            | Self::Opsgenie { events, .. }
+            | Self::Generic { events, .. } => events,
+        }
+    }
+
     /// Return a redacted copy for API exposure
     pub fn redacted(&self) -> serde_json::Value {
-        match self {
+        let events = self.events();
+        let events_value: serde_json::Value = if events.is_empty() {
+            serde_json::Value::Array(vec![])
+        } else {
+            serde_json::to_value(events).unwrap_or_default()
+        };
+        let mut obj = match self {
             Self::Slack { channel, .. } => serde_json::json!({
                 "type": "slack",
                 "webhook_url": "***",
@@ -332,7 +364,11 @@ impl DestinationConfig {
                     "headers": redacted_headers,
                 })
             }
+        };
+        if !events.is_empty() {
+            obj["events"] = events_value;
         }
+        obj
     }
 }
 
@@ -425,7 +461,7 @@ impl AlertingConfig {
                         validate_destination_url(webhook_url, "webhook_url", &ctx, &mut errors);
                     }
                 }
-                DestinationConfig::Discord { webhook_url } => {
+                DestinationConfig::Discord { webhook_url, .. } => {
                     if webhook_url.is_empty() || webhook_url == REDACTED {
                         errors.push(format!("{}: webhook_url is required", ctx));
                     } else if webhook_url.len() > 1024 {
@@ -434,7 +470,7 @@ impl AlertingConfig {
                         validate_destination_url(webhook_url, "webhook_url", &ctx, &mut errors);
                     }
                 }
-                DestinationConfig::Teams { webhook_url } => {
+                DestinationConfig::Teams { webhook_url, .. } => {
                     if webhook_url.is_empty() || webhook_url == REDACTED {
                         errors.push(format!("{}: webhook_url is required", ctx));
                     } else if webhook_url.len() > 1024 {
@@ -443,7 +479,9 @@ impl AlertingConfig {
                         validate_destination_url(webhook_url, "webhook_url", &ctx, &mut errors);
                     }
                 }
-                DestinationConfig::Telegram { bot_token, chat_id } => {
+                DestinationConfig::Telegram {
+                    bot_token, chat_id, ..
+                } => {
                     if bot_token.is_empty() || bot_token == REDACTED {
                         errors.push(format!("{}: bot_token is required", ctx));
                     }
@@ -456,6 +494,7 @@ impl AlertingConfig {
                 DestinationConfig::Pagerduty {
                     routing_key,
                     events_url,
+                    ..
                 } => {
                     if routing_key.is_empty() || routing_key == REDACTED {
                         errors.push(format!("{}: routing_key is required", ctx));
@@ -468,7 +507,9 @@ impl AlertingConfig {
                         validate_destination_url(events_url, "events_url", &ctx, &mut errors);
                     }
                 }
-                DestinationConfig::Opsgenie { api_key, region } => {
+                DestinationConfig::Opsgenie {
+                    api_key, region, ..
+                } => {
                     if api_key.is_empty() || api_key == REDACTED {
                         errors.push(format!("{}: api_key is required", ctx));
                     }
@@ -502,6 +543,7 @@ impl AlertingConfig {
                 DestinationConfig::Slack {
                     webhook_url,
                     channel,
+                    ..
                 } => {
                     if webhook_url.as_str() == REDACTED {
                         let channel_match = channel.clone();
@@ -512,6 +554,7 @@ impl AlertingConfig {
                                 DestinationConfig::Slack {
                                     webhook_url: u,
                                     channel: existing_channel,
+                                    ..
                                 } => {
                                     if channel_match.is_some() && channel_match == *existing_channel
                                     {
@@ -551,13 +594,15 @@ impl AlertingConfig {
                         }
                     }
                 }
-                DestinationConfig::Discord { webhook_url } => {
+                DestinationConfig::Discord { webhook_url, .. } => {
                     if webhook_url.as_str() == REDACTED {
                         let matches: Vec<String> = current
                             .destinations
                             .iter()
                             .filter_map(|d| match d {
-                                DestinationConfig::Discord { webhook_url: u } => Some(u.clone()),
+                                DestinationConfig::Discord { webhook_url: u, .. } => {
+                                    Some(u.clone())
+                                }
                                 _ => None,
                             })
                             .collect();
@@ -574,13 +619,13 @@ impl AlertingConfig {
                         }
                     }
                 }
-                DestinationConfig::Teams { webhook_url } => {
+                DestinationConfig::Teams { webhook_url, .. } => {
                     if webhook_url.as_str() == REDACTED {
                         let matches: Vec<String> = current
                             .destinations
                             .iter()
                             .filter_map(|d| match d {
-                                DestinationConfig::Teams { webhook_url: u } => Some(u.clone()),
+                                DestinationConfig::Teams { webhook_url: u, .. } => Some(u.clone()),
                                 _ => None,
                             })
                             .collect();
@@ -597,7 +642,9 @@ impl AlertingConfig {
                         }
                     }
                 }
-                DestinationConfig::Telegram { bot_token, chat_id } => {
+                DestinationConfig::Telegram {
+                    bot_token, chat_id, ..
+                } => {
                     if bot_token.as_str() == REDACTED {
                         let cid = chat_id.clone();
                         let matches: Vec<String> = current
@@ -607,6 +654,7 @@ impl AlertingConfig {
                                 DestinationConfig::Telegram {
                                     bot_token: t,
                                     chat_id: c,
+                                    ..
                                 } if c == &cid => Some(t.clone()),
                                 _ => None,
                             })
@@ -627,6 +675,7 @@ impl AlertingConfig {
                 DestinationConfig::Pagerduty {
                     routing_key,
                     events_url,
+                    ..
                 } => {
                     if routing_key.as_str() == REDACTED {
                         let eu = events_url.clone();
@@ -637,6 +686,7 @@ impl AlertingConfig {
                                 DestinationConfig::Pagerduty {
                                     routing_key: k,
                                     events_url: e,
+                                    ..
                                 } if e == &eu => Some(k.clone()),
                                 _ => None,
                             })
@@ -654,7 +704,9 @@ impl AlertingConfig {
                         }
                     }
                 }
-                DestinationConfig::Opsgenie { api_key, region } => {
+                DestinationConfig::Opsgenie {
+                    api_key, region, ..
+                } => {
                     if api_key.as_str() == REDACTED {
                         let r = region.clone();
                         let matches: Vec<String> = current
@@ -664,6 +716,7 @@ impl AlertingConfig {
                                 DestinationConfig::Opsgenie {
                                     api_key: k,
                                     region: reg,
+                                    ..
                                 } if reg == &r => Some(k.clone()),
                                 _ => None,
                             })
@@ -802,7 +855,7 @@ impl AlertingService {
 
     /// Fire an alert to all destinations (non-blocking, spawns background tasks)
     pub fn notify(self: &Arc<Self>, alert: Alert) {
-        if !self.config.destinations.is_empty() && self.should_send(&alert.event_type) {
+        if !self.config.destinations.is_empty() && self.has_any_recipient(&alert.event_type) {
             let permit = match Arc::clone(&self.in_flight).try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => {
@@ -821,14 +874,28 @@ impl AlertingService {
         }
     }
 
-    fn should_send(&self, event_type: &AlertEventType) -> bool {
+    fn should_send(&self, dest: &DestinationConfig, event_type: &AlertEventType) -> bool {
+        let dest_events = dest.events();
+        if !dest_events.is_empty() {
+            return dest_events.contains(event_type);
+        }
         self.config.events.is_empty() || self.config.events.contains(event_type)
+    }
+
+    fn has_any_recipient(&self, event_type: &AlertEventType) -> bool {
+        self.config
+            .destinations
+            .iter()
+            .any(|d| self.should_send(d, event_type))
     }
 
     /// Send to all destinations, collecting results
     pub async fn dispatch(&self, alert: &Alert) -> Vec<(String, Result<(), String>)> {
         let mut results = Vec::new();
         for dest in &self.config.destinations {
+            if !self.should_send(dest, &alert.event_type) {
+                continue;
+            }
             let dest_type = dest.destination_type().to_string();
             let result = self.send_with_retry(dest, alert).await;
             let status = if result.is_ok() { "success" } else { "error" };
@@ -871,27 +938,30 @@ impl AlertingService {
             DestinationConfig::Slack {
                 webhook_url,
                 channel,
+                ..
             } => slack::send(&self.http_client, webhook_url, channel.as_deref(), alert).await,
-            DestinationConfig::Discord { webhook_url } => {
+            DestinationConfig::Discord { webhook_url, .. } => {
                 discord::send(&self.http_client, webhook_url, alert).await
             }
-            DestinationConfig::Teams { webhook_url } => {
+            DestinationConfig::Teams { webhook_url, .. } => {
                 teams::send(&self.http_client, webhook_url, alert).await
             }
-            DestinationConfig::Telegram { bot_token, chat_id } => {
-                telegram::send(&self.http_client, bot_token, chat_id, alert).await
-            }
+            DestinationConfig::Telegram {
+                bot_token, chat_id, ..
+            } => telegram::send(&self.http_client, bot_token, chat_id, alert).await,
             DestinationConfig::Pagerduty {
                 routing_key,
                 events_url,
+                ..
             } => pagerduty::send(&self.http_client, events_url, routing_key, alert).await,
-            DestinationConfig::Opsgenie { api_key, region } => {
-                opsgenie::send(&self.http_client, api_key, region, alert).await
-            }
+            DestinationConfig::Opsgenie {
+                api_key, region, ..
+            } => opsgenie::send(&self.http_client, api_key, region, alert).await,
             DestinationConfig::Generic {
                 url,
                 secret,
                 headers,
+                ..
             } => generic::send(&self.http_client, url, secret.as_deref(), headers, alert).await,
         }
     }
@@ -923,14 +993,23 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_should_send_empty_filter() {
-        let svc = AlertingService::default();
-        assert!(svc.should_send(&AlertEventType::MitigationCreated));
+    fn test_dest() -> DestinationConfig {
+        DestinationConfig::Slack {
+            webhook_url: "https://hooks.slack.com/test".into(),
+            channel: None,
+            events: vec![],
+        }
     }
 
     #[test]
-    fn test_should_send_filtered() {
+    fn test_should_send_empty_filter() {
+        let svc = AlertingService::default();
+        let dest = test_dest();
+        assert!(svc.should_send(&dest, &AlertEventType::MitigationCreated));
+    }
+
+    #[test]
+    fn test_should_send_global_filter() {
         let config = AlertingConfig {
             destinations: vec![],
             events: vec![AlertEventType::MitigationCreated],
@@ -940,8 +1019,50 @@ mod tests {
             http_client: reqwest::Client::new(),
             in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT_ALERT_TASKS)),
         };
-        assert!(svc.should_send(&AlertEventType::MitigationCreated));
-        assert!(!svc.should_send(&AlertEventType::MitigationExpired));
+        let dest = test_dest();
+        assert!(svc.should_send(&dest, &AlertEventType::MitigationCreated));
+        assert!(!svc.should_send(&dest, &AlertEventType::MitigationExpired));
+    }
+
+    #[test]
+    fn test_should_send_per_destination_override() {
+        let config = AlertingConfig {
+            destinations: vec![],
+            events: vec![
+                AlertEventType::MitigationCreated,
+                AlertEventType::MitigationExpired,
+            ],
+        };
+        let svc = AlertingService {
+            config,
+            http_client: reqwest::Client::new(),
+            in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT_ALERT_TASKS)),
+        };
+        // Dest overrides global: only escalated
+        let dest = DestinationConfig::Slack {
+            webhook_url: "https://hooks.slack.com/test".into(),
+            channel: None,
+            events: vec![AlertEventType::MitigationEscalated],
+        };
+        assert!(!svc.should_send(&dest, &AlertEventType::MitigationCreated));
+        assert!(svc.should_send(&dest, &AlertEventType::MitigationEscalated));
+        assert!(!svc.should_send(&dest, &AlertEventType::MitigationExpired));
+    }
+
+    #[test]
+    fn test_should_send_dest_empty_inherits_global() {
+        let config = AlertingConfig {
+            destinations: vec![],
+            events: vec![AlertEventType::MitigationCreated],
+        };
+        let svc = AlertingService {
+            config,
+            http_client: reqwest::Client::new(),
+            in_flight: Arc::new(Semaphore::new(MAX_IN_FLIGHT_ALERT_TASKS)),
+        };
+        let dest = test_dest(); // events: vec![] -> inherits global
+        assert!(svc.should_send(&dest, &AlertEventType::MitigationCreated));
+        assert!(!svc.should_send(&dest, &AlertEventType::MitigationExpired));
     }
 
     #[test]
@@ -949,6 +1070,7 @@ mod tests {
         let dest = DestinationConfig::Slack {
             webhook_url: "https://hooks.slack.com/secret".into(),
             channel: Some("#alerts".into()),
+            events: vec![],
         };
         let redacted = dest.redacted();
         assert_eq!(redacted["webhook_url"], "***");
@@ -975,6 +1097,7 @@ mod tests {
             destinations: vec![DestinationConfig::Slack {
                 webhook_url: "".into(),
                 channel: None,
+                events: vec![],
             }],
             events: vec![],
         };
@@ -988,6 +1111,7 @@ mod tests {
         let config = AlertingConfig {
             destinations: vec![DestinationConfig::Discord {
                 webhook_url: "***".into(),
+                events: vec![],
             }],
             events: vec![],
         };
@@ -1001,6 +1125,7 @@ mod tests {
             destinations: vec![DestinationConfig::Telegram {
                 bot_token: "".into(),
                 chat_id: "".into(),
+                events: vec![],
             }],
             events: vec![],
         };
@@ -1014,6 +1139,7 @@ mod tests {
             destinations: vec![DestinationConfig::Opsgenie {
                 api_key: "key123".into(),
                 region: "ap".into(),
+                events: vec![],
             }],
             events: vec![],
         };
@@ -1027,6 +1153,7 @@ mod tests {
             destinations: vec![DestinationConfig::Slack {
                 webhook_url: "http://example.com/hook".into(),
                 channel: None,
+                events: vec![],
             }],
             events: vec![],
         };
@@ -1041,6 +1168,7 @@ mod tests {
                 url: "https://169.254.169.254/latest/meta-data".into(),
                 secret: None,
                 headers: HashMap::new(),
+                events: vec![],
             }],
             events: vec![],
         };
@@ -1054,6 +1182,7 @@ mod tests {
             destinations: vec![DestinationConfig::Slack {
                 webhook_url: "https://hooks.slack.com/real-secret".into(),
                 channel: Some("#alerts".into()),
+                events: vec![],
             }],
             events: vec![],
         };
@@ -1061,6 +1190,7 @@ mod tests {
             destinations: vec![DestinationConfig::Slack {
                 webhook_url: "***".into(),
                 channel: Some("#new-channel".into()),
+                events: vec![],
             }],
             events: vec![],
         };
@@ -1069,6 +1199,7 @@ mod tests {
         if let DestinationConfig::Slack {
             webhook_url,
             channel,
+            ..
         } = &incoming.destinations[0]
         {
             assert_eq!(webhook_url, "https://hooks.slack.com/real-secret");
@@ -1084,6 +1215,7 @@ mod tests {
         let mut incoming = AlertingConfig {
             destinations: vec![DestinationConfig::Discord {
                 webhook_url: "***".into(),
+                events: vec![],
             }],
             events: vec![],
         };
@@ -1099,6 +1231,7 @@ mod tests {
                 url: "https://example.com/hook".into(),
                 secret: Some("real-secret".into()),
                 headers: HashMap::new(),
+                events: vec![],
             }],
             events: vec![],
         };
@@ -1107,6 +1240,7 @@ mod tests {
                 url: "https://example.com/hook".into(),
                 secret: Some("***".into()),
                 headers: HashMap::new(),
+                events: vec![],
             }],
             events: vec![],
         };
@@ -1123,9 +1257,11 @@ mod tests {
             destinations: vec![
                 DestinationConfig::Discord {
                     webhook_url: "https://discord.com/api/webhooks/one".into(),
+                    events: vec![],
                 },
                 DestinationConfig::Discord {
                     webhook_url: "https://discord.com/api/webhooks/two".into(),
+                    events: vec![],
                 },
             ],
             events: vec![],
@@ -1133,6 +1269,7 @@ mod tests {
         let mut incoming = AlertingConfig {
             destinations: vec![DestinationConfig::Discord {
                 webhook_url: "***".into(),
+                events: vec![],
             }],
             events: vec![],
         };
@@ -1147,11 +1284,13 @@ mod tests {
                 DestinationConfig::Slack {
                     webhook_url: "https://hooks.slack.com/test".into(),
                     channel: Some("#test".into()),
+                    events: vec![],
                 },
                 DestinationConfig::Generic {
                     url: "https://example.com".into(),
                     secret: None,
                     headers: HashMap::new(),
+                    events: vec![],
                 },
             ],
             events: vec![AlertEventType::MitigationCreated],
@@ -1177,6 +1316,7 @@ mod tests {
             url: "https://example.invalid/webhook".to_string(),
             secret: Some("super-secret".to_string()),
             headers,
+            events: vec![],
         };
 
         let redacted = dest.redacted();

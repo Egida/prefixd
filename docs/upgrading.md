@@ -139,6 +139,9 @@ prefixdctl migrations
 - **New dependency:** `base64` crate added for cursor encoding.
 - **Frontend:** API hooks now return response objects (`{mitigations, count, next_cursor, has_more}`) instead of bare arrays. If you have custom frontend code consuming these hooks, update accordingly.
 - **prefixdctl:** If you have scripts using `--offset`, they need to be updated to use `--cursor` or omit for the first page.
+- **New migration (006):** Adds `notification_preferences` table for per-operator toast settings. Runs automatically. FK to `operators` table.
+- **Per-destination event routing:** Alerting destinations now accept an optional `events` array to override the global event filter. Existing configs without per-destination events are unaffected (backward-compatible, see ADR 017).
+- **New endpoint:** `GET/PUT /v1/preferences` for notification preferences (muted events, quiet hours).
 - No config file changes required.
 
 ### v0.10.1 -> v0.11.0

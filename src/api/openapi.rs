@@ -6,7 +6,7 @@ use super::handlers::{
     EventsListResponse, HealthResponse, IpHistoryResponse, MitigationResponse,
     MitigationsListResponse, PublicHealthResponse, ReloadResponse, TimeseriesResponse,
 };
-use crate::db::{GlobalStats, PopInfo, PopStats, SafelistEntry};
+use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, SafelistEntry};
 
 #[derive(OpenApi)]
 #[openapi(
@@ -41,6 +41,8 @@ use crate::db::{GlobalStats, PopInfo, PopStats, SafelistEntry};
         super::handlers::test_alerting,
         super::handlers::get_timeseries,
         super::handlers::get_ip_history,
+        super::handlers::get_notification_preferences,
+        super::handlers::update_notification_preferences,
     ),
     components(
         schemas(
@@ -66,6 +68,7 @@ use crate::db::{GlobalStats, PopInfo, PopStats, SafelistEntry};
             EventsListResponse,
             AuditListResponse,
             crate::db::TimeseriesBucket,
+            NotificationPreferences,
         )
     ),
     tags(
@@ -77,6 +80,7 @@ use crate::db::{GlobalStats, PopInfo, PopStats, SafelistEntry};
         (name = "multi-pop", description = "Multi-POP coordination"),
         (name = "stats", description = "Statistics and timeseries"),
         (name = "ip-history", description = "IP history and context"),
+        (name = "preferences", description = "Notification preferences"),
     )
 )]
 pub struct ApiDoc;

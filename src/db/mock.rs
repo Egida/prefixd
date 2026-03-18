@@ -4,7 +4,8 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 use super::{
-    GlobalStats, ListParams, PopInfo, PopStats, RepositoryTrait, SafelistEntry, TimeseriesBucket,
+    GlobalStats, ListParams, NotificationPreferences, PopInfo, PopStats, RepositoryTrait,
+    SafelistEntry, TimeseriesBucket,
 };
 use crate::domain::{AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole};
 use crate::error::Result;
@@ -507,5 +508,20 @@ impl RepositoryTrait for MockRepository {
 
     async fn list_operators(&self) -> Result<Vec<Operator>> {
         Ok(self.operators.lock().unwrap().clone())
+    }
+
+    async fn get_notification_preferences(
+        &self,
+        _operator_id: Uuid,
+    ) -> Result<Option<NotificationPreferences>> {
+        Ok(None)
+    }
+
+    async fn upsert_notification_preferences(
+        &self,
+        _operator_id: Uuid,
+        _prefs: &NotificationPreferences,
+    ) -> Result<()> {
+        Ok(())
     }
 }

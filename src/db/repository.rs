@@ -4,7 +4,7 @@ use serde::Serialize;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use super::{ListParams, RepositoryTrait};
+use super::{ListParams, NotificationPreferences, RepositoryTrait};
 use crate::domain::{
     AttackEvent, Mitigation, MitigationRow, MitigationStatus, Operator, OperatorRole,
 };
@@ -844,6 +844,56 @@ impl RepositoryTrait for Repository {
         .await?;
         Ok(rows.into_iter().map(Into::into).collect())
     }
+
+    async fn get_notification_preferences(
+        &self,
+        operator_id: Uuid,
+    ) -> Result<Option<NotificationPreferences>> {
+        let row = sqlx::query_as::<_, NotifPrefRow>(
+            "SELECT muted_events, quiet_hours_start, quiet_hours_end FROM notification_preferences WHERE operator_id = $1",
+        )
+        .bind(operator_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| NotificationPreferences {
+            muted_events: r.muted_events,
+            quiet_hours_start: r.quiet_hours_start,
+            quiet_hours_end: r.quiet_hours_end,
+        }))
+    }
+
+    async fn upsert_notification_preferences(
+        &self,
+        operator_id: Uuid,
+        prefs: &NotificationPreferences,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO notification_preferences (operator_id, muted_events, quiet_hours_start, quiet_hours_end, updated_at)
+            VALUES ($1, $2, $3, $4, NOW())
+            ON CONFLICT (operator_id) DO UPDATE SET
+                muted_events = EXCLUDED.muted_events,
+                quiet_hours_start = EXCLUDED.quiet_hours_start,
+                quiet_hours_end = EXCLUDED.quiet_hours_end,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(operator_id)
+        .bind(&prefs.muted_events)
+        .bind(prefs.quiet_hours_start)
+        .bind(prefs.quiet_hours_end)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct NotifPrefRow {
+    muted_events: Vec<String>,
+    quiet_hours_start: Option<i16>,
+    quiet_hours_end: Option<i16>,
 }
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow, utoipa::ToSchema)]

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::{AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole};
@@ -7,6 +8,16 @@ use crate::error::Result;
 use crate::observability::AuditEntry;
 
 use super::{GlobalStats, PopInfo, SafelistEntry, TimeseriesBucket};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct NotificationPreferences {
+    #[serde(default)]
+    pub muted_events: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_hours_start: Option<i16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quiet_hours_end: Option<i16>,
+}
 
 /// Query parameters shared by all list endpoints (cursor pagination + date range)
 #[derive(Debug, Clone, Default)]
@@ -111,4 +122,15 @@ pub trait RepositoryTrait: Send + Sync {
     async fn update_operator_password(&self, id: Uuid, password_hash: &str) -> Result<()>;
     async fn delete_operator(&self, id: Uuid) -> Result<bool>;
     async fn list_operators(&self) -> Result<Vec<Operator>>;
+
+    // Notification preferences
+    async fn get_notification_preferences(
+        &self,
+        operator_id: Uuid,
+    ) -> Result<Option<NotificationPreferences>>;
+    async fn upsert_notification_preferences(
+        &self,
+        operator_id: Uuid,
+        prefs: &NotificationPreferences,
+    ) -> Result<()>;
 }

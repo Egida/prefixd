@@ -95,10 +95,10 @@ configs/                       # prefixd.yaml, inventory.yaml, playbooks.yaml, n
 docs/
 ├── api.md                     # Full API reference with examples
 ├── deployment.md              # Docker + nginx deployment guide
-└── adr/                       # 15 Architecture Decision Records (001-015)
+└── adr/                       # 17 Architecture Decision Records (001-017)
 grafana/                       # Prometheus config, Grafana provisioning, dashboard JSON
 tests/
-├── integration.rs             # 31 integration tests (health, config, mitigations, events, filters, bulk withdraw, cursor pagination, bulk acknowledge)
+├── integration.rs             # 35 integration tests (health, config, mitigations, events, filters, bulk withdraw, cursor pagination, bulk acknowledge, per-dest routing, preferences)
 ├── integration_e2e.rs         # 6 end-to-end tests (ignored without Docker)
 └── integration_postgres.rs    # 9 integration tests (Postgres-backed flows)
 ```
@@ -145,6 +145,8 @@ See `docs/adr/` for all 15 Architecture Decision Records.
 - `GET /v1/config/alerting` - Alerting config (secrets redacted)
 - `PUT /v1/config/alerting` - Update alerting config (admin only, writes YAML + hot-reload)
 - `POST /v1/config/alerting/test` - Send test alert to all destinations (admin only)
+- `GET /v1/preferences` - Notification preferences (current operator)
+- `PUT /v1/preferences` - Update notification preferences (muted events, quiet hours)
 - `GET /v1/stats` - Global statistics
 - `GET /v1/stats/timeseries` - Time-series data for charts
 - `GET /v1/ip/{ip}/history` - IP history (events + mitigations + context)
@@ -180,10 +182,10 @@ See `docs/adr/` for all 15 Architecture Decision Records.
 ## Testing
 
 ```bash
-# Backend unit tests (93 tests)
+# Backend unit tests (118 tests)
 cargo test
 
-# All backend tests including integration (156 runnable: 116 unit + 31 integration + 9 postgres; 14 ignored requiring GoBGP/Docker)
+# All backend tests including integration (162 runnable: 118 unit + 35 integration + 9 postgres; 14 ignored requiring GoBGP/Docker)
 cargo test --features test-utils
 
 # Lint
@@ -242,7 +244,7 @@ Completed:
 - 15 Architecture Decision Records
 - CLI tool (prefixdctl) for all API operations
 - OpenAPI spec with utoipa annotations
-- 116 backend unit tests + 36 integration tests (+ 14 ignored requiring GoBGP/Docker)
+- 118 backend unit tests + 44 integration tests (+ 14 ignored requiring GoBGP/Docker)
 - Vitest + Testing Library frontend test infrastructure (26 tests)
 
 ## Code Conventions

@@ -1,0 +1,174 @@
+"use client"
+
+import { useCallback, useEffect, useState } from "react"
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Label } from "@/components/ui/label"
+import { Button } from "@/components/ui/button"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Loader2, Save } from "lucide-react"
+import { useNotificationPreferences } from "@/hooks/use-api"
+import { updateNotificationPreferences, type NotificationPreferences } from "@/lib/api"
+import { toast } from "sonner"
+
+const EVENT_TYPES = [
+  { value: "mitigation.created", label: "Mitigation Created", critical: true },
+  { value: "mitigation.escalated", label: "Mitigation Escalated", critical: true },
+  { value: "mitigation.withdrawn", label: "Mitigation Withdrawn", critical: false },
+  { value: "mitigation.expired", label: "Mitigation Expired", critical: false },
+  { value: "config.reloaded", label: "Config Reloaded", critical: false },
+  { value: "guardrail.rejected", label: "Guardrail Rejected", critical: false },
+] as const
+
+const HOURS = Array.from({ length: 24 }, (_, i) => i)
+
+export function NotificationPreferencesPanel() {
+  const { data, isLoading, mutate } = useNotificationPreferences()
+  const [mutedEvents, setMutedEvents] = useState<string[]>([])
+  const [quietStart, setQuietStart] = useState<number | null>(null)
+  const [quietEnd, setQuietEnd] = useState<number | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [dirty, setDirty] = useState(false)
+
+  useEffect(() => {
+    if (data) {
+      setMutedEvents(data.muted_events)
+      setQuietStart(data.quiet_hours_start)
+      setQuietEnd(data.quiet_hours_end)
+      setDirty(false)
+    }
+  }, [data])
+
+  const toggleMuted = useCallback((event: string) => {
+    setMutedEvents((prev) => {
+      const next = prev.includes(event) ? prev.filter((e) => e !== event) : [...prev, event]
+      return next
+    })
+    setDirty(true)
+  }, [])
+
+  const handleSave = useCallback(async () => {
+    setSaving(true)
+    try {
+      await updateNotificationPreferences({
+        muted_events: mutedEvents,
+        quiet_hours_start: quietStart,
+        quiet_hours_end: quietEnd,
+      })
+      await mutate()
+      setDirty(false)
+      toast.success("Notification preferences saved")
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to save preferences")
+    } finally {
+      setSaving(false)
+    }
+  }, [mutedEvents, quietStart, quietEnd, mutate])
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 p-4 text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        <span className="text-sm font-mono">Loading preferences...</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-mono">Toast Notifications</CardTitle>
+          <p className="text-[10px] text-muted-foreground font-mono">
+            Muted events will not show toast notifications. SWR cache updates still happen.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {EVENT_TYPES.map((evt) => {
+              const isMuted = mutedEvents.includes(evt.value)
+              return (
+                <div key={evt.value} className="flex items-center gap-2">
+                  <Checkbox
+                    checked={!isMuted}
+                    onCheckedChange={() => toggleMuted(evt.value)}
+                    id={`notif-${evt.value}`}
+                  />
+                  <Label htmlFor={`notif-${evt.value}`} className="text-xs font-mono cursor-pointer">
+                    {evt.label}
+                    {evt.critical && <span className="text-[9px] text-muted-foreground ml-1">(critical)</span>}
+                  </Label>
+                </div>
+              )
+            })}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="pb-2">
+          <CardTitle className="text-sm font-mono">Quiet Hours (UTC)</CardTitle>
+          <p className="text-[10px] text-muted-foreground font-mono">
+            During quiet hours, only critical events (created, escalated) show toasts.
+          </p>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-3">
+            <Select
+              value={quietStart !== null ? String(quietStart) : "off"}
+              onValueChange={(v) => {
+                if (v === "off") {
+                  setQuietStart(null)
+                  setQuietEnd(null)
+                } else {
+                  setQuietStart(Number(v))
+                  if (quietEnd === null) setQuietEnd(8)
+                }
+                setDirty(true)
+              }}
+            >
+              <SelectTrigger className="w-28 h-8 text-xs font-mono">
+                <SelectValue placeholder="Start" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="off">Off</SelectItem>
+                {HOURS.map((h) => (
+                  <SelectItem key={h} value={String(h)}>{String(h).padStart(2, "0")}:00</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {quietStart !== null && (
+              <>
+                <span className="text-xs text-muted-foreground font-mono">to</span>
+                <Select
+                  value={quietEnd !== null ? String(quietEnd) : "8"}
+                  onValueChange={(v) => {
+                    setQuietEnd(Number(v))
+                    setDirty(true)
+                  }}
+                >
+                  <SelectTrigger className="w-28 h-8 text-xs font-mono">
+                    <SelectValue placeholder="End" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {HOURS.map((h) => (
+                      <SelectItem key={h} value={String(h)}>{String(h).padStart(2, "0")}:00</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="text-[10px] text-muted-foreground font-mono">UTC</span>
+              </>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      <div className="flex justify-end">
+        <Button size="sm" onClick={handleSave} disabled={!dirty || saving} className="text-xs font-mono">
+          <Save className="h-3.5 w-3.5 mr-1.5" />
+          {saving ? "Saving..." : "Save Preferences"}
+        </Button>
+      </div>
+    </div>
+  )
+}
