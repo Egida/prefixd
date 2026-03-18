@@ -1,5 +1,5 @@
 # Build stage
-# Pinned: bun >=1.3.11 segfaults during next build finalization (oven-sh/bun#24397)
+# Pinned: bun 1.3.11+ segfaults during next build in Docker/CI (oven-sh/bun#24397)
 FROM oven/bun:1.3.10 AS builder
 
 WORKDIR /app

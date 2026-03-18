@@ -141,7 +141,7 @@ prefixdctl migrations
 - **prefixdctl:** If you have scripts using `--offset`, they need to be updated to use `--cursor` or omit for the first page.
 - **New migration (006):** Adds `notification_preferences` table for per-operator toast settings. Runs automatically. FK to `operators` table.
 - **Per-destination event routing:** Alerting destinations now accept an optional `events` array to override the global event filter. Existing configs without per-destination events are unaffected (backward-compatible, see ADR 017).
-- **New endpoint:** `GET/PUT /v1/preferences` for notification preferences (muted events, quiet hours).
+- **New endpoint:** `GET/PUT /v1/preferences` for notification preferences (muted events, quiet hours). Quiet hours require both `start` and `end` or both `null` — partial configuration is rejected (400).
 - No config file changes required.
 
 ### v0.10.1 -> v0.11.0

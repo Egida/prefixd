@@ -42,7 +42,7 @@ Rationale: a new mitigation at 3am means an active attack. Suppressing that noti
 
 ### 4. UTC-only quiet hours
 
-Quiet hours are specified as UTC hour integers (0-23). No timezone support.
+Quiet hours are specified as UTC hour integers (0-23). No timezone support. Both start and end must be provided together or both null (no half-configured state).
 
 Rationale: NOC operators already think in UTC. Adding timezone support requires a timezone database dependency (chrono-tz or similar) and complicates the schema for negligible benefit.
 
@@ -59,3 +59,4 @@ The WebSocket feed continues to send all events to all connected clients. Filter
 - **New table** (`notification_preferences`) with foreign key to `operators`. Operators without preferences get all toasts (safe default).
 - **Frontend** adds a preferences panel and modifies `WebSocketProvider` to consult preferences before toasting.
 - **No impact** on backend webhook delivery — notification preferences control UI toasts only.
+- **Known limitation:** Per-destination routing has no explicit "disable this destination without deleting it" state. Empty `events` means "inherit global." To silence a destination, operators must either remove it or set its `events` to an empty-looking but non-empty list (not currently supported). This is an acceptable trade-off for backward compatibility.

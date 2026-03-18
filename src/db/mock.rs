@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
+use std::collections::HashMap;
 use std::sync::Mutex;
 use uuid::Uuid;
 
@@ -17,6 +18,7 @@ pub struct MockRepository {
     safelist: Mutex<Vec<SafelistEntry>>,
     audit: Mutex<Vec<AuditEntry>>,
     operators: Mutex<Vec<Operator>>,
+    notification_prefs: Mutex<HashMap<Uuid, NotificationPreferences>>,
 }
 
 impl MockRepository {
@@ -27,6 +29,7 @@ impl MockRepository {
             safelist: Mutex::new(Vec::new()),
             audit: Mutex::new(Vec::new()),
             operators: Mutex::new(Vec::new()),
+            notification_prefs: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -512,16 +515,25 @@ impl RepositoryTrait for MockRepository {
 
     async fn get_notification_preferences(
         &self,
-        _operator_id: Uuid,
+        operator_id: Uuid,
     ) -> Result<Option<NotificationPreferences>> {
-        Ok(None)
+        Ok(self
+            .notification_prefs
+            .lock()
+            .unwrap()
+            .get(&operator_id)
+            .cloned())
     }
 
     async fn upsert_notification_preferences(
         &self,
-        _operator_id: Uuid,
-        _prefs: &NotificationPreferences,
+        operator_id: Uuid,
+        prefs: &NotificationPreferences,
     ) -> Result<()> {
+        self.notification_prefs
+            .lock()
+            .unwrap()
+            .insert(operator_id, prefs.clone());
         Ok(())
     }
 }

@@ -4,7 +4,7 @@ import React, { createContext, useContext, useState, useEffect, useRef, useCallb
 import useSWR, { useSWRConfig } from "swr"
 import { toast } from "sonner"
 import { WsMessage, WsMessageType, ConnectionState } from "@/hooks/use-websocket-types"
-import type { NotificationPreferences } from "@/lib/api"
+import { getNotificationPreferences, type NotificationPreferences } from "@/lib/api"
 
 function getWsBase(): string {
   if (typeof window === "undefined") return "ws://127.0.0.1"
@@ -31,7 +31,7 @@ const WS_TO_ALERT_EVENT: Record<string, string> = {
   EventIngested: "mitigation.created",
 }
 
-function shouldShowToast(wsType: string, prefs: NotificationPreferences | undefined): boolean {
+export function shouldShowToast(wsType: string, prefs: NotificationPreferences | undefined): boolean {
   if (!prefs) return true
   const alertEvent = WS_TO_ALERT_EVENT[wsType]
   if (!alertEvent) return true
@@ -58,7 +58,11 @@ export function WebSocketProvider({ children }: { children: React.ReactNode }) {
   const reconnectAttemptsRef = useRef(0)
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const { mutate } = useSWRConfig()
-  const { data: notifPrefs } = useSWR<NotificationPreferences>("notification-preferences")
+  const { data: notifPrefs } = useSWR<NotificationPreferences>(
+    "notification-preferences",
+    getNotificationPreferences,
+    { refreshInterval: 0, revalidateOnFocus: false }
+  )
   const notifPrefsRef = useRef(notifPrefs)
   useEffect(() => { notifPrefsRef.current = notifPrefs }, [notifPrefs])
 

@@ -2901,6 +2901,10 @@ pub async fn update_notification_preferences(
         crate::domain::OperatorRole::Viewer,
     )?;
 
+    match (prefs.quiet_hours_start, prefs.quiet_hours_end) {
+        (Some(_), None) | (None, Some(_)) => return Err(StatusCode::BAD_REQUEST),
+        _ => {}
+    }
     if let Some(start) = prefs.quiet_hours_start {
         if !(0..=23).contains(&start) {
             return Err(StatusCode::BAD_REQUEST);
@@ -2911,16 +2915,8 @@ pub async fn update_notification_preferences(
             return Err(StatusCode::BAD_REQUEST);
         }
     }
-    let valid_events = [
-        "mitigation.created",
-        "mitigation.escalated",
-        "mitigation.withdrawn",
-        "mitigation.expired",
-        "config.reloaded",
-        "guardrail.rejected",
-    ];
     for evt in &prefs.muted_events {
-        if !valid_events.contains(&evt.as_str()) {
+        if !crate::alerting::AlertEventType::ALL_STRINGS.contains(&evt.as_str()) {
             return Err(StatusCode::BAD_REQUEST);
         }
     }

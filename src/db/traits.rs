@@ -13,9 +13,9 @@ use super::{GlobalStats, PopInfo, SafelistEntry, TimeseriesBucket};
 pub struct NotificationPreferences {
     #[serde(default)]
     pub muted_events: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub quiet_hours_start: Option<i16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub quiet_hours_end: Option<i16>,
 }
 

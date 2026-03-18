@@ -1105,15 +1105,25 @@ GET /v1/preferences
 Authorization: Bearer <token>
 ```
 
-Returns the current operator's notification preferences. Defaults to all toasts enabled, no quiet hours.
+Returns the current operator's notification preferences. Defaults to all toasts enabled, no quiet hours. `quiet_hours_start` and `quiet_hours_end` are always present (as integers or `null`).
 
-**Response:**
+**Response (operator with preferences):**
 
 ```json
 {
   "muted_events": ["mitigation.expired", "config.reloaded"],
   "quiet_hours_start": 2,
   "quiet_hours_end": 8
+}
+```
+
+**Response (default / no preferences saved):**
+
+```json
+{
+  "muted_events": [],
+  "quiet_hours_start": null,
+  "quiet_hours_end": null
 }
 ```
 
@@ -1134,6 +1144,7 @@ Content-Type: application/json
 Updates the current operator's notification preferences. `muted_events` contains event type strings that should not produce dashboard toast notifications. `quiet_hours_start`/`quiet_hours_end` are UTC hours (0-23); during quiet hours, only critical events (`mitigation.created`, `mitigation.escalated`) produce toasts. Set both to `null` to disable quiet hours.
 
 **Validation:**
+- `quiet_hours_start` and `quiet_hours_end` must both be present or both be `null` (no half-configured state)
 - `quiet_hours_start`/`quiet_hours_end` must be 0-23 if present
 - `muted_events` entries must be valid event types (`mitigation.created`, `mitigation.escalated`, `mitigation.withdrawn`, `mitigation.expired`, `config.reloaded`, `guardrail.rejected`)
 

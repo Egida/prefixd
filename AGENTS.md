@@ -98,7 +98,7 @@ docs/
 └── adr/                       # 17 Architecture Decision Records (001-017)
 grafana/                       # Prometheus config, Grafana provisioning, dashboard JSON
 tests/
-├── integration.rs             # 35 integration tests (health, config, mitigations, events, filters, bulk withdraw, cursor pagination, bulk acknowledge, per-dest routing, preferences)
+├── integration.rs             # 37 integration tests (health, config, mitigations, events, filters, bulk withdraw, cursor pagination, bulk acknowledge, per-dest routing, preferences)
 ├── integration_e2e.rs         # 6 end-to-end tests (ignored without Docker)
 └── integration_postgres.rs    # 9 integration tests (Postgres-backed flows)
 ```
@@ -185,7 +185,7 @@ See `docs/adr/` for all 15 Architecture Decision Records.
 # Backend unit tests (118 tests)
 cargo test
 
-# All backend tests including integration (162 runnable: 118 unit + 35 integration + 9 postgres; 14 ignored requiring GoBGP/Docker)
+# All backend tests including integration (164 runnable: 118 unit + 37 integration + 9 postgres; 14 ignored requiring GoBGP/Docker)
 cargo test --features test-utils
 
 # Lint
@@ -244,8 +244,8 @@ Completed:
 - 15 Architecture Decision Records
 - CLI tool (prefixdctl) for all API operations
 - OpenAPI spec with utoipa annotations
-- 118 backend unit tests + 44 integration tests (+ 14 ignored requiring GoBGP/Docker)
-- Vitest + Testing Library frontend test infrastructure (26 tests)
+- 118 backend unit tests + 46 integration tests (+ 14 ignored requiring GoBGP/Docker)
+- Vitest + Testing Library frontend test infrastructure (34 tests)
 
 ## Code Conventions
 

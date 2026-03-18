@@ -1526,3 +1526,50 @@ async fn test_notification_preferences_put_invalid_event() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn test_notification_preferences_put_half_configured_quiet_hours() {
+    let app = setup_app().await;
+
+    let body = serde_json::json!({
+        "muted_events": [],
+        "quiet_hours_start": 2,
+        "quiet_hours_end": null,
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/v1/preferences")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn test_notification_preferences_response_includes_null_quiet_hours() {
+    let app = setup_app().await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/preferences")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let raw = String::from_utf8_lossy(&body);
+    assert!(raw.contains("\"quiet_hours_start\":null"));
+    assert!(raw.contains("\"quiet_hours_end\":null"));
+}

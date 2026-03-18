@@ -48,6 +48,26 @@ pub enum AlertEventType {
     GuardrailRejected,
 }
 
+impl AlertEventType {
+    pub const ALL: &[AlertEventType] = &[
+        Self::MitigationCreated,
+        Self::MitigationEscalated,
+        Self::MitigationWithdrawn,
+        Self::MitigationExpired,
+        Self::ConfigReloaded,
+        Self::GuardrailRejected,
+    ];
+
+    pub const ALL_STRINGS: &[&str] = &[
+        "mitigation.created",
+        "mitigation.escalated",
+        "mitigation.withdrawn",
+        "mitigation.expired",
+        "config.reloaded",
+        "guardrail.rejected",
+    ];
+}
+
 impl std::fmt::Display for AlertEventType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
