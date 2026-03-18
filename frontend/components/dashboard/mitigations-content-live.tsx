@@ -103,10 +103,11 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   const permissions = usePermissions()
   const itemsPerPage = 20
 
-  const { data: mitigations, error, isLoading, mutate } = useMitigations({
+  const { data: mitigationsResp, error, isLoading, mutate } = useMitigations({
     status: statusFilters.length > 0 ? statusFilters : undefined,
     limit: 100,
   })
+  const mitigations = mitigationsResp?.mitigations
 
   const toggleStatusFilter = (status: string) => {
     setStatusFilters((prev) =>

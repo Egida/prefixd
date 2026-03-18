@@ -73,7 +73,16 @@ async fn test_e2e_event_creates_flowspec_in_rib() {
     // Verify mitigation in database
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, None, 100, 0)
+        .list_mitigations(
+            None,
+            None,
+            None,
+            None,
+            &prefixd::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            },
+        )
         .await
         .expect("Failed to list mitigations");
 
@@ -141,7 +150,16 @@ async fn test_e2e_withdrawal_removes_from_rib() {
     // Step 2: Get mitigation ID from database
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, None, 100, 0)
+        .list_mitigations(
+            None,
+            None,
+            None,
+            None,
+            &prefixd::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            },
+        )
         .await
         .expect("Failed to list mitigations");
 
@@ -257,7 +275,16 @@ async fn test_e2e_multiple_mitigations() {
     // Verify database
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, None, 100, 0)
+        .list_mitigations(
+            None,
+            None,
+            None,
+            None,
+            &prefixd::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(mitigations.len(), 2, "Should have two mitigations");
@@ -298,7 +325,16 @@ async fn test_e2e_duplicate_event_extends_ttl() {
 
     let mitigations_before = ctx
         .repo
-        .list_mitigations(None, None, None, 100, 0)
+        .list_mitigations(
+            None,
+            None,
+            None,
+            None,
+            &prefixd::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(mitigations_before.len(), 1);
@@ -326,7 +362,16 @@ async fn test_e2e_duplicate_event_extends_ttl() {
     // Verify: still one mitigation, but TTL extended
     let mitigations_after = ctx
         .repo
-        .list_mitigations(None, None, None, 100, 0)
+        .list_mitigations(
+            None,
+            None,
+            None,
+            None,
+            &prefixd::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(mitigations_after.len(), 1, "Should still be one mitigation");
@@ -389,7 +434,16 @@ async fn test_e2e_safelist_blocks_mitigation() {
     // Verify no mitigation created
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, None, 100, 0)
+        .list_mitigations(
+            None,
+            None,
+            None,
+            None,
+            &prefixd::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            },
+        )
         .await
         .unwrap();
     assert_eq!(mitigations.len(), 0, "No mitigation should be created");

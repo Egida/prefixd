@@ -135,7 +135,9 @@ Authorization: Bearer <token>
 | Param | Type | Description |
 |-------|------|-------------|
 | `limit` | integer | Max results (default 100, max 1000) |
-| `offset` | integer | Pagination offset |
+| `cursor` | string | Cursor for pagination (from previous response `next_cursor`) |
+| `start` | string | Start of date range (ISO 8601, inclusive) |
+| `end` | string | End of date range (ISO 8601, exclusive) |
 
 **Response:**
 
@@ -158,7 +160,9 @@ Authorization: Bearer <token>
       "action": "ban"
     }
   ],
-  "count": 1
+  "count": 1,
+  "next_cursor": "MjAyNi0wMS0xOFQxMDozMDowMFo",
+  "has_more": false
 }
 ```
 
@@ -181,8 +185,11 @@ Authorization: Bearer <token>
 | `customer_id` | string | Filter by customer |
 | `victim_ip` | string | Filter by exact victim IP |
 | `pop` | string | Filter by POP (or "all") |
+| `acknowledged` | boolean | Filter by acknowledged status (`true`/`false`) |
 | `limit` | integer | Max results (default 100, max 1000) |
-| `offset` | integer | Pagination offset |
+| `cursor` | string | Cursor for pagination (from previous response `next_cursor`) |
+| `start` | string | Start of date range (ISO 8601, inclusive) |
+| `end` | string | End of date range (ISO 8601, exclusive) |
 
 **Response:**
 
@@ -209,10 +216,14 @@ Authorization: Bearer <token>
       "withdrawn_at": null,
       "triggering_event_id": "550e8400-e29b-41d4-a716-446655440000",
       "last_event_id": "550e8400-e29b-41d4-a716-446655440000",
-      "reason": "Vector policy: udp_flood"
+      "reason": "Vector policy: udp_flood",
+      "acknowledged_at": null,
+      "acknowledged_by": null
     }
   ],
-  "count": 1
+  "count": 1,
+  "next_cursor": null,
+  "has_more": false
 }
 ```
 
@@ -292,6 +303,46 @@ Content-Type: application/json
 ```
 
 Partial success is supported — if some IDs are not found or not active, they appear with `"status": "error"` and an `"error"` field while the valid ones are still withdrawn.
+
+### Bulk Acknowledge Mitigations
+
+```http
+POST /v1/mitigations/acknowledge
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+**Request:**
+
+```json
+{
+  "mitigation_ids": [
+    "7f72a903-63d1-4a4a-a5db-0517e0a7df1d",
+    "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  ],
+  "operator_id": "jsmith"
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `mitigation_ids` | array of UUIDs | yes | Up to 100 mitigation IDs to acknowledge |
+| `operator_id` | string | yes | Operator acknowledging the mitigations |
+
+**Response (200 OK):**
+
+```json
+{
+  "acknowledged": 2,
+  "failed": 0,
+  "results": [
+    { "mitigation_id": "7f72a903-...", "status": "acknowledged" },
+    { "mitigation_id": "a1b2c3d4-...", "status": "acknowledged" }
+  ]
+}
+```
+
+Acknowledging marks a mitigation as reviewed by a human without changing its status. Re-acknowledging an already-acknowledged mitigation returns an error. Rejected mitigations cannot be acknowledged.
 
 ---
 
@@ -959,26 +1010,33 @@ Authorization: Bearer <token>
 | Param | Type | Description |
 |-------|------|-------------|
 | `limit` | integer | Max results (default 100, max 1000) |
-| `offset` | integer | Pagination offset |
+| `cursor` | string | Cursor for pagination (from previous response `next_cursor`) |
+| `start` | string | Start of date range (ISO 8601, inclusive) |
+| `end` | string | End of date range (ISO 8601, exclusive) |
 
 **Response:**
 
 ```json
-[
-  {
-    "audit_id": "f4f0f8f1-d715-4ec3-ae8d-f695f5cd4e1a",
-    "timestamp": "2026-01-18T10:31:00Z",
-    "schema_version": 1,
-    "actor_type": "operator",
-    "actor_id": "jsmith",
-    "action": "withdraw",
-    "target_type": "mitigation",
-    "target_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d",
-    "details": {
-      "reason": "false positive"
+{
+  "entries": [
+    {
+      "audit_id": "f4f0f8f1-d715-4ec3-ae8d-f695f5cd4e1a",
+      "timestamp": "2026-01-18T10:31:00Z",
+      "schema_version": 1,
+      "actor_type": "operator",
+      "actor_id": "jsmith",
+      "action": "withdraw",
+      "target_type": "mitigation",
+      "target_id": "7f72a903-63d1-4a4a-a5db-0517e0a7df1d",
+      "details": {
+        "reason": "false positive"
+      }
     }
-  }
-]
+  ],
+  "count": 1,
+  "next_cursor": null,
+  "has_more": false
+}
 ```
 
 ---

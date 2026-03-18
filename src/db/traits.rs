@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::domain::{AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole};
@@ -6,6 +7,15 @@ use crate::error::Result;
 use crate::observability::AuditEntry;
 
 use super::{GlobalStats, PopInfo, SafelistEntry, TimeseriesBucket};
+
+/// Query parameters shared by all list endpoints (cursor pagination + date range)
+#[derive(Debug, Clone, Default)]
+pub struct ListParams {
+    pub limit: u32,
+    pub cursor: Option<DateTime<Utc>>,
+    pub start: Option<DateTime<Utc>>,
+    pub end: Option<DateTime<Utc>>,
+}
 
 #[async_trait]
 pub trait RepositoryTrait: Send + Sync {
@@ -20,11 +30,11 @@ pub trait RepositoryTrait: Send + Sync {
         source: &str,
         external_id: &str,
     ) -> Result<Option<AttackEvent>>;
-    async fn list_events(&self, limit: u32, offset: u32) -> Result<Vec<AttackEvent>>;
+    async fn list_events(&self, params: &ListParams) -> Result<Vec<AttackEvent>>;
 
     // Audit Log
     async fn insert_audit(&self, entry: &AuditEntry) -> Result<()>;
-    async fn list_audit(&self, limit: u32, offset: u32) -> Result<Vec<AuditEntry>>;
+    async fn list_audit(&self, params: &ListParams) -> Result<Vec<AuditEntry>>;
 
     // Mitigations
     async fn insert_mitigation(&self, m: &Mitigation) -> Result<()>;
@@ -39,9 +49,10 @@ pub trait RepositoryTrait: Send + Sync {
         status_filter: Option<&[MitigationStatus]>,
         customer_id: Option<&str>,
         victim_ip: Option<&str>,
-        limit: u32,
-        offset: u32,
+        acknowledged: Option<bool>,
+        params: &ListParams,
     ) -> Result<Vec<Mitigation>>;
+    async fn acknowledge_mitigations(&self, ids: &[Uuid], operator_id: &str) -> Result<Vec<Uuid>>;
     async fn count_active_by_customer(&self, customer_id: &str) -> Result<u32>;
     async fn count_active_by_pop(&self, pop: &str) -> Result<u32>;
     async fn count_active_global(&self) -> Result<u32>;
@@ -66,8 +77,8 @@ pub trait RepositoryTrait: Send + Sync {
         status_filter: Option<&[MitigationStatus]>,
         customer_id: Option<&str>,
         victim_ip: Option<&str>,
-        limit: u32,
-        offset: u32,
+        acknowledged: Option<bool>,
+        params: &ListParams,
     ) -> Result<Vec<Mitigation>>;
 
     // Timeseries

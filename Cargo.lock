@@ -2199,6 +2199,7 @@ dependencies = [
  "axum",
  "axum-login",
  "axum-server",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "criterion",

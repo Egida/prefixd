@@ -4,6 +4,8 @@ use axum::{
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::IntoResponse,
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -14,6 +16,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
+use crate::db::ListParams;
 use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackEventInput, FlowSpecAction, FlowSpecNlri,
     FlowSpecRule, MatchCriteria, Mitigation, MitigationIntent, MitigationStatus,
@@ -24,6 +27,16 @@ use crate::policy::PolicyEngine;
 
 use super::auth::require_auth;
 use crate::auth::AuthSession;
+
+fn encode_cursor(ts: &DateTime<Utc>) -> String {
+    URL_SAFE_NO_PAD.encode(ts.to_rfc3339().as_bytes())
+}
+
+fn decode_cursor(cursor: &str) -> Option<DateTime<Utc>> {
+    let bytes = URL_SAFE_NO_PAD.decode(cursor).ok()?;
+    let s = std::str::from_utf8(&bytes).ok()?;
+    s.parse::<DateTime<Utc>>().ok()
+}
 
 // Response types
 
@@ -81,6 +94,10 @@ pub struct MitigationResponse {
     pub scope_hash: String,
     /// Reason for the mitigation
     pub reason: String,
+    /// When the mitigation was acknowledged by an operator
+    pub acknowledged_at: Option<String>,
+    /// Operator who acknowledged the mitigation
+    pub acknowledged_by: Option<String>,
 }
 
 impl From<&Mitigation> for MitigationResponse {
@@ -106,6 +123,8 @@ impl From<&Mitigation> for MitigationResponse {
             last_event_id: m.last_event_id,
             scope_hash: m.scope_hash.clone(),
             reason: m.reason.clone(),
+            acknowledged_at: m.acknowledged_at.map(|t| t.to_rfc3339()),
+            acknowledged_by: m.acknowledged_by.clone(),
         }
     }
 }
@@ -119,6 +138,10 @@ pub struct MitigationsListResponse {
     mitigations: Vec<MitigationResponse>,
     /// Number of mitigations returned in this page
     count: usize,
+    /// Cursor for the next page (null if no more pages)
+    next_cursor: Option<String>,
+    /// Whether there are more pages
+    has_more: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -127,6 +150,22 @@ pub struct EventsListResponse {
     events: Vec<AttackEvent>,
     /// Number of events returned in this page
     count: usize,
+    /// Cursor for the next page (null if no more pages)
+    next_cursor: Option<String>,
+    /// Whether there are more pages
+    has_more: bool,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct AuditListResponse {
+    /// List of audit entries in this page
+    entries: Vec<crate::observability::AuditEntry>,
+    /// Number of entries returned in this page
+    count: usize,
+    /// Cursor for the next page (null if no more pages)
+    next_cursor: Option<String>,
+    /// Whether there are more pages
+    has_more: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -182,9 +221,11 @@ pub struct ErrorResponse {
 // Request types
 
 #[derive(Deserialize)]
-pub struct ListEventsQuery {
+pub struct CursorQuery {
     limit: Option<u32>,
-    offset: Option<u32>,
+    cursor: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -195,14 +236,21 @@ pub struct ListMitigationsQuery {
     victim_ip: Option<String>,
     /// Filter by POP. Use "all" to see mitigations from all POPs.
     pop: Option<String>,
+    /// Filter by acknowledged status (true/false)
+    acknowledged: Option<bool>,
     #[serde(default = "default_limit")]
     limit: u32,
-    #[serde(default)]
-    offset: u32,
+    cursor: Option<String>,
+    start: Option<String>,
+    end: Option<String>,
 }
 
 fn default_limit() -> u32 {
     100
+}
+
+fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
+    s.parse::<DateTime<Utc>>().ok()
 }
 
 fn clamp_limit(limit: u32) -> u32 {
@@ -695,7 +743,9 @@ async fn handle_ban(
     tag = "events",
     params(
         ("limit" = Option<u32>, Query, description = "Max results (default 100, max 1000)"),
-        ("offset" = Option<u32>, Query, description = "Offset for pagination"),
+        ("cursor" = Option<String>, Query, description = "Cursor for pagination (from previous response)"),
+        ("start" = Option<String>, Query, description = "Start of date range (ISO 8601, inclusive)"),
+        ("end" = Option<String>, Query, description = "End of date range (ISO 8601, exclusive)"),
     ),
     responses(
         (status = 200, description = "List of events", body = EventsListResponse)
@@ -705,22 +755,42 @@ pub async fn list_events(
     State(state): State<Arc<AppState>>,
     auth_session: AuthSession,
     headers: HeaderMap,
-    Query(query): Query<ListEventsQuery>,
+    Query(query): Query<CursorQuery>,
 ) -> Result<Json<EventsListResponse>, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
     let limit = clamp_limit(query.limit.unwrap_or(100));
-    let offset = query.offset.unwrap_or(0);
+    let cursor = query.cursor.as_deref().and_then(decode_cursor);
+    let params = ListParams {
+        limit: limit + 1,
+        cursor,
+        start: query.start.as_deref().and_then(parse_datetime),
+        end: query.end.as_deref().and_then(parse_datetime),
+    };
 
-    let events = state
+    let mut events = state
         .repo
-        .list_events(limit, offset)
+        .list_events(&params)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    let has_more = events.len() > limit as usize;
+    if has_more {
+        events.truncate(limit as usize);
+    }
+    let next_cursor = if has_more {
+        events.last().map(|e| encode_cursor(&e.ingested_at))
+    } else {
+        None
+    };
     let count = events.len();
-    Ok(Json(EventsListResponse { events, count }))
+    Ok(Json(EventsListResponse {
+        events,
+        count,
+        next_cursor,
+        has_more,
+    }))
 }
 
 /// List audit log entries
@@ -730,31 +800,54 @@ pub async fn list_events(
     tag = "audit",
     params(
         ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
-        ("offset" = Option<u32>, Query, description = "Offset for pagination"),
+        ("cursor" = Option<String>, Query, description = "Cursor for pagination (from previous response)"),
+        ("start" = Option<String>, Query, description = "Start of date range (ISO 8601, inclusive)"),
+        ("end" = Option<String>, Query, description = "End of date range (ISO 8601, exclusive)"),
     ),
     responses(
-        (status = 200, description = "List of audit log entries")
+        (status = 200, description = "List of audit log entries", body = AuditListResponse)
     )
 )]
 pub async fn list_audit(
     State(state): State<Arc<AppState>>,
     auth_session: AuthSession,
     headers: HeaderMap,
-    Query(query): Query<ListEventsQuery>,
-) -> Result<impl IntoResponse, StatusCode> {
+    Query(query): Query<CursorQuery>,
+) -> Result<Json<AuditListResponse>, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
     let limit = clamp_limit(query.limit.unwrap_or(100));
-    let offset = query.offset.unwrap_or(0);
+    let cursor = query.cursor.as_deref().and_then(decode_cursor);
+    let params = ListParams {
+        limit: limit + 1,
+        cursor,
+        start: query.start.as_deref().and_then(parse_datetime),
+        end: query.end.as_deref().and_then(parse_datetime),
+    };
 
-    let entries = state
+    let mut entries = state
         .repo
-        .list_audit(limit, offset)
+        .list_audit(&params)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(entries))
+    let has_more = entries.len() > limit as usize;
+    if has_more {
+        entries.truncate(limit as usize);
+    }
+    let next_cursor = if has_more {
+        entries.last().map(|e| encode_cursor(&e.timestamp))
+    } else {
+        None
+    };
+    let count = entries.len();
+    Ok(Json(AuditListResponse {
+        entries,
+        count,
+        next_cursor,
+        has_more,
+    }))
 }
 
 /// List mitigations with optional filters
@@ -767,8 +860,11 @@ pub async fn list_audit(
         ("customer_id" = Option<String>, Query, description = "Filter by customer ID"),
         ("victim_ip" = Option<String>, Query, description = "Filter by victim IP address"),
         ("pop" = Option<String>, Query, description = "Filter by POP, use 'all' for cross-POP"),
+        ("acknowledged" = Option<bool>, Query, description = "Filter by acknowledged status"),
         ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
-        ("offset" = Option<u32>, Query, description = "Offset for pagination"),
+        ("cursor" = Option<String>, Query, description = "Cursor for pagination (from previous response)"),
+        ("start" = Option<String>, Query, description = "Start of date range (ISO 8601, inclusive)"),
+        ("end" = Option<String>, Query, description = "End of date range (ISO 8601, exclusive)"),
     ),
     responses(
         (status = 200, description = "List of mitigations", body = MitigationsListResponse)
@@ -780,7 +876,6 @@ pub async fn list_mitigations(
     headers: HeaderMap,
     Query(query): Query<ListMitigationsQuery>,
 ) -> Result<Json<MitigationsListResponse>, StatusCode> {
-    // Check auth (bearer token)
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
@@ -790,17 +885,23 @@ pub async fn list_mitigations(
         .map(|s| s.split(',').filter_map(|st| st.parse().ok()).collect());
 
     let limit = clamp_limit(query.limit);
+    let cursor = query.cursor.as_deref().and_then(decode_cursor);
+    let params = ListParams {
+        limit: limit + 1,
+        cursor,
+        start: query.start.as_deref().and_then(parse_datetime),
+        end: query.end.as_deref().and_then(parse_datetime),
+    };
 
-    // If pop=all, list mitigations from all POPs
-    let mitigations = if query.pop.as_deref() == Some("all") {
+    let mut mitigations = if query.pop.as_deref() == Some("all") {
         state
             .repo
             .list_mitigations_all_pops(
                 status_filter.as_deref(),
                 query.customer_id.as_deref(),
                 query.victim_ip.as_deref(),
-                limit,
-                query.offset,
+                query.acknowledged,
+                &params,
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -811,19 +912,30 @@ pub async fn list_mitigations(
                 status_filter.as_deref(),
                 query.customer_id.as_deref(),
                 query.victim_ip.as_deref(),
-                limit,
-                query.offset,
+                query.acknowledged,
+                &params,
             )
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     };
 
+    let has_more = mitigations.len() > limit as usize;
+    if has_more {
+        mitigations.truncate(limit as usize);
+    }
+    let next_cursor = if has_more {
+        mitigations.last().map(|m| encode_cursor(&m.created_at))
+    } else {
+        None
+    };
     let count = mitigations.len();
     let responses: Vec<_> = mitigations.iter().map(MitigationResponse::from).collect();
 
     Ok(Json(MitigationsListResponse {
         mitigations: responses,
         count,
+        next_cursor,
+        has_more,
     }))
 }
 
@@ -1196,6 +1308,98 @@ pub async fn bulk_withdraw_mitigations(
 
     Ok(Json(BulkWithdrawResponse {
         withdrawn,
+        failed,
+        results,
+    }))
+}
+
+const MAX_BULK_ACKNOWLEDGE: usize = 100;
+
+#[derive(Deserialize, ToSchema)]
+pub struct BulkAcknowledgeRequest {
+    mitigation_ids: Vec<Uuid>,
+    operator_id: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct BulkAcknowledgeResult {
+    mitigation_id: Uuid,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct BulkAcknowledgeResponse {
+    acknowledged: u32,
+    failed: u32,
+    results: Vec<BulkAcknowledgeResult>,
+}
+
+/// Bulk acknowledge mitigations
+#[utoipa::path(
+    post,
+    path = "/v1/mitigations/acknowledge",
+    tag = "mitigations",
+    request_body = BulkAcknowledgeRequest,
+    responses(
+        (status = 200, description = "Bulk acknowledge results", body = BulkAcknowledgeResponse)
+    )
+)]
+pub async fn bulk_acknowledge_mitigations(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+    Json(req): Json<BulkAcknowledgeRequest>,
+) -> Result<Json<BulkAcknowledgeResponse>, StatusCode> {
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    require_auth(&state, &auth_session, auth_header)?;
+
+    if req.mitigation_ids.is_empty() || req.mitigation_ids.len() > MAX_BULK_ACKNOWLEDGE {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if req.operator_id.is_empty()
+        || validate_string_len(&req.operator_id, "operator_id", MAX_USERNAME_LEN).is_err()
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let acked_ids = state
+        .repo
+        .acknowledge_mitigations(&req.mitigation_ids, &req.operator_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut results = Vec::with_capacity(req.mitigation_ids.len());
+    for id in &req.mitigation_ids {
+        if acked_ids.contains(id) {
+            results.push(BulkAcknowledgeResult {
+                mitigation_id: *id,
+                status: "acknowledged".to_string(),
+                error: None,
+            });
+        } else {
+            results.push(BulkAcknowledgeResult {
+                mitigation_id: *id,
+                status: "error".to_string(),
+                error: Some("not found, already acknowledged, or rejected".to_string()),
+            });
+        }
+    }
+
+    let acknowledged = acked_ids.len() as u32;
+    let failed = req.mitigation_ids.len() as u32 - acknowledged;
+
+    tracing::info!(
+        operator = %req.operator_id,
+        acknowledged = acknowledged,
+        failed = failed,
+        total = req.mitigation_ids.len(),
+        "bulk acknowledge completed"
+    );
+
+    Ok(Json(BulkAcknowledgeResponse {
+        acknowledged,
         failed,
         results,
     }))
@@ -2396,7 +2600,7 @@ pub async fn get_ip_history(
     auth_session: AuthSession,
     headers: HeaderMap,
     Path(ip): Path<String>,
-    Query(query): Query<ListEventsQuery>,
+    Query(query): Query<CursorQuery>,
 ) -> Result<Json<IpHistoryResponse>, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;

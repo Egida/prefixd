@@ -202,6 +202,8 @@ mod tests {
             escalated_from_id: None,
             reason: "test".to_string(),
             rejection_reason: None,
+            acknowledged_at: None,
+            acknowledged_by: None,
         }
     }
 

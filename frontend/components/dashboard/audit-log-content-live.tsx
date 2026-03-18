@@ -105,7 +105,8 @@ export function AuditLogContentLive() {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const itemsPerPage = 20
 
-  const { data: entries, error, isLoading, mutate } = useAuditLog({ limit: 200 })
+  const { data: auditResp, error, isLoading, mutate } = useAuditLog({ limit: 200 })
+  const entries = auditResp?.entries
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {

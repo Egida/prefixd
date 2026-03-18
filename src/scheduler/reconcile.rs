@@ -130,27 +130,34 @@ impl ReconciliationLoop {
     }
 
     async fn sync_announcements(&self) -> anyhow::Result<()> {
-        // Page through all active mitigations (no cap)
+        // Page through all active mitigations using cursor pagination
         let mut active = Vec::new();
         let page_size: u32 = 500;
-        let mut offset: u32 = 0;
+        let mut cursor = None;
         loop {
+            let params = crate::db::ListParams {
+                limit: page_size,
+                cursor,
+                ..Default::default()
+            };
             let page = self
                 .repo
                 .list_mitigations(
                     Some(&[MitigationStatus::Active, MitigationStatus::Escalated]),
                     None,
                     None,
-                    page_size,
-                    offset,
+                    None,
+                    &params,
                 )
                 .await?;
             let done = (page.len() as u32) < page_size;
+            if let Some(last) = page.last() {
+                cursor = Some(last.created_at);
+            }
             active.extend(page);
             if done {
                 break;
             }
-            offset += page_size;
         }
 
         crate::observability::metrics::RECONCILIATION_ACTIVE_COUNT

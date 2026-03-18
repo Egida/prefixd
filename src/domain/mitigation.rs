@@ -158,6 +158,8 @@ pub struct MitigationRow {
     pub escalated_from_id: Option<Uuid>,
     pub reason: Option<String>,
     pub rejection_reason: Option<String>,
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    pub acknowledged_by: Option<String>,
 }
 
 /// Domain model for mitigation
@@ -183,6 +185,8 @@ pub struct Mitigation {
     pub escalated_from_id: Option<Uuid>,
     pub reason: String,
     pub rejection_reason: Option<String>,
+    pub acknowledged_at: Option<DateTime<Utc>>,
+    pub acknowledged_by: Option<String>,
 }
 
 impl Mitigation {
@@ -212,6 +216,8 @@ impl Mitigation {
             escalated_from_id: None,
             reason: intent.reason,
             rejection_reason: None,
+            acknowledged_at: None,
+            acknowledged_by: None,
         }
     }
 
@@ -300,6 +306,8 @@ impl Mitigation {
             escalated_from_id: row.escalated_from_id,
             reason: row.reason.unwrap_or_default(),
             rejection_reason: row.rejection_reason,
+            acknowledged_at: row.acknowledged_at,
+            acknowledged_by: row.acknowledged_by,
         })
     }
 

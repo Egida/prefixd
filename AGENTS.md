@@ -98,7 +98,7 @@ docs/
 └── adr/                       # 15 Architecture Decision Records (001-015)
 grafana/                       # Prometheus config, Grafana provisioning, dashboard JSON
 tests/
-├── integration.rs             # 27 integration tests (health, config, mitigations, events, filters, bulk withdraw)
+├── integration.rs             # 31 integration tests (health, config, mitigations, events, filters, bulk withdraw, cursor pagination, bulk acknowledge)
 ├── integration_e2e.rs         # 6 end-to-end tests (ignored without Docker)
 └── integration_postgres.rs    # 9 integration tests (Postgres-backed flows)
 ```
@@ -133,6 +133,7 @@ See `docs/adr/` for all 15 Architecture Decision Records.
 - `GET /v1/mitigations` - List mitigations (supports `?status=active&customer_id=cust_123`)
 - `GET /v1/mitigations/{id}` - Get mitigation detail
 - `POST /v1/mitigations/withdraw` - Bulk withdraw mitigations (up to 100 IDs)
+- `POST /v1/mitigations/acknowledge` - Bulk acknowledge mitigations (up to 100 IDs)
 - `POST /v1/mitigations/{id}/withdraw` - Withdraw single mitigation
 - `GET/POST /v1/safelist` - List/add safelist entries
 - `DELETE /v1/safelist/{prefix}` - Remove safelist entry
@@ -182,7 +183,7 @@ See `docs/adr/` for all 15 Architecture Decision Records.
 # Backend unit tests (93 tests)
 cargo test
 
-# All backend tests including integration (152 runnable: 116 unit + 27 integration + 9 postgres; 14 ignored requiring GoBGP/Docker)
+# All backend tests including integration (156 runnable: 116 unit + 31 integration + 9 postgres; 14 ignored requiring GoBGP/Docker)
 cargo test --features test-utils
 
 # Lint

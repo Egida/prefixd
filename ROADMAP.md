@@ -217,7 +217,7 @@ Target: Quality-of-life for operators during active incidents. These are the fea
 
 ### Investigation UX
 
-- [ ] **Date range filtering** — Time picker on events and audit log pages for incident investigation
+- [x] **Date range filtering** — `?start=&end=` query params on events, mitigations, and audit log endpoints
 - [ ] **Post-attack incident reports** — Formatted PDF/markdown summary (timeline, peak traffic, actions taken)
 - [x] **FlowSpec rule preview** — Human-readable display of announced NLRI on mitigation detail page
 
@@ -228,7 +228,7 @@ Target: Quality-of-life for operators during active incidents. These are the fea
 
 ### Pagination + Performance
 
-- [ ] **Server-side cursor pagination** — Replace client-side limit (~1000 rows) with proper cursor-based pagination
+- [x] **Server-side cursor pagination** — All list endpoints use cursor-based pagination (ADR 016), offset removed
 - [ ] **Event batching** — Batch ingest endpoint for high-volume detectors
 
 ---

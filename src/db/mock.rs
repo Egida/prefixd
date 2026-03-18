@@ -3,7 +3,9 @@ use chrono::Utc;
 use std::sync::Mutex;
 use uuid::Uuid;
 
-use super::{GlobalStats, PopInfo, PopStats, RepositoryTrait, SafelistEntry, TimeseriesBucket};
+use super::{
+    GlobalStats, ListParams, PopInfo, PopStats, RepositoryTrait, SafelistEntry, TimeseriesBucket,
+};
 use crate::domain::{AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole};
 use crate::error::Result;
 use crate::observability::AuditEntry;
@@ -59,12 +61,15 @@ impl RepositoryTrait for MockRepository {
             .cloned())
     }
 
-    async fn list_events(&self, limit: u32, offset: u32) -> Result<Vec<AttackEvent>> {
+    async fn list_events(&self, params: &ListParams) -> Result<Vec<AttackEvent>> {
         let events = self.events.lock().unwrap();
         Ok(events
             .iter()
-            .skip(offset as usize)
-            .take(limit as usize)
+            .rev()
+            .filter(|e| params.cursor.is_none_or(|c| e.ingested_at < c))
+            .filter(|e| params.start.is_none_or(|s| e.ingested_at >= s))
+            .filter(|e| params.end.is_none_or(|end| e.ingested_at < end))
+            .take(params.limit as usize)
             .cloned()
             .collect())
     }
@@ -74,12 +79,15 @@ impl RepositoryTrait for MockRepository {
         Ok(())
     }
 
-    async fn list_audit(&self, limit: u32, offset: u32) -> Result<Vec<AuditEntry>> {
+    async fn list_audit(&self, params: &ListParams) -> Result<Vec<AuditEntry>> {
         let audit = self.audit.lock().unwrap();
         Ok(audit
             .iter()
-            .skip(offset as usize)
-            .take(limit as usize)
+            .rev()
+            .filter(|e| params.cursor.is_none_or(|c| e.timestamp < c))
+            .filter(|e| params.start.is_none_or(|s| e.timestamp >= s))
+            .filter(|e| params.end.is_none_or(|end| e.timestamp < end))
+            .take(params.limit as usize)
             .cloned()
             .collect())
     }
@@ -164,12 +172,13 @@ impl RepositoryTrait for MockRepository {
         status_filter: Option<&[MitigationStatus]>,
         customer_id: Option<&str>,
         victim_ip: Option<&str>,
-        limit: u32,
-        offset: u32,
+        acknowledged: Option<bool>,
+        params: &ListParams,
     ) -> Result<Vec<Mitigation>> {
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
             .iter()
+            .rev()
             .filter(|m| {
                 let status_ok = status_filter
                     .map(|statuses| statuses.contains(&m.status))
@@ -178,12 +187,38 @@ impl RepositoryTrait for MockRepository {
                     .map(|cid| m.customer_id.as_deref() == Some(cid))
                     .unwrap_or(true);
                 let ip_ok = victim_ip.map(|ip| m.victim_ip == ip).unwrap_or(true);
-                status_ok && customer_ok && ip_ok
+                let ack_ok = acknowledged.is_none_or(|ack| {
+                    if ack {
+                        m.acknowledged_at.is_some()
+                    } else {
+                        m.acknowledged_at.is_none()
+                    }
+                });
+                let cursor_ok = params.cursor.is_none_or(|c| m.created_at < c);
+                let start_ok = params.start.is_none_or(|s| m.created_at >= s);
+                let end_ok = params.end.is_none_or(|e| m.created_at < e);
+                status_ok && customer_ok && ip_ok && ack_ok && cursor_ok && start_ok && end_ok
             })
-            .skip(offset as usize)
-            .take(limit as usize)
+            .take(params.limit as usize)
             .cloned()
             .collect())
+    }
+
+    async fn acknowledge_mitigations(&self, ids: &[Uuid], operator_id: &str) -> Result<Vec<Uuid>> {
+        let mut mitigations = self.mitigations.lock().unwrap();
+        let now = Utc::now();
+        let mut acknowledged = Vec::new();
+        for m in mitigations.iter_mut() {
+            if ids.contains(&m.mitigation_id)
+                && m.acknowledged_at.is_none()
+                && !matches!(m.status, MitigationStatus::Rejected)
+            {
+                m.acknowledged_at = Some(now);
+                m.acknowledged_by = Some(operator_id.to_string());
+                acknowledged.push(m.mitigation_id);
+            }
+        }
+        Ok(acknowledged)
     }
 
     async fn count_active_by_customer(&self, customer_id: &str) -> Result<u32> {
@@ -371,10 +406,10 @@ impl RepositoryTrait for MockRepository {
         status_filter: Option<&[MitigationStatus]>,
         customer_id: Option<&str>,
         victim_ip: Option<&str>,
-        limit: u32,
-        offset: u32,
+        acknowledged: Option<bool>,
+        params: &ListParams,
     ) -> Result<Vec<Mitigation>> {
-        self.list_mitigations(status_filter, customer_id, victim_ip, limit, offset)
+        self.list_mitigations(status_filter, customer_id, victim_ip, acknowledged, params)
             .await
     }
 

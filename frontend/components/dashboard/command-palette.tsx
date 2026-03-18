@@ -26,8 +26,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const router = useRouter()
   const [search, setSearch] = useState("")
   
-  const { data: mitigations } = useMitigations({ limit: 50 })
-  const { data: events } = useEvents({ limit: 50 })
+  const { data: mitigationsResp } = useMitigations({ limit: 50 })
+  const { data: eventsResp } = useEvents({ limit: 50 })
+  const mitigations = mitigationsResp?.mitigations
+  const events = eventsResp?.events
 
   const runCommand = useCallback(
     (command: () => void) => {

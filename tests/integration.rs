@@ -1079,3 +1079,334 @@ events:
     assert_eq!(json["destinations"][0]["type"], "slack");
     assert_eq!(json["events"][0], "mitigation.created");
 }
+
+#[tokio::test]
+async fn test_cursor_pagination_mitigations() {
+    let app = setup_app().await;
+
+    // Ingest 3 events to create 3 mitigations
+    for i in 0..3 {
+        let body = serde_json::json!({
+            "timestamp": format!("2026-01-16T14:00:0{}Z", i),
+            "source": "test",
+            "victim_ip": format!("203.0.113.{}", 50 + i),
+            "vector": "udp_flood",
+            "pps": 50000
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    // Page 1: limit=2
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/mitigations?limit=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 2);
+    assert_eq!(json["has_more"], true);
+    assert!(
+        json["next_cursor"].is_string(),
+        "next_cursor should be present"
+    );
+
+    // Page 2: use cursor
+    let cursor = json["next_cursor"].as_str().unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/v1/mitigations?limit=2&cursor={}", cursor))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 1);
+    assert_eq!(json["has_more"], false);
+    assert!(json["next_cursor"].is_null(), "no more pages");
+}
+
+#[tokio::test]
+async fn test_cursor_pagination_events() {
+    let app = setup_app().await;
+
+    // Ingest 3 events
+    for i in 0..3 {
+        let body = serde_json::json!({
+            "timestamp": format!("2026-01-16T14:00:0{}Z", i),
+            "source": "test",
+            "victim_ip": format!("203.0.113.{}", 60 + i),
+            "vector": "udp_flood",
+            "pps": 50000
+        });
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Page 1: limit=2
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events?limit=2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 2);
+    assert_eq!(json["has_more"], true);
+
+    // Page 2
+    let cursor = json["next_cursor"].as_str().unwrap();
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&format!("/v1/events?limit=2&cursor={}", cursor))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 1);
+    assert_eq!(json["has_more"], false);
+}
+
+#[tokio::test]
+async fn test_date_range_filtering_events() {
+    let app = setup_app().await;
+
+    // Ingest event
+    let body = r#"{
+        "timestamp": "2026-01-16T14:00:00Z",
+        "source": "test",
+        "victim_ip": "203.0.113.70",
+        "vector": "udp_flood",
+        "pps": 50000
+    }"#;
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // Query with date range that includes the event
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events?start=2020-01-01T00:00:00Z&end=2030-01-01T00:00:00Z")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["count"].as_u64().unwrap() >= 1);
+
+    // Query with date range that excludes the event (future only)
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events?start=2030-01-01T00:00:00Z")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 0);
+}
+
+#[tokio::test]
+async fn test_bulk_acknowledge_mitigations() {
+    let app = setup_app().await;
+
+    // Ingest 2 events
+    for i in 0..2 {
+        let body = serde_json::json!({
+            "timestamp": format!("2026-01-16T14:00:0{}Z", i),
+            "source": "test",
+            "victim_ip": format!("203.0.113.{}", 80 + i),
+            "vector": "udp_flood",
+            "pps": 50000
+        });
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    // Get mitigation IDs
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/mitigations")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let mitigations = json["mitigations"].as_array().unwrap();
+    assert!(mitigations.len() >= 2);
+
+    let id1 = mitigations[0]["mitigation_id"].as_str().unwrap();
+    let id2 = mitigations[1]["mitigation_id"].as_str().unwrap();
+    let fake_id = "00000000-0000-0000-0000-000000000000";
+
+    // Bulk acknowledge: 2 real + 1 fake
+    let ack_body = serde_json::json!({
+        "mitigation_ids": [id1, id2, fake_id],
+        "operator_id": "test_operator"
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mitigations/acknowledge")
+                .header("content-type", "application/json")
+                .body(Body::from(ack_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["acknowledged"], 2);
+    assert_eq!(json["failed"], 1);
+
+    // Verify acknowledged filter: acknowledged=true
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/mitigations?acknowledged=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 2);
+
+    // acknowledged=false should return 0
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/mitigations?acknowledged=false")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["count"], 0);
+
+    // Re-acknowledge should fail (already acknowledged)
+    let ack_body = serde_json::json!({
+        "mitigation_ids": [id1],
+        "operator_id": "test_operator"
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mitigations/acknowledge")
+                .header("content-type", "application/json")
+                .body(Body::from(ack_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["acknowledged"], 0);
+    assert_eq!(json["failed"], 1);
+}

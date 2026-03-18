@@ -62,7 +62,7 @@ export function useMitigations(params?: Parameters<typeof api.getMitigations>[0]
   const key = params ? ["mitigations", JSON.stringify(params)] : "mitigations"
   
   const fetcher = MOCK_MODE
-    ? async () => {
+    ? async (): Promise<api.MitigationsResponse> => {
         let result = mockData.mockMitigations
         if (params?.status) {
           result = result.filter(m => params.status!.includes(m.status))
@@ -73,7 +73,7 @@ export function useMitigations(params?: Parameters<typeof api.getMitigations>[0]
         if (params?.limit) {
           result = result.slice(0, params.limit)
         }
-        return result
+        return { mitigations: result, count: result.length, next_cursor: null, has_more: false }
       }
     : () => api.getMitigations(params)
 
@@ -121,12 +121,12 @@ export function useEvents(params?: Parameters<typeof api.getEvents>[0]) {
   const key = params ? ["events", JSON.stringify(params)] : "events"
   
   const fetcher = MOCK_MODE
-    ? async () => {
+    ? async (): Promise<api.EventsResponse> => {
         let result = mockData.mockEvents
         if (params?.limit) {
           result = result.slice(0, params.limit)
         }
-        return result
+        return { events: result, count: result.length, next_cursor: null, has_more: false }
       }
     : () => api.getEvents(params)
 
@@ -140,12 +140,12 @@ export function useAuditLog(params?: Parameters<typeof api.getAuditLog>[0]) {
   const key = params ? ["audit", JSON.stringify(params)] : "audit"
   
   const fetcher = MOCK_MODE
-    ? async () => {
+    ? async (): Promise<api.AuditResponse> => {
         let result = mockData.mockAuditLog
         if (params?.limit) {
           result = result.slice(0, params.limit)
         }
-        return result
+        return { entries: result, count: result.length, next_cursor: null, has_more: false }
       }
     : () => api.getAuditLog(params)
 

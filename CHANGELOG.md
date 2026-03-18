@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Cursor-based pagination** — All list endpoints (`/v1/mitigations`, `/v1/events`, `/v1/audit`) now use cursor-based pagination (`?cursor=<opaque>&limit=N`). Responses include `next_cursor` and `has_more` fields. **Breaking:** `offset` parameter removed (see ADR 016).
+- **Date range filtering** — All list endpoints accept `?start=<ISO8601>&end=<ISO8601>` for time-bounded queries. Supports incident investigation workflows.
+- **Bulk acknowledge** — `POST /v1/mitigations/acknowledge` marks mitigations as reviewed by an operator (sets `acknowledged_at`/`acknowledged_by`) without changing status. Filterable via `?acknowledged=true|false`. Migration 005 adds columns.
+
 ## [0.11.0] - 2026-03-18
 
 ### Added

@@ -61,6 +61,8 @@ fn make_mitigation(i: usize) -> Mitigation {
         escalated_from_id: None,
         reason: "benchmark test".to_string(),
         rejection_reason: None,
+        acknowledged_at: None,
+        acknowledged_by: None,
     }
 }
 
@@ -146,7 +148,18 @@ fn bench_database_operations(c: &mut Criterion) {
 
             let start = std::time::Instant::now();
             for _ in 0..iters {
-                let _ = repo.list_mitigations(None, None, None, 50, 0).await;
+                let _ = repo
+                    .list_mitigations(
+                        None,
+                        None,
+                        None,
+                        None,
+                        &prefixd::db::ListParams {
+                            limit: 50,
+                            ..Default::default()
+                        },
+                    )
+                    .await;
             }
             start.elapsed()
         })
@@ -260,7 +273,18 @@ fn bench_db_scaling(c: &mut Criterion) {
 
                     let start = std::time::Instant::now();
                     for _ in 0..iters {
-                        let _ = repo.list_mitigations(None, None, None, 50, 0).await;
+                        let _ = repo
+                            .list_mitigations(
+                                None,
+                                None,
+                                None,
+                                None,
+                                &prefixd::db::ListParams {
+                                    limit: 50,
+                                    ..Default::default()
+                                },
+                            )
+                            .await;
                     }
                     start.elapsed()
                 })

@@ -58,6 +58,8 @@ export const mockMitigations: Mitigation[] = [
     triggering_event_id: "evt-001",
     last_event_id: "evt-001",
     reason: "UDP flood detected by FastNetMon",
+    acknowledged_at: null,
+    acknowledged_by: null,
   },
   {
     mitigation_id: "550e8400-e29b-41d4-a716-446655440001",
@@ -80,6 +82,8 @@ export const mockMitigations: Mitigation[] = [
     triggering_event_id: "evt-002",
     last_event_id: "evt-002",
     reason: "SYN flood attack detected",
+    acknowledged_at: null,
+    acknowledged_by: null,
   },
   {
     mitigation_id: "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
@@ -102,6 +106,8 @@ export const mockMitigations: Mitigation[] = [
     triggering_event_id: "evt-003",
     last_event_id: "evt-005",
     reason: "NTP amplification attack - escalated due to sustained volume",
+    acknowledged_at: null,
+    acknowledged_by: null,
   },
   {
     mitigation_id: "6ba7b811-9dad-11d1-80b4-00c04fd430c9",
@@ -124,6 +130,8 @@ export const mockMitigations: Mitigation[] = [
     triggering_event_id: "evt-004",
     last_event_id: "evt-004",
     reason: "DNS amplification attack detected",
+    acknowledged_at: null,
+    acknowledged_by: null,
   },
   {
     mitigation_id: "6ba7b812-9dad-11d1-80b4-00c04fd430ca",
@@ -146,6 +154,8 @@ export const mockMitigations: Mitigation[] = [
     triggering_event_id: "evt-006",
     last_event_id: "evt-006",
     reason: "Memcached amplification attack",
+    acknowledged_at: null,
+    acknowledged_by: null,
   },
   {
     mitigation_id: "6ba7b813-9dad-11d1-80b4-00c04fd430cb",
@@ -168,6 +178,8 @@ export const mockMitigations: Mitigation[] = [
     triggering_event_id: "evt-007",
     last_event_id: "evt-008",
     reason: "SSDP amplification attack - full discard applied",
+    acknowledged_at: null,
+    acknowledged_by: null,
   },
 ]
 

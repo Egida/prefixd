@@ -41,7 +41,16 @@ async fn test_full_event_to_mitigation_flow() {
     // Verify mitigation was created in the database
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, None, 100, 0)
+        .list_mitigations(
+            None,
+            None,
+            None,
+            None,
+            &prefixd::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            },
+        )
         .await
         .expect("Failed to list mitigations");
 
@@ -84,7 +93,16 @@ async fn test_mitigation_withdrawal() {
     // Get the mitigation ID from the database
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, None, 100, 0)
+        .list_mitigations(
+            None,
+            None,
+            None,
+            None,
+            &prefixd::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            },
+        )
         .await
         .expect("Failed to list mitigations");
 
@@ -237,7 +255,16 @@ async fn test_safelist_blocks_mitigation() {
     // Verify no mitigation was created
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, None, 100, 0)
+        .list_mitigations(
+            None,
+            None,
+            None,
+            None,
+            &prefixd::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            },
+        )
         .await
         .expect("Failed to list mitigations");
 
@@ -284,7 +311,16 @@ async fn test_duplicate_event_extends_ttl() {
     // Get original expiry time
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, None, 100, 0)
+        .list_mitigations(
+            None,
+            None,
+            None,
+            None,
+            &prefixd::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            },
+        )
         .await
         .expect("Failed to list mitigations");
     let original_expires_at = mitigations[0].expires_at;
@@ -318,7 +354,16 @@ async fn test_duplicate_event_extends_ttl() {
     // Verify TTL was extended
     let mitigations = ctx
         .repo
-        .list_mitigations(None, None, None, 100, 0)
+        .list_mitigations(
+            None,
+            None,
+            None,
+            None,
+            &prefixd::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            },
+        )
         .await
         .expect("Failed to list mitigations");
 
@@ -426,6 +471,8 @@ async fn test_timeseries_non_hour_bucket_alignment() {
         escalated_from_id: None,
         reason: "timeseries alignment test".to_string(),
         rejection_reason: None,
+        acknowledged_at: None,
+        acknowledged_by: None,
     };
 
     ctx.repo
@@ -527,6 +574,8 @@ async fn test_ttl_expiry() {
         escalated_from_id: None,
         reason: "TTL expiry test".to_string(),
         rejection_reason: None,
+        acknowledged_at: None,
+        acknowledged_by: None,
     };
 
     // Insert the expired mitigation

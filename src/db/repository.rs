@@ -4,7 +4,7 @@ use serde::Serialize;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use super::RepositoryTrait;
+use super::{ListParams, RepositoryTrait};
 use crate::domain::{
     AttackEvent, Mitigation, MitigationRow, MitigationStatus, Operator, OperatorRole,
 };
@@ -110,17 +110,23 @@ impl RepositoryTrait for Repository {
         Ok(event)
     }
 
-    async fn list_events(&self, limit: u32, offset: u32) -> Result<Vec<AttackEvent>> {
+    async fn list_events(&self, params: &ListParams) -> Result<Vec<AttackEvent>> {
         let events = sqlx::query_as::<_, AttackEvent>(
             r#"
             SELECT event_id, external_event_id, source, event_timestamp, ingested_at,
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, confidence,
                    action, raw_details
-            FROM events ORDER BY ingested_at DESC LIMIT $1 OFFSET $2
+            FROM events
+            WHERE ($2::timestamptz IS NULL OR ingested_at < $2)
+              AND ($3::timestamptz IS NULL OR ingested_at >= $3)
+              AND ($4::timestamptz IS NULL OR ingested_at < $4)
+            ORDER BY ingested_at DESC LIMIT $1
             "#,
         )
-        .bind(limit as i64)
-        .bind(offset as i64)
+        .bind(params.limit as i64)
+        .bind(params.cursor)
+        .bind(params.start)
+        .bind(params.end)
         .fetch_all(&self.pool)
         .await?;
         Ok(events)
@@ -148,15 +154,21 @@ impl RepositoryTrait for Repository {
         Ok(())
     }
 
-    async fn list_audit(&self, limit: u32, offset: u32) -> Result<Vec<AuditEntry>> {
+    async fn list_audit(&self, params: &ListParams) -> Result<Vec<AuditEntry>> {
         let rows = sqlx::query_as::<_, AuditRow>(
             r#"
             SELECT audit_id, timestamp, schema_version, actor_type, actor_id, action, target_type, target_id, details_json
-            FROM audit_log ORDER BY timestamp DESC LIMIT $1 OFFSET $2
+            FROM audit_log
+            WHERE ($2::timestamptz IS NULL OR timestamp < $2)
+              AND ($3::timestamptz IS NULL OR timestamp >= $3)
+              AND ($4::timestamptz IS NULL OR timestamp < $4)
+            ORDER BY timestamp DESC LIMIT $1
             "#,
         )
-        .bind(limit as i64)
-        .bind(offset as i64)
+        .bind(params.limit as i64)
+        .bind(params.cursor)
+        .bind(params.start)
+        .bind(params.end)
         .fetch_all(&self.pool)
         .await?;
 
@@ -238,7 +250,8 @@ impl RepositoryTrait for Repository {
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
-                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason
+                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
+                   acknowledged_at, acknowledged_by
             FROM mitigations WHERE mitigation_id = $1
             "#,
         )
@@ -261,7 +274,8 @@ impl RepositoryTrait for Repository {
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
-                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason
+                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
+                   acknowledged_at, acknowledged_by
             FROM mitigations
             WHERE scope_hash = $1 AND pop = $2 AND status IN ('pending', 'active', 'escalated')
             "#,
@@ -282,7 +296,8 @@ impl RepositoryTrait for Repository {
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
-                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason
+                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
+                   acknowledged_at, acknowledged_by
             FROM mitigations
             WHERE victim_ip = $1 AND status IN ('pending', 'active', 'escalated')
             "#,
@@ -309,7 +324,8 @@ impl RepositoryTrait for Repository {
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
-                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason
+                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
+                   acknowledged_at, acknowledged_by
             FROM mitigations
             WHERE triggering_event_id = $1 AND status IN ('pending', 'active', 'escalated')
             "#,
@@ -328,10 +344,9 @@ impl RepositoryTrait for Repository {
         status_filter: Option<&[MitigationStatus]>,
         customer_id: Option<&str>,
         victim_ip: Option<&str>,
-        limit: u32,
-        offset: u32,
+        acknowledged: Option<bool>,
+        params: &ListParams,
     ) -> Result<Vec<Mitigation>> {
-        // Convert status filter to string array for parameterized query
         let status_strings: Option<Vec<String>> =
             status_filter.map(|statuses| statuses.iter().map(|s| s.as_str().to_string()).collect());
 
@@ -340,20 +355,28 @@ impl RepositoryTrait for Repository {
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
-                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason
+                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
+                   acknowledged_at, acknowledged_by
             FROM mitigations
             WHERE ($1::text[] IS NULL OR status = ANY($1))
               AND ($2::text IS NULL OR customer_id = $2)
-              AND ($5::text IS NULL OR victim_ip = $5)
+              AND ($3::text IS NULL OR victim_ip = $3)
+              AND ($4::timestamptz IS NULL OR created_at < $4)
+              AND ($5::timestamptz IS NULL OR created_at >= $5)
+              AND ($6::timestamptz IS NULL OR created_at < $6)
+              AND ($7::bool IS NULL OR ($7 = true AND acknowledged_at IS NOT NULL) OR ($7 = false AND acknowledged_at IS NULL))
             ORDER BY created_at DESC
-            LIMIT $3 OFFSET $4
+            LIMIT $8
             "#,
         )
-        .bind(status_strings.as_deref())
-        .bind(customer_id)
-        .bind(limit as i64)
-        .bind(offset as i64)
-        .bind(victim_ip)
+        .bind(status_strings.as_deref())  // $1
+        .bind(customer_id)                 // $2
+        .bind(victim_ip)                   // $3
+        .bind(params.cursor)               // $4
+        .bind(params.start)                // $5
+        .bind(params.end)                  // $6
+        .bind(acknowledged)                // $7
+        .bind(params.limit as i64)         // $8
         .fetch_all(&self.pool)
         .await?;
 
@@ -368,6 +391,26 @@ impl RepositoryTrait for Repository {
                 }
             })
             .collect())
+    }
+
+    async fn acknowledge_mitigations(&self, ids: &[Uuid], operator_id: &str) -> Result<Vec<Uuid>> {
+        let now = Utc::now();
+        let rows: Vec<(Uuid,)> = sqlx::query_as(
+            r#"
+            UPDATE mitigations
+            SET acknowledged_at = $1, acknowledged_by = $2
+            WHERE mitigation_id = ANY($3)
+              AND acknowledged_at IS NULL
+              AND status != 'rejected'
+            RETURNING mitigation_id
+            "#,
+        )
+        .bind(now)
+        .bind(operator_id)
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
     async fn count_active_by_customer(&self, customer_id: &str) -> Result<u32> {
@@ -406,7 +449,8 @@ impl RepositoryTrait for Repository {
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
-                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason
+                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
+                   acknowledged_at, acknowledged_by
             FROM mitigations
             WHERE status IN ('active', 'escalated') AND expires_at < $1
             "#,
@@ -557,10 +601,9 @@ impl RepositoryTrait for Repository {
         status_filter: Option<&[MitigationStatus]>,
         customer_id: Option<&str>,
         victim_ip: Option<&str>,
-        limit: u32,
-        offset: u32,
+        acknowledged: Option<bool>,
+        params: &ListParams,
     ) -> Result<Vec<Mitigation>> {
-        // Convert status filter to string array for parameterized query
         let status_strings: Option<Vec<String>> =
             status_filter.map(|statuses| statuses.iter().map(|s| s.as_str().to_string()).collect());
 
@@ -569,20 +612,28 @@ impl RepositoryTrait for Repository {
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
-                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason
+                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
+                   acknowledged_at, acknowledged_by
             FROM mitigations
             WHERE ($1::text[] IS NULL OR status = ANY($1))
               AND ($2::text IS NULL OR customer_id = $2)
-              AND ($5::text IS NULL OR victim_ip = $5)
+              AND ($3::text IS NULL OR victim_ip = $3)
+              AND ($4::timestamptz IS NULL OR created_at < $4)
+              AND ($5::timestamptz IS NULL OR created_at >= $5)
+              AND ($6::timestamptz IS NULL OR created_at < $6)
+              AND ($7::bool IS NULL OR ($7 = true AND acknowledged_at IS NOT NULL) OR ($7 = false AND acknowledged_at IS NULL))
             ORDER BY created_at DESC
-            LIMIT $3 OFFSET $4
+            LIMIT $8
             "#,
         )
-        .bind(status_strings.as_deref())
-        .bind(customer_id)
-        .bind(limit as i64)
-        .bind(offset as i64)
-        .bind(victim_ip)
+        .bind(status_strings.as_deref())  // $1
+        .bind(customer_id)                 // $2
+        .bind(victim_ip)                   // $3
+        .bind(params.cursor)               // $4
+        .bind(params.start)                // $5
+        .bind(params.end)                  // $6
+        .bind(acknowledged)                // $7
+        .bind(params.limit as i64)         // $8
         .fetch_all(&self.pool)
         .await?;
 
@@ -685,7 +736,8 @@ impl RepositoryTrait for Repository {
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
                    match_json, action_type, action_params_json, status,
                    created_at, updated_at, expires_at, withdrawn_at,
-                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason
+                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
+                   acknowledged_at, acknowledged_by
             FROM mitigations WHERE victim_ip = $1 ORDER BY created_at DESC LIMIT $2
             "#,
         )

@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 /// Actor types for audit log entries
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorType {
     System,
@@ -16,7 +16,7 @@ pub enum ActorType {
 }
 
 /// Audit log entry
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct AuditEntry {
     pub audit_id: Uuid,
     pub timestamp: DateTime<Utc>,

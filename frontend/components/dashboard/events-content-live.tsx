@@ -58,7 +58,8 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
   const [selectedId, setSelectedId] = useState<string | null>(initialEventId ?? null)
   const itemsPerPage = 20
 
-  const { data: events, error, isLoading, mutate } = useEvents({ limit: 200 })
+  const { data: eventsResp, error, isLoading, mutate } = useEvents({ limit: 200 })
+  const events = eventsResp?.events
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {

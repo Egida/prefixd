@@ -52,6 +52,10 @@ fn api_routes() -> Router<Arc<AppState>> {
             post(handlers::bulk_withdraw_mitigations),
         )
         .route(
+            "/v1/mitigations/acknowledge",
+            post(handlers::bulk_acknowledge_mitigations),
+        )
+        .route(
             "/v1/mitigations/{id}/withdraw",
             post(handlers::withdraw_mitigation),
         )

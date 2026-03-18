@@ -12,9 +12,9 @@ import { useStats, useMitigations } from "@/hooks/use-api"
 
 export default function OverviewPage() {
   const { data: stats } = useStats()
-  const { data: mitigations } = useMitigations({ status: ["active", "escalated"], limit: 50 })
+  const { data: mitigationsResp } = useMitigations({ status: ["active", "escalated"], limit: 50 })
   
-  const activeMitigations = mitigations?.filter((m) => m.status === "active" || m.status === "escalated") || []
+  const activeMitigations = mitigationsResp?.mitigations?.filter((m) => m.status === "active" || m.status === "escalated") || []
   const policeActions = activeMitigations.filter((m) => m.action_type === "police")
   const discardActions = activeMitigations.filter((m) => m.action_type === "discard")
 

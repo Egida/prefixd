@@ -34,6 +34,15 @@ export interface Mitigation {
   triggering_event_id: string
   last_event_id: string
   reason: string
+  acknowledged_at: string | null
+  acknowledged_by: string | null
+}
+
+export interface PaginatedResponse<T> {
+  count: number
+  next_cursor: string | null
+  has_more: boolean
+  items: T[]
 }
 
 export interface Event {
@@ -164,26 +173,37 @@ export async function getStats(): Promise<Stats> {
   return fetchApi<Stats>("/v1/stats")
 }
 
+export interface MitigationsResponse {
+  mitigations: Mitigation[]
+  count: number
+  next_cursor: string | null
+  has_more: boolean
+}
+
 export async function getMitigations(params?: {
   status?: string[]
   customer_id?: string
   pop?: string
+  acknowledged?: boolean
   limit?: number
-  offset?: number
-}): Promise<Mitigation[]> {
+  cursor?: string
+  start?: string
+  end?: string
+}): Promise<MitigationsResponse> {
   const searchParams = new URLSearchParams()
   if (params?.status && params.status.length > 0) {
-    // Backend expects comma-separated status values
     searchParams.set("status", params.status.join(","))
   }
   if (params?.customer_id) searchParams.set("customer_id", params.customer_id)
   if (params?.pop) searchParams.set("pop", params.pop)
+  if (params?.acknowledged !== undefined) searchParams.set("acknowledged", params.acknowledged.toString())
   if (params?.limit) searchParams.set("limit", params.limit.toString())
-  if (params?.offset) searchParams.set("offset", params.offset.toString())
+  if (params?.cursor) searchParams.set("cursor", params.cursor)
+  if (params?.start) searchParams.set("start", params.start)
+  if (params?.end) searchParams.set("end", params.end)
 
   const query = searchParams.toString()
-  const response = await fetchApi<{ mitigations: Mitigation[]; count: number }>(`/v1/mitigations${query ? `?${query}` : ""}`)
-  return response.mitigations
+  return fetchApi<MitigationsResponse>(`/v1/mitigations${query ? `?${query}` : ""}`)
 }
 
 export async function getMitigation(id: string): Promise<Mitigation> {
@@ -224,6 +244,28 @@ export async function bulkWithdrawMitigations(
   })
 }
 
+export interface BulkAcknowledgeResult {
+  mitigation_id: string
+  status: string
+  error?: string
+}
+
+export interface BulkAcknowledgeResponse {
+  acknowledged: number
+  failed: number
+  results: BulkAcknowledgeResult[]
+}
+
+export async function bulkAcknowledgeMitigations(
+  ids: string[],
+  operator: string
+): Promise<BulkAcknowledgeResponse> {
+  return fetchApi<BulkAcknowledgeResponse>("/v1/mitigations/acknowledge", {
+    method: "POST",
+    body: JSON.stringify({ mitigation_ids: ids, operator_id: operator }),
+  })
+}
+
 export interface IngestEventRequest {
   victim_ip: string
   vector: string
@@ -249,17 +291,27 @@ export async function ingestEvent(input: IngestEventRequest): Promise<EventRespo
   })
 }
 
+export interface EventsResponse {
+  events: Event[]
+  count: number
+  next_cursor: string | null
+  has_more: boolean
+}
+
 export async function getEvents(params?: {
   limit?: number
-  offset?: number
-}): Promise<Event[]> {
+  cursor?: string
+  start?: string
+  end?: string
+}): Promise<EventsResponse> {
   const searchParams = new URLSearchParams()
   if (params?.limit) searchParams.set("limit", params.limit.toString())
-  if (params?.offset) searchParams.set("offset", params.offset.toString())
+  if (params?.cursor) searchParams.set("cursor", params.cursor)
+  if (params?.start) searchParams.set("start", params.start)
+  if (params?.end) searchParams.set("end", params.end)
 
   const query = searchParams.toString()
-  const response = await fetchApi<{ events: Event[]; count: number }>(`/v1/events${query ? `?${query}` : ""}`)
-  return response.events
+  return fetchApi<EventsResponse>(`/v1/events${query ? `?${query}` : ""}`)
 }
 
 export interface AuditEntry {
@@ -274,16 +326,27 @@ export interface AuditEntry {
   details: Record<string, unknown>
 }
 
+export interface AuditResponse {
+  entries: AuditEntry[]
+  count: number
+  next_cursor: string | null
+  has_more: boolean
+}
+
 export async function getAuditLog(params?: {
   limit?: number
-  offset?: number
-}): Promise<AuditEntry[]> {
+  cursor?: string
+  start?: string
+  end?: string
+}): Promise<AuditResponse> {
   const searchParams = new URLSearchParams()
   if (params?.limit) searchParams.set("limit", params.limit.toString())
-  if (params?.offset) searchParams.set("offset", params.offset.toString())
+  if (params?.cursor) searchParams.set("cursor", params.cursor)
+  if (params?.start) searchParams.set("start", params.start)
+  if (params?.end) searchParams.set("end", params.end)
 
   const query = searchParams.toString()
-  return fetchApi<AuditEntry[]>(`/v1/audit${query ? `?${query}` : ""}`)
+  return fetchApi<AuditResponse>(`/v1/audit${query ? `?${query}` : ""}`)
 }
 
 export async function getSafelist(): Promise<SafelistEntry[]> {
@@ -321,12 +384,12 @@ export async function getDashboardData(): Promise<{
   stats: Stats
   mitigations: Mitigation[]
 }> {
-  const [health, stats, mitigations] = await Promise.all([
+  const [health, stats, mitigationsResp] = await Promise.all([
     getHealthDetail(),
     getStats(),
     getMitigations({ status: ["active", "escalated"], limit: 100 }),
   ])
-  return { health, stats, mitigations }
+  return { health, stats, mitigations: mitigationsResp.mitigations }
 }
 
 // Operator management (admin only)

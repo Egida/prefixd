@@ -46,6 +46,11 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
             "schema_migrations",
             include_str!("../../migrations/004_schema_migrations.sql"),
         ),
+        (
+            5,
+            "acknowledge",
+            include_str!("../../migrations/005_acknowledge.sql"),
+        ),
     ];
 
     // Bootstrap: run all migrations first (they use IF NOT EXISTS)
