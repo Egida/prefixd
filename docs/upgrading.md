@@ -120,13 +120,41 @@ prefixdctl migrations
 # 2         operators_sessions              2026-01-15 10:00:00
 # 3         raw_details                     2026-01-28 12:00:00
 # 4         schema_migrations               2026-02-20 10:00:00
+# 5         acknowledge                     2026-03-18 14:37:00
 #
-# 4 migration(s) applied
+# 5 migration(s) applied
 ```
 
 ---
 
 ## Version-Specific Notes
+
+### v0.11.0 -> Next (Unreleased)
+
+- **Breaking: Offset pagination removed.** `GET /v1/mitigations`, `GET /v1/events`, and `GET /v1/audit` no longer accept the `offset` query parameter. Use cursor-based pagination instead (`?cursor=<value>&limit=N`). Responses now include `next_cursor` and `has_more` fields. See [ADR 016](adr/016-cursor-pagination.md).
+- **Breaking: Audit response shape changed.** `GET /v1/audit` now returns `{"entries": [...], "count": N, "next_cursor": ..., "has_more": ...}` instead of a bare array.
+- **New migration (005):** Adds `acknowledged_at` and `acknowledged_by` columns to mitigations table. Runs automatically on startup. Uses `IF NOT EXISTS` so safe to re-run.
+- **New endpoint:** `POST /v1/mitigations/acknowledge` for bulk acknowledging mitigations.
+- **New query params:** `?start=`, `?end=` (ISO 8601) for date range filtering on all list endpoints. `?acknowledged=true|false` on mitigations.
+- **New dependency:** `base64` crate added for cursor encoding.
+- **Frontend:** API hooks now return response objects (`{mitigations, count, next_cursor, has_more}`) instead of bare arrays. If you have custom frontend code consuming these hooks, update accordingly.
+- **prefixdctl:** If you have scripts using `--offset`, they need to be updated to use `--cursor` or omit for the first page.
+- No config file changes required.
+
+### v0.10.1 -> v0.11.0
+
+- **CVE gate in CI:** `cargo audit` and `bun audit` now gate Docker publishing. CycloneDX SBOM generated on version tags.
+- **Vendor capability matrix:** New `docs/vendors.md`.
+- **Security fixes:** Next.js 16.1.7, undici 7.24.4, quinn-proto 0.11.14, rollup 4.59.0.
+- **New features:** Bulk withdraw (`POST /v1/mitigations/withdraw`), FlowSpec rule preview on mitigation detail page.
+- No database migrations required.
+- No breaking API changes.
+
+### v0.10.0 -> v0.10.1
+
+- **FastNetMon integration fix:** Deterministic event IDs replaced with UUIDs. Unban now queries `GET /v1/mitigations?victim_ip=X` then withdraws, instead of constructing a deterministic ID.
+- **New query param:** `victim_ip` on `GET /v1/mitigations`.
+- No database migrations required.
 
 ### v0.9.1 -> v0.10.0
 
