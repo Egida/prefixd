@@ -1,23 +1,23 @@
-# Build stage
-FROM oven/bun:1.3.9 AS builder
+# Install dependencies with Bun (fast)
+FROM oven/bun:latest AS deps
 
 WORKDIR /app
-
-# Copy package files
 COPY package.json bun.lock ./
-
-# Install dependencies (not frozen to handle minor version differences)
 RUN bun install
 
-# Copy source
+# Build with Node to avoid Bun segfault during next build finalization
+# See: https://github.com/oven-sh/bun/issues/24397
+FROM node:22-slim AS builder
+
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
-# Build
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN bun run build
+RUN npx next build
 
-# Production stage
-FROM oven/bun:1.3.9-slim AS runner
+# Production stage — Bun runtime
+FROM oven/bun:latest AS runner
 
 WORKDIR /app
 
