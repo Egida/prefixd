@@ -9,7 +9,8 @@ import { ActionBadge } from "@/components/dashboard/action-badge"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { ArrowLeft, Check, Clock, Copy, ShieldAlert, Activity, GitBranch, RefreshCw, AlertTriangle, User } from "lucide-react"
+import { ArrowLeft, Check, Clock, Copy, ShieldAlert, Activity, GitBranch, RefreshCw, AlertTriangle, User, Terminal } from "lucide-react"
+import { FlowSpecPreview, formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
 import { withdrawMitigation } from "@/lib/api"
 import { useState } from "react"
 import {
@@ -180,18 +181,36 @@ export default function MitigationDetailPage({ params }: { params: { id: string 
                     <GitBranch className="h-5 w-5 text-muted-foreground" />
                     <CardTitle className="text-base font-semibold">FlowSpec Rule</CardTitle>
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 px-2"
-                    onClick={() => copyToClipboard(JSON.stringify(mitigation, null, 2), "rule")}
-                  >
-                    {copied === "rule" ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Copy className="h-3.5 w-3.5" />}
-                    <span className="ml-2 text-xs">Copy JSON</span>
-                  </Button>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 px-2"
+                      onClick={() => copyToClipboard(formatFlowSpecRule(mitigation), "flowspec")}
+                    >
+                      {copied === "flowspec" ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Terminal className="h-3.5 w-3.5" />}
+                      <span className="ml-2 text-xs">Copy Rule</span>
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-8 px-2"
+                      onClick={() => copyToClipboard(JSON.stringify(mitigation, null, 2), "rule")}
+                    >
+                      {copied === "rule" ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Copy className="h-3.5 w-3.5" />}
+                      <span className="ml-2 text-xs">Copy JSON</span>
+                    </Button>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent className="p-0">
+                <FlowSpecPreview
+                  dst_prefix={mitigation.dst_prefix}
+                  protocol={mitigation.protocol}
+                  dst_ports={mitigation.dst_ports}
+                  action_type={mitigation.action_type}
+                  rate_bps={mitigation.rate_bps}
+                />
                 <div className="grid grid-cols-2 sm:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-border">
                   <div className="p-4">
                     <p className="text-xs text-muted-foreground mb-1">Destination Prefix</p>

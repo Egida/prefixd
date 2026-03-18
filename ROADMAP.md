@@ -219,7 +219,7 @@ Target: Quality-of-life for operators during active incidents. These are the fea
 
 - [ ] **Date range filtering** — Time picker on events and audit log pages for incident investigation
 - [ ] **Post-attack incident reports** — Formatted PDF/markdown summary (timeline, peak traffic, actions taken)
-- [ ] **FlowSpec rule preview** — Human-readable display of announced NLRI on mitigation detail page
+- [x] **FlowSpec rule preview** — Human-readable display of announced NLRI on mitigation detail page
 
 ### Notification Tuning
 
