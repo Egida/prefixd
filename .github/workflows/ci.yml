@@ -94,8 +94,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           cargo install cargo-cyclonedx --quiet
-          cargo cyclonedx --format json --output-prefix prefixd
-          mv prefixd.bom.json prefixd-sbom.cdx.json
+          cargo cyclonedx --format json --override-filename prefixd-sbom.cdx
 
       - name: Upload SBOM
         if: startsWith(github.ref, 'refs/tags/v')
