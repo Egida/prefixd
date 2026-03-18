@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, AlertCircle, XCircle, Plus, Download } from "lucide-react"
+import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, AlertCircle, XCircle, Plus, Download, Trash2 } from "lucide-react"
+import { Checkbox } from "@/components/ui/checkbox"
 import { StatusBadge } from "@/components/dashboard/status-badge"
 import { ActionBadge } from "@/components/dashboard/action-badge"
 import { Button } from "@/components/ui/button"
@@ -27,7 +28,7 @@ import {
 } from "@/components/ui/tooltip"
 import { useMitigations } from "@/hooks/use-api"
 import { usePermissions } from "@/hooks/use-permissions"
-import { withdrawMitigation, type Mitigation } from "@/lib/api"
+import { withdrawMitigation, bulkWithdrawMitigations, type Mitigation } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { downloadCsv } from "@/lib/csv"
 import { MitigateNowDialog } from "@/components/dashboard/mitigate-now-dialog"
@@ -92,6 +93,11 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   const [isWithdrawing, setIsWithdrawing] = useState(false)
   const [withdrawError, setWithdrawError] = useState<string | null>(null)
   const [mitigateNowOpen, setMitigateNowOpen] = useState(initialMitigateOpen ?? false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [bulkWithdrawOpen, setBulkWithdrawOpen] = useState(false)
+  const [bulkWithdrawReason, setBulkWithdrawReason] = useState("")
+  const [isBulkWithdrawing, setIsBulkWithdrawing] = useState(false)
+  const [bulkWithdrawError, setBulkWithdrawError] = useState<string | null>(null)
   const [customerFilter, setCustomerFilter] = useState("All")
   const [popFilter, setPopFilter] = useState("All")
   const permissions = usePermissions()
@@ -186,6 +192,58 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
         return sortDirection === "asc" ? comparison : -comparison
       })
   }, [mitigations, customerFilter, popFilter, searchQuery, sortField, sortDirection])
+
+  const selectableIds = useMemo(() => {
+    return new Set(
+      filteredMitigations
+        .filter((m) => m.status === "active" || m.status === "escalated")
+        .map((m) => m.mitigation_id)
+    )
+  }, [filteredMitigations])
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === selectableIds.size && selectableIds.size > 0) {
+      setSelectedIds(new Set())
+    } else {
+      setSelectedIds(new Set(selectableIds))
+    }
+  }
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      return next
+    })
+  }
+
+  const handleBulkWithdraw = async () => {
+    if (selectedIds.size === 0) return
+    setIsBulkWithdrawing(true)
+    setBulkWithdrawError(null)
+    try {
+      const result = await bulkWithdrawMitigations(
+        [...selectedIds],
+        bulkWithdrawReason || "Bulk withdrawal",
+        "dashboard"
+      )
+      setBulkWithdrawOpen(false)
+      setBulkWithdrawReason("")
+      setSelectedIds(new Set())
+      mutate()
+      if (result.failed > 0) {
+        setBulkWithdrawError(`${result.withdrawn} withdrawn, ${result.failed} failed`)
+      }
+    } catch (e) {
+      setBulkWithdrawError(e instanceof Error ? e.message : "Bulk withdraw failed")
+    } finally {
+      setIsBulkWithdrawing(false)
+    }
+  }
 
   const totalPages = Math.ceil(filteredMitigations.length / itemsPerPage)
   const paginatedMitigations = filteredMitigations.slice(
@@ -349,6 +407,29 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
         </div>
       </div>
 
+      {permissions.canWithdraw && selectedIds.size > 0 && (
+        <div className="flex items-center gap-3 px-4 py-2 bg-destructive/10 border border-destructive/30 rounded-lg">
+          <span className="text-sm font-medium">
+            {selectedIds.size} selected
+          </span>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => { setBulkWithdrawError(null); setBulkWithdrawReason(""); setBulkWithdrawOpen(true) }}
+          >
+            <Trash2 className="h-4 w-4 mr-1.5" />
+            Withdraw All
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setSelectedIds(new Set())}
+          >
+            Clear
+          </Button>
+        </div>
+      )}
+
       {isLoading && !mitigations ? (
         <div className="bg-card border border-border rounded-lg p-8 text-center">
           <RefreshCw className="h-8 w-8 mx-auto mb-2 animate-spin text-muted-foreground" />
@@ -360,6 +441,16 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
             <table className="w-full text-sm">
               <thead className="sticky top-0 bg-secondary">
                 <tr className="border-b border-border">
+                  {permissions.canWithdraw && (
+                    <th className="px-3 py-3 w-10">
+                      <Checkbox
+                        checked={selectableIds.size > 0 && selectedIds.size === selectableIds.size}
+                        onCheckedChange={toggleSelectAll}
+                        aria-label="Select all active mitigations"
+                        disabled={selectableIds.size === 0}
+                      />
+                    </th>
+                  )}
                   <th
                     className="text-left px-4 py-3 font-medium text-muted-foreground cursor-pointer hover:text-foreground"
                     onClick={() => handleSort("status")}
@@ -416,22 +507,37 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
               <tbody>
                 {paginatedMitigations.length === 0 ? (
                   <tr>
-                    <td colSpan={9} className="px-4 py-8 text-center text-muted-foreground">
+                    <td colSpan={permissions.canWithdraw ? 10 : 9} className="px-4 py-8 text-center text-muted-foreground">
                       No mitigations found
                     </td>
                   </tr>
                 ) : (
                   paginatedMitigations.map((mitigation, index) => {
                     const expiresInfo = formatTimeRemaining(mitigation.expires_at)
+                    const isSelectable = mitigation.status === "active" || mitigation.status === "escalated"
                     return (
                       <tr
                         key={mitigation.mitigation_id}
                         className={cn(
                           "border-b border-border/50 hover:bg-secondary/50 transition-colors cursor-pointer",
-                          index % 2 === 1 && "bg-secondary/20"
+                          index % 2 === 1 && "bg-secondary/20",
+                          selectedIds.has(mitigation.mitigation_id) && "bg-primary/5"
                         )}
                         onClick={() => router.push(`/mitigations/${mitigation.mitigation_id}`)}
                       >
+                        {permissions.canWithdraw && (
+                          <td className="px-3 py-3" onClick={(e) => e.stopPropagation()}>
+                            {isSelectable ? (
+                              <Checkbox
+                                checked={selectedIds.has(mitigation.mitigation_id)}
+                                onCheckedChange={() => toggleSelect(mitigation.mitigation_id)}
+                                aria-label={`Select mitigation ${mitigation.victim_ip}`}
+                              />
+                            ) : (
+                              <div className="h-4 w-4" />
+                            )}
+                          </td>
+                        )}
                         <td className="px-4 py-3">
                           <StatusBadge status={mitigation.status} />
                         </td>
@@ -585,6 +691,43 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {isWithdrawing ? "Withdrawing..." : "Withdraw"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Bulk Withdraw Dialog */}
+      <AlertDialog open={bulkWithdrawOpen} onOpenChange={(open) => { if (!open) { setBulkWithdrawOpen(false); setBulkWithdrawReason(""); setBulkWithdrawError(null) } }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Bulk Withdraw Mitigations</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will immediately withdraw <span className="font-semibold">{selectedIds.size}</span> FlowSpec
+              {selectedIds.size === 1 ? " rule" : " rules"} from all BGP peers.
+              Traffic to the selected IPs will no longer be filtered.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="py-4">
+            <Label htmlFor="bulk-withdraw-reason">Reason (optional)</Label>
+            <Input
+              id="bulk-withdraw-reason"
+              placeholder="e.g., False positive wave, incident resolved"
+              value={bulkWithdrawReason}
+              onChange={(e) => setBulkWithdrawReason(e.target.value)}
+              className="mt-2"
+            />
+            {bulkWithdrawError && (
+              <p className="text-sm text-destructive mt-2">{bulkWithdrawError}</p>
+            )}
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isBulkWithdrawing}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={handleBulkWithdraw}
+              disabled={isBulkWithdrawing}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            >
+              {isBulkWithdrawing ? "Withdrawing..." : `Withdraw ${selectedIds.size}`}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

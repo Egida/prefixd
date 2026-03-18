@@ -1054,6 +1054,153 @@ pub async fn withdraw_mitigation(
     Ok(Json(MitigationResponse::from(&mitigation)))
 }
 
+const MAX_BULK_WITHDRAW: usize = 100;
+
+#[derive(Deserialize, ToSchema)]
+pub struct BulkWithdrawRequest {
+    mitigation_ids: Vec<Uuid>,
+    operator_id: String,
+    reason: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct BulkWithdrawResult {
+    mitigation_id: Uuid,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct BulkWithdrawResponse {
+    withdrawn: u32,
+    failed: u32,
+    results: Vec<BulkWithdrawResult>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/v1/mitigations/withdraw",
+    tag = "mitigations",
+    request_body = BulkWithdrawRequest,
+    responses(
+        (status = 200, description = "Bulk withdraw results", body = BulkWithdrawResponse)
+    )
+)]
+pub async fn bulk_withdraw_mitigations(
+    State(state): State<Arc<AppState>>,
+    auth_session: AuthSession,
+    headers: HeaderMap,
+    Json(req): Json<BulkWithdrawRequest>,
+) -> Result<Json<BulkWithdrawResponse>, StatusCode> {
+    let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    require_auth(&state, &auth_session, auth_header)?;
+
+    if req.mitigation_ids.is_empty() || req.mitigation_ids.len() > MAX_BULK_WITHDRAW {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if req.operator_id.is_empty()
+        || validate_string_len(&req.operator_id, "operator_id", MAX_USERNAME_LEN).is_err()
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if validate_string_len(&req.reason, "reason", MAX_STRING_LEN).is_err() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut results = Vec::with_capacity(req.mitigation_ids.len());
+    let mut withdrawn = 0u32;
+    let mut failed = 0u32;
+
+    for id in &req.mitigation_ids {
+        let mut mitigation = match state.repo.get_mitigation(*id).await {
+            Ok(Some(m)) => m,
+            Ok(None) => {
+                failed += 1;
+                results.push(BulkWithdrawResult {
+                    mitigation_id: *id,
+                    status: "error".to_string(),
+                    error: Some("not found".to_string()),
+                });
+                continue;
+            }
+            Err(_) => {
+                failed += 1;
+                results.push(BulkWithdrawResult {
+                    mitigation_id: *id,
+                    status: "error".to_string(),
+                    error: Some("internal error".to_string()),
+                });
+                continue;
+            }
+        };
+
+        if !mitigation.is_active() {
+            failed += 1;
+            results.push(BulkWithdrawResult {
+                mitigation_id: *id,
+                status: "error".to_string(),
+                error: Some("not active".to_string()),
+            });
+            continue;
+        }
+
+        if !state.is_dry_run() {
+            let nlri = FlowSpecNlri::from(&mitigation.match_criteria);
+            let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
+            let rule = FlowSpecRule::new(nlri, action);
+            if let Err(e) = state.announcer.withdraw(&rule).await {
+                tracing::error!(error = %e, mitigation_id = %id, "BGP withdrawal failed in bulk withdraw");
+            }
+        }
+
+        mitigation.withdraw(Some(format!("{}: {}", req.operator_id, req.reason)));
+        if let Err(e) = state.repo.update_mitigation(&mitigation).await {
+            tracing::error!(error = %e, mitigation_id = %id, "DB update failed in bulk withdraw");
+            failed += 1;
+            results.push(BulkWithdrawResult {
+                mitigation_id: *id,
+                status: "error".to_string(),
+                error: Some("db update failed".to_string()),
+            });
+            continue;
+        }
+
+        let _ = state
+            .ws_broadcast
+            .send(crate::ws::WsMessage::MitigationWithdrawn {
+                mitigation_id: mitigation.mitigation_id.to_string(),
+            });
+
+        state
+            .alerting
+            .read()
+            .await
+            .notify(crate::alerting::Alert::mitigation_withdrawn(&mitigation));
+
+        withdrawn += 1;
+        results.push(BulkWithdrawResult {
+            mitigation_id: *id,
+            status: "withdrawn".to_string(),
+            error: None,
+        });
+    }
+
+    tracing::info!(
+        operator = %req.operator_id,
+        withdrawn = withdrawn,
+        failed = failed,
+        total = req.mitigation_ids.len(),
+        "bulk withdraw completed"
+    );
+
+    Ok(Json(BulkWithdrawResponse {
+        withdrawn,
+        failed,
+        results,
+    }))
+}
+
 pub async fn list_safelist(
     State(state): State<Arc<AppState>>,
     auth_session: AuthSession,

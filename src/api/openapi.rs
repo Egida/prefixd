@@ -1,8 +1,9 @@
 use utoipa::OpenApi;
 
 use super::handlers::{
-    ErrorResponse, EventResponse, HealthResponse, IpHistoryResponse, MitigationResponse,
-    MitigationsListResponse, PublicHealthResponse, ReloadResponse, TimeseriesResponse,
+    BulkWithdrawRequest, BulkWithdrawResponse, BulkWithdrawResult, ErrorResponse, EventResponse,
+    HealthResponse, IpHistoryResponse, MitigationResponse, MitigationsListResponse,
+    PublicHealthResponse, ReloadResponse, TimeseriesResponse,
 };
 use crate::db::{GlobalStats, PopInfo, PopStats, SafelistEntry};
 
@@ -24,6 +25,7 @@ use crate::db::{GlobalStats, PopInfo, PopStats, SafelistEntry};
         super::handlers::ingest_event,
         super::handlers::list_mitigations,
         super::handlers::get_mitigation,
+        super::handlers::bulk_withdraw_mitigations,
         super::handlers::get_stats,
         super::handlers::list_pops,
         super::handlers::get_config_settings,
@@ -51,6 +53,9 @@ use crate::db::{GlobalStats, PopInfo, PopStats, SafelistEntry};
             SafelistEntry,
             TimeseriesResponse,
             IpHistoryResponse,
+            BulkWithdrawRequest,
+            BulkWithdrawResponse,
+            BulkWithdrawResult,
             crate::db::TimeseriesBucket,
         )
     ),

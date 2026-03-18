@@ -460,6 +460,102 @@ async fn test_list_mitigations_filters_by_victim_ip() {
     assert_eq!(json["mitigations"][0]["victim_ip"], "203.0.113.10");
 }
 
+#[tokio::test]
+async fn test_bulk_withdraw_mitigations() {
+    let app = setup_app().await;
+
+    // Ingest two events for different IPs to create two mitigations
+    let events = vec![
+        r#"{
+            "timestamp": "2026-01-16T14:00:00Z",
+            "source": "test",
+            "victim_ip": "203.0.113.20",
+            "vector": "udp_flood",
+            "pps": 50000
+        }"#,
+        r#"{
+            "timestamp": "2026-01-16T14:00:01Z",
+            "source": "test",
+            "victim_ip": "203.0.113.21",
+            "vector": "udp_flood",
+            "pps": 25000
+        }"#,
+    ];
+
+    for body in events {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+    }
+
+    // Get mitigation IDs
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/mitigations")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let mitigations = json["mitigations"].as_array().unwrap();
+    assert!(
+        mitigations.len() >= 2,
+        "expected at least 2 mitigations, got {}",
+        mitigations.len()
+    );
+
+    let id1 = mitigations[0]["mitigation_id"].as_str().unwrap();
+    let id2 = mitigations[1]["mitigation_id"].as_str().unwrap();
+
+    // Bulk withdraw both plus a fake ID
+    let fake_id = "00000000-0000-0000-0000-000000000000";
+    let withdraw_body = serde_json::json!({
+        "mitigation_ids": [id1, id2, fake_id],
+        "operator_id": "test_operator",
+        "reason": "bulk test"
+    });
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mitigations/withdraw")
+                .header("content-type", "application/json")
+                .body(Body::from(withdraw_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["withdrawn"], 2);
+    assert_eq!(json["failed"], 1);
+    assert_eq!(json["results"].as_array().unwrap().len(), 3);
+}
+
 // Auth tests with bearer token
 fn test_settings_with_bearer() -> Settings {
     let mut settings = test_settings();

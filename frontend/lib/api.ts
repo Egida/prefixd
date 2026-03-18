@@ -201,6 +201,29 @@ export async function withdrawMitigation(
   })
 }
 
+export interface BulkWithdrawResult {
+  mitigation_id: string
+  status: string
+  error?: string
+}
+
+export interface BulkWithdrawResponse {
+  withdrawn: number
+  failed: number
+  results: BulkWithdrawResult[]
+}
+
+export async function bulkWithdrawMitigations(
+  ids: string[],
+  reason: string,
+  operator: string
+): Promise<BulkWithdrawResponse> {
+  return fetchApi<BulkWithdrawResponse>("/v1/mitigations/withdraw", {
+    method: "POST",
+    body: JSON.stringify({ mitigation_ids: ids, reason, operator_id: operator }),
+  })
+}
+
 export interface IngestEventRequest {
   victim_ip: string
   vector: string
