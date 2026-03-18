@@ -1,5 +1,5 @@
 # Build stage
-FROM oven/bun:1.3 AS builder
+FROM oven/bun:1.3.9 AS builder
 
 WORKDIR /app
 
@@ -17,7 +17,7 @@ ENV NEXT_TELEMETRY_DISABLED=1
 RUN bun run build
 
 # Production stage
-FROM oven/bun:1.3-slim AS runner
+FROM oven/bun:1.3.9-slim AS runner
 
 WORKDIR /app
 
