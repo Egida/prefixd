@@ -213,7 +213,7 @@ Target: Quality-of-life for operators during active incidents. These are the fea
 ### Bulk Operations
 
 - [x] **Bulk withdraw** — Multi-select mitigations and withdraw all at once (critical during false-positive waves)
-- [ ] **Bulk acknowledge** — Mark mitigations as reviewed without withdrawing
+- [x] **Bulk acknowledge** — Mark mitigations as reviewed without withdrawing (`POST /v1/mitigations/acknowledge`, `?acknowledged=` filter)
 
 ### Investigation UX
 
