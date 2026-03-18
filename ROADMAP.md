@@ -233,7 +233,42 @@ Target: Quality-of-life for operators during active incidents. These are the fea
 
 ---
 
-## v1.2: Multi-Signal Correlation
+## v1.2: Native BGP Speaker (rustbgpd)
+
+Replace the GoBGP container dependency with [rustbgpd](https://github.com/lance0/rustbgpd) crates embedded directly into the prefixd binary. Eliminates the separate process, gRPC client overhead, proto compilation, and container orchestration. prefixd becomes a single binary that speaks BGP natively.
+
+### Phase 1: Embedded Announcer
+
+- [ ] Add `rustbgpd-wire`, `rustbgpd-fsm`, `rustbgpd-transport`, `rustbgpd-rib` as workspace dependencies
+- [ ] Implement `RustBgpdAnnouncer` behind the existing `FlowSpecAnnouncer` trait (announce, withdraw, list_active, session_status)
+- [ ] Peer lifecycle managed by prefixd config (ASN, neighbor address, AFI-SAFI, timers)
+- [ ] Feature-flag the announcer backend (`--features gobgp` vs `--features native-bgp`, default native)
+
+### Phase 2: Reconciliation + RIB Direct Access
+
+- [ ] Reconciliation loop reads the embedded RIB directly instead of querying GoBGP via gRPC
+- [ ] Expose BGP session state in health detail endpoint from the embedded FSM
+- [ ] Map existing `gobgp.conf` semantics to rustbgpd peer config (migration path for existing deployments)
+
+### Phase 3: Remove GoBGP
+
+- [ ] Remove `proto/` directory and `build.rs` proto compilation
+- [ ] Remove tonic/prost GoBGP client dependencies
+- [ ] Remove `gobgp` service from `docker-compose.yml`
+- [ ] Update all lab topologies (containerlab configs peer directly with prefixd)
+- [ ] Update deployment docs, vendor configs, and troubleshooting guides
+
+### Phase 4: Validation
+
+- [ ] Re-run Juniper cJunosEvolved interop (announce, rate-limit, withdraw, TTL expiry)
+- [ ] Re-run FRR containerlab interop
+- [ ] Arista EOS validation (if hardware available)
+- [ ] Chaos and load test suites pass against embedded speaker
+- [ ] Migration guide for existing GoBGP deployments
+
+---
+
+## v1.3: Multi-Signal Correlation
 
 **The killer feature.** Combine weak signals from multiple detectors into high-confidence decisions. Start with one high-value adapter.
 
@@ -273,7 +308,7 @@ Broader ecosystem integration and advanced capabilities for large-scale deployme
 - [ ] LDAP/AD auth backend (group-to-role mapping)
 - [ ] RADIUS/ISE auth backend (attribute mapping to roles)
 - [ ] Customer self-service portal (per-customer dashboards for MSSPs)
-- [ ] Native BGP speaker (replace GoBGP dependency)
+- ~~Native BGP speaker~~ — moved to v1.2 (rustbgpd integration)
 
 ### Advanced FlowSpec
 
