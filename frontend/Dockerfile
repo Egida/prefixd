@@ -1,23 +1,24 @@
-# Install dependencies with Bun (fast)
-FROM oven/bun:latest AS deps
+# Build stage
+# Pinned: bun >=1.3.11 segfaults during next build finalization (oven-sh/bun#24397)
+FROM oven/bun:1.3.10 AS builder
 
 WORKDIR /app
+
+# Copy package files
 COPY package.json bun.lock ./
+
+# Install dependencies (not frozen to handle minor version differences)
 RUN bun install
 
-# Build with Node to avoid Bun segfault during next build finalization
-# See: https://github.com/oven-sh/bun/issues/24397
-FROM node:22-slim AS builder
-
-WORKDIR /app
-COPY --from=deps /app/node_modules ./node_modules
+# Copy source
 COPY . .
 
+# Build
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN npx next build
+RUN bun run build
 
-# Production stage — Bun runtime
-FROM oven/bun:latest AS runner
+# Production stage
+FROM oven/bun:1.3.10-slim AS runner
 
 WORKDIR /app
 
