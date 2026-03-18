@@ -131,18 +131,53 @@ prefixdctl migrations
 
 ### v0.11.0 -> v0.12.0
 
-- **Breaking: Offset pagination removed.** `GET /v1/mitigations`, `GET /v1/events`, and `GET /v1/audit` no longer accept the `offset` query parameter. Use cursor-based pagination instead (`?cursor=<value>&limit=N`). Responses now include `next_cursor` and `has_more` fields. See [ADR 016](adr/016-cursor-pagination.md).
-- **Breaking: Audit response shape changed.** `GET /v1/audit` now returns `{"entries": [...], "count": N, "next_cursor": ..., "has_more": ...}` instead of a bare array.
+#### Breaking: Offset pagination removed
+
+`GET /v1/mitigations`, `GET /v1/events`, and `GET /v1/audit` no longer accept the `offset` query parameter. Use cursor-based pagination instead. See [ADR 016](adr/016-cursor-pagination.md) for rationale.
+
+**Before (v0.11.0):**
+
+```bash
+# Page 1
+curl '/v1/mitigations?limit=50&offset=0'
+# Page 2
+curl '/v1/mitigations?limit=50&offset=50'
+```
+
+**After (v0.12.0):**
+
+```bash
+# Page 1 (no cursor = first page)
+curl '/v1/mitigations?limit=50'
+# Response includes: {"mitigations": [...], "next_cursor": "MjAyNi0w...", "has_more": true}
+
+# Page 2 (pass next_cursor from previous response)
+curl '/v1/mitigations?limit=50&cursor=MjAyNi0w...'
+```
+
+If you use **prefixdctl**, replace `--offset` with `--cursor` or omit it for the first page.
+
+If you have **custom scripts or integrations** that page through results with `offset`, update them to use the `next_cursor` value from each response. The cursor is an opaque base64 string — do not construct it manually.
+
+#### Breaking: Audit response shape changed
+
+`GET /v1/audit` now returns a wrapped object instead of a bare array:
+
+```json
+// Before: [{"id": "...", "action": "...", ...}, ...]
+// After:  {"entries": [...], "count": 5, "next_cursor": "...", "has_more": false}
+```
+
+#### Other changes
+
 - **New migration (005):** Adds `acknowledged_at` and `acknowledged_by` columns to mitigations table. Runs automatically on startup. Uses `IF NOT EXISTS` so safe to re-run.
-- **New endpoint:** `POST /v1/mitigations/acknowledge` for bulk acknowledging mitigations.
-- **New query params:** `?start=`, `?end=` (ISO 8601) for date range filtering on all list endpoints. `?acknowledged=true|false` on mitigations.
-- **New dependency:** `base64` crate added for cursor encoding.
-- **Frontend:** API hooks now return response objects (`{mitigations, count, next_cursor, has_more}`) instead of bare arrays. If you have custom frontend code consuming these hooks, update accordingly.
-- **prefixdctl:** If you have scripts using `--offset`, they need to be updated to use `--cursor` or omit for the first page.
 - **New migration (006):** Adds `notification_preferences` table for per-operator toast settings. Runs automatically. FK to `operators` table.
-- **Per-destination event routing:** Alerting destinations now accept an optional `events` array to override the global event filter. Existing configs without per-destination events are unaffected (backward-compatible, see ADR 017).
+- **New endpoint:** `POST /v1/mitigations/acknowledge` for bulk acknowledging mitigations.
 - **New endpoint:** `GET/PUT /v1/preferences` for notification preferences (muted events, quiet hours). Quiet hours require both `start` and `end` or both `null` — partial configuration is rejected (400).
-- No config file changes required.
+- **New query params:** `?start=`, `?end=` (ISO 8601) for date range filtering on all list endpoints. `?acknowledged=true|false` on mitigations.
+- **Per-destination event routing:** Alerting destinations now accept an optional `events` array to override the global event filter. Existing configs without per-destination events are unaffected (backward-compatible, see [ADR 017](adr/017-notification-routing-preferences.md)).
+- **Frontend:** API hooks now return response objects (`{mitigations, count, next_cursor, has_more}`) instead of bare arrays. If you have custom frontend code consuming these hooks, update accordingly.
+- No config file changes required. Existing `alerting.yaml` files work as-is.
 
 ### v0.10.1 -> v0.11.0
 

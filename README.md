@@ -245,6 +245,14 @@ FlowSpec (RFC 5575, RFC 8955) is supported by:
 
 ---
 
+## Upgrading
+
+Database migrations run automatically on startup. See **[docs/upgrading.md](docs/upgrading.md)** for version-specific notes.
+
+> **v0.12.0 breaking change:** Offset-based pagination (`?offset=N`) has been removed from all list endpoints. Use cursor-based pagination instead (`?cursor=<opaque>&limit=N`). If you have scripts or integrations using `--offset` or `?offset=`, they must be updated. See [ADR 016](docs/adr/016-cursor-pagination.md) for rationale and [upgrading.md](docs/upgrading.md) for migration examples.
+
+---
+
 ## Project Status
 
 Current version: **v0.12.0**
