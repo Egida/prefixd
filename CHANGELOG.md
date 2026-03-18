@@ -7,20 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-03-18
+
 ### Added
 
 - **Bulk withdraw** — `POST /v1/mitigations/withdraw` accepts up to 100 mitigation IDs with partial success semantics. Frontend adds checkbox selection on active/escalated rows, select-all, selection toolbar, and confirmation dialog.
 - **FlowSpec rule preview** — Mitigation detail page shows a router-style one-liner (`match destination ... protocol ... then ...`) above the structured grid. Copy Rule button for quick comparison with router CLI output.
 - **CVE gate in CI** — Security audit (`cargo audit` + `bun audit`) now gates Docker publishing. CycloneDX SBOM generated on version tags.
 - **Vendor capability matrix** — `docs/vendors.md` with tested status for Juniper (verified), Arista (partially verified), Cisco IOS-XR, Nokia SR OS, and FRR. Reference import policies per vendor.
-- **rustbgpd integration roadmap** — v1.2 milestone for replacing GoBGP with embedded [rustbgpd](https://github.com/lance0/rustbgpd) crates
+
+### Security
+
+- **Next.js** — Updated to 16.1.7 (CSRF bypass, HTTP smuggling, disk cache DoS, postpone DoS)
+- **undici** — Updated to 7.24.4 (WebSocket overflow, request smuggling, memory DoS, CRLF injection)
+- **quinn-proto** — Updated to 0.11.14 (RUSTSEC-2026-0037, DoS in Quinn endpoints)
+- **rollup** — Updated to 4.59.0 (GHSA-mw96-cpmx-2vgc, arbitrary file write)
 
 ### Fixed
 
-- **Next.js CVEs** — Updated to 16.1.7 (CSRF bypass, HTTP smuggling, disk cache DoS, postpone DoS)
-- **undici CVEs** — Updated to 7.24.4 (WebSocket overflow, request smuggling, memory DoS, CRLF injection)
-- **quinn-proto CVE** — Updated to 0.11.14 (RUSTSEC-2026-0037, DoS in Quinn endpoints)
-- **rollup CVE** — Updated to 4.59.0 (GHSA-mw96-cpmx-2vgc, arbitrary file write)
 - **Docs accuracy** — Fixed stale test counts, version strings, metrics port, SECURITY.md supported versions
 
 ## [0.10.1] - 2026-02-22
@@ -776,7 +780,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Safelist prevents mitigation of protected infrastructure
 - Guardrails block overly broad mitigations
 
-[Unreleased]: https://github.com/lance0/prefixd/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/lance0/prefixd/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/lance0/prefixd/compare/v0.10.1...v0.11.0
 [0.10.1]: https://github.com/lance0/prefixd/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/lance0/prefixd/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/lance0/prefixd/compare/v0.9.0...v0.9.1
