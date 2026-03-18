@@ -212,8 +212,8 @@ Releases are tagged from `main`:
 # Update version in Cargo.toml
 # Update CHANGELOG.md
 # Commit and tag
-git tag v0.11.0
-git push origin v0.11.0
+git tag v0.12.0
+git push origin v0.12.0
 ```
 
 CI builds and publishes:

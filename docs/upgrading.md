@@ -129,7 +129,7 @@ prefixdctl migrations
 
 ## Version-Specific Notes
 
-### v0.11.0 -> Next (Unreleased)
+### v0.11.0 -> v0.12.0
 
 - **Breaking: Offset pagination removed.** `GET /v1/mitigations`, `GET /v1/events`, and `GET /v1/audit` no longer accept the `offset` query parameter. Use cursor-based pagination instead (`?cursor=<value>&limit=N`). Responses now include `next_cursor` and `has_more` fields. See [ADR 016](adr/016-cursor-pagination.md).
 - **Breaking: Audit response shape changed.** `GET /v1/audit` now returns `{"entries": [...], "count": N, "next_cursor": ..., "has_more": ...}` instead of a bare array.
