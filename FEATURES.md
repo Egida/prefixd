@@ -340,7 +340,7 @@ alerting:
 Real-time visibility into mitigation state:
 
 - **Overview** - Active mitigations, BGP session status, quota usage, 24h activity chart
-- **Mitigations** - List with filtering, sorting, pagination, inline withdraw, CSV export
+- **Mitigations** - List with filtering, sorting, pagination, inline withdraw, bulk withdraw (multi-select), CSV export
 - **Mitigate Now** - Operator modal (`n` shortcut, command palette action) posts policy-validated ban events
 - **Events** - Attack event history with CSV export
 - **IP History** - Unified timeline per IP (events + mitigations + customer context)

@@ -251,6 +251,48 @@ Content-Type: application/json
 }
 ```
 
+### Bulk Withdraw Mitigations
+
+```http
+POST /v1/mitigations/withdraw
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+**Request:**
+
+```json
+{
+  "mitigation_ids": [
+    "7f72a903-63d1-4a4a-a5db-0517e0a7df1d",
+    "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  ],
+  "operator_id": "jsmith",
+  "reason": "false positive wave"
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `mitigation_ids` | array of UUIDs | yes | Up to 100 mitigation IDs to withdraw |
+| `operator_id` | string | yes | Operator performing the withdrawal |
+| `reason` | string | yes | Reason for withdrawal |
+
+**Response (200 OK):**
+
+```json
+{
+  "withdrawn": 2,
+  "failed": 0,
+  "results": [
+    { "mitigation_id": "7f72a903-...", "status": "withdrawn" },
+    { "mitigation_id": "a1b2c3d4-...", "status": "withdrawn" }
+  ]
+}
+```
+
+Partial success is supported — if some IDs are not found or not active, they appear with `"status": "error"` and an `"error"` field while the valid ones are still withdrawn.
+
 ---
 
 ## Safelist

@@ -98,7 +98,7 @@ docs/
 └── adr/                       # 15 Architecture Decision Records (001-015)
 grafana/                       # Prometheus config, Grafana provisioning, dashboard JSON
 tests/
-├── integration.rs             # 26 integration tests (health, config, mitigations, events, filters)
+├── integration.rs             # 27 integration tests (health, config, mitigations, events, filters, bulk withdraw)
 ├── integration_e2e.rs         # 6 end-to-end tests (ignored without Docker)
 └── integration_postgres.rs    # 9 integration tests (Postgres-backed flows)
 ```
@@ -132,7 +132,8 @@ See `docs/adr/` for all 15 Architecture Decision Records.
 - `POST /v1/events` - Ingest attack event
 - `GET /v1/mitigations` - List mitigations (supports `?status=active&customer_id=cust_123`)
 - `GET /v1/mitigations/{id}` - Get mitigation detail
-- `POST /v1/mitigations/{id}/withdraw` - Withdraw mitigation
+- `POST /v1/mitigations/withdraw` - Bulk withdraw mitigations (up to 100 IDs)
+- `POST /v1/mitigations/{id}/withdraw` - Withdraw single mitigation
 - `GET/POST /v1/safelist` - List/add safelist entries
 - `DELETE /v1/safelist/{prefix}` - Remove safelist entry
 - `GET /v1/config/settings` - Running config (allowlist-redacted)
@@ -181,7 +182,7 @@ See `docs/adr/` for all 15 Architecture Decision Records.
 # Backend unit tests (93 tests)
 cargo test
 
-# All backend tests including integration (151 runnable: 116 unit + 26 integration + 9 postgres; 14 ignored requiring GoBGP/Docker)
+# All backend tests including integration (152 runnable: 116 unit + 27 integration + 9 postgres; 14 ignored requiring GoBGP/Docker)
 cargo test --features test-utils
 
 # Lint
@@ -240,7 +241,7 @@ Completed:
 - 15 Architecture Decision Records
 - CLI tool (prefixdctl) for all API operations
 - OpenAPI spec with utoipa annotations
-- 116 backend unit tests + 35 integration tests (+ 14 ignored requiring GoBGP/Docker)
+- 116 backend unit tests + 36 integration tests (+ 14 ignored requiring GoBGP/Docker)
 - Vitest + Testing Library frontend test infrastructure (26 tests)
 
 ## Code Conventions
