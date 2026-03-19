@@ -51,6 +51,7 @@ src/
 ├── observability/     # Tracing, Prometheus metrics
 ├── policy/            # Policy engine, playbook evaluation
 ├── scheduler/         # Reconciliation loop, TTL expiry
+├── ws/                # WebSocket handler and message types
 ├── error.rs           # PrefixdError enum with thiserror
 ├── state.rs           # Arc<AppState> with shutdown coordination, RwLock for inventory/playbooks/alerting
 ├── lib.rs             # Public module exports
@@ -64,12 +65,12 @@ frontend/
 │   │   ├── page.tsx           # Overview
 │   │   ├── mitigations/       # Mitigations list with inline withdraw
 │   │   ├── mitigations/[id]/  # Mitigation detail (full-page, timeline, customer context)
-│   │   ├── mitigations/create/# Manual "Mitigate Now" form
 │   │   ├── events/            # Event log
 │   │   ├── inventory/         # Searchable customer/service/IP browser
 │   │   ├── audit-log/         # Audit trail
 │   │   ├── config/            # Settings (JSON) + Playbooks (cards) + hot-reload
-│   │   └── admin/             # Tabbed: System Status, Safelist CRUD, User management
+│   │   ├── admin/             # Tabbed: System Status, Safelist CRUD, User management
+│   │   └── ip-history/        # IP history timeline with search
 │   ├── login/                 # Login page (outside auth guard)
 │   ├── globals.css            # Light + dark theme variables
 │   └── layout.tsx             # Root layout with ThemeProvider + Toaster
@@ -100,6 +101,7 @@ grafana/                       # Prometheus config, Grafana provisioning, dashbo
 tests/
 ├── integration.rs             # 37 integration tests (health, config, mitigations, events, filters, bulk withdraw, cursor pagination, bulk acknowledge, per-dest routing, preferences)
 ├── integration_e2e.rs         # 6 end-to-end tests (ignored without Docker)
+├── integration_gobgp.rs       # 8 tests (GoBGP integration, ignored without GoBGP)
 └── integration_postgres.rs    # 9 integration tests (Postgres-backed flows)
 ```
 
@@ -117,7 +119,7 @@ tests/
 10. **Route-group auth guard** - Next.js `(dashboard)/layout.tsx` wraps all protected pages
 11. **Mode-aware auth** - `none`/`bearer`/`credentials`/`mtls` with role checks on protected endpoints
 
-See `docs/adr/` for all 15 Architecture Decision Records.
+See `docs/adr/` for all 17 Architecture Decision Records.
 
 ## API Endpoints
 
@@ -241,7 +243,7 @@ Completed:
 - Nginx reverse proxy (single-origin deployment)
 - ErrorBoundary wrapping all dashboard pages
 - Cross-entity navigation (command palette → detail pages, event↔mitigation linking, audit log → mitigations, clickable stat cards)
-- 15 Architecture Decision Records
+- 17 Architecture Decision Records
 - CLI tool (prefixdctl) for all API operations
 - OpenAPI spec with utoipa annotations
 - 118 backend unit tests + 46 integration tests (+ 14 ignored requiring GoBGP/Docker)

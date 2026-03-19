@@ -23,5 +23,7 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 | [013](013-dry-run-mode.md) | Dry-run mode for safe onboarding | Accepted | 2026-01-15 |
 | [014](014-allowlist-config-redaction.md) | Allowlist-based config redaction | Accepted | 2026-02-18 |
 | [015](015-health-endpoint-split.md) | Split health endpoint (public liveness + authenticated detail) | Accepted | 2026-02-18 |
+| [016](016-cursor-pagination.md) | Cursor-Based Pagination (Replacing Offset) | Accepted | 2026-03-18 |
+| [017](017-notification-routing-preferences.md) | Per-Destination Event Routing and Notification Preferences | Accepted | 2026-03-18 |
 
 ADRs are numbered sequentially as written. Retroactive ADRs (009-013) were documented on 2026-02-18 but dated to when the decision was originally made.

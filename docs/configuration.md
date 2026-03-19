@@ -154,9 +154,6 @@ bgp:
 storage:
   # PostgreSQL connection string
   connection_string: "postgres://prefixd:password@postgres:5432/prefixd"
-  
-  # Connection pool size
-  max_connections: 10
 ```
 
 ### Guardrails
@@ -177,9 +174,9 @@ guardrails:
   # Max ports per rule (router memory protection)
   max_ports: 8
   
-  # TTL bounds
-  min_ttl_seconds: 60
-  max_ttl_seconds: 3600
+  # TTL bounds (optional overrides; if omitted, uses timers.min/max_ttl_seconds)
+  min_ttl_seconds: 30
+  max_ttl_seconds: 1800
 ```
 
 ### Quotas
@@ -187,13 +184,19 @@ guardrails:
 ```yaml
 quotas:
   # Max active mitigations per customer
-  max_active_per_customer: 10
+  max_active_per_customer: 5
   
   # Max active mitigations per POP
   max_active_per_pop: 200
   
   # Max active mitigations globally
   max_active_global: 500
+  
+  # Max new mitigations created per minute (rate limiting)
+  max_new_per_minute: 30
+  
+  # Max active FlowSpec announcements per BGP peer
+  max_announcements_per_peer: 100
 ```
 
 ### Timers
@@ -203,11 +206,18 @@ timers:
   # Default TTL for mitigations
   default_ttl_seconds: 120
   
+  # TTL bounds
+  min_ttl_seconds: 30
+  max_ttl_seconds: 1800
+  
   # Reconciliation loop interval
   reconciliation_interval_seconds: 30
   
   # Correlation window for duplicate events
   correlation_window_seconds: 300
+  
+  # Quiet period after withdraw before re-announcing the same destination
+  quiet_period_after_withdraw_seconds: 120
 ```
 
 ### Escalation
@@ -250,6 +260,17 @@ safelist:
     - "10.0.0.0/8"       # RFC1918
     - "172.16.0.0/12"    # RFC1918
     - "192.168.0.0/16"   # RFC1918
+```
+
+### Shutdown
+
+```yaml
+shutdown:
+  # Seconds to wait for in-flight requests to complete during graceful shutdown
+  drain_timeout_seconds: 30
+  
+  # Keep FlowSpec announcements active after shutdown (fail-open)
+  preserve_announcements: true
 ```
 
 ---

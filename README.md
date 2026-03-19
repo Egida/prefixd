@@ -41,12 +41,6 @@ Detector ──► prefixd ──► GoBGP ──► Routers
 ```bash
 git clone https://github.com/lance0/prefixd.git
 cd prefixd
-
-# Copy example environment file
-cp .env.example .env
-
-# Edit .env to set your passwords (optional for local testing)
-# POSTGRES_PASSWORD=your-secure-password
 ```
 
 ### 2. Start the stack
@@ -270,7 +264,6 @@ Current version: **v0.12.0**
 - **Issues:** [GitHub Issues](https://github.com/lance0/prefixd/issues)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
 - **Architecture Decision Records:** [docs/adr/](docs/adr/)
-- **Security:** [SECURITY.md](SECURITY.md)
 
 ---
 

@@ -121,8 +121,9 @@ prefixdctl migrations
 # 3         raw_details                     2026-01-28 12:00:00
 # 4         schema_migrations               2026-02-20 10:00:00
 # 5         acknowledge                     2026-03-18 14:37:00
+# 6         notification_preferences        2026-03-18 14:37:00
 #
-# 5 migration(s) applied
+# 6 migration(s) applied
 ```
 
 ---

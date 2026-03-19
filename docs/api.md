@@ -227,6 +227,56 @@ Authorization: Bearer <token>
 }
 ```
 
+### Create Mitigation
+
+```http
+POST /v1/mitigations
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+Directly create a mitigation (e.g. from the dashboard "Mitigate Now" form). Unlike `POST /v1/events`, this skips playbook evaluation and creates the mitigation with the exact parameters provided.
+
+**Request:**
+
+```json
+{
+  "operator_id": "jsmith",
+  "reason": "Manual mitigation for ongoing attack",
+  "victim_ip": "203.0.113.10",
+  "protocol": "udp",
+  "dst_ports": [53],
+  "action": "police",
+  "rate_bps": 10000000,
+  "ttl_seconds": 300
+}
+```
+
+**Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `operator_id` | string | yes | Operator creating the mitigation |
+| `reason` | string | yes | Reason for the mitigation |
+| `victim_ip` | string | yes | IPv4 address to protect |
+| `protocol` | string | yes | `"udp"`, `"tcp"`, `"icmp"`, or `"any"` |
+| `dst_ports` | array | no | Destination ports (default `[]`) |
+| `action` | string | yes | `"discard"` or `"police"` |
+| `rate_bps` | integer | conditional | Required when action is `"police"` |
+| `ttl_seconds` | integer | yes | Time-to-live in seconds (1-86400) |
+
+**Response (201 Created):**
+
+Returns the full mitigation object (same shape as [Get Mitigation](#get-mitigation)).
+
+**Error Responses:**
+
+| Status | Reason |
+|--------|--------|
+| 400 | Invalid request (bad IP, invalid protocol, police without rate_bps, etc.) |
+| 401 | Authentication required |
+| 422 | Guardrail rejection (safelist, quotas, prefix length, etc.) |
+
 ### Get Mitigation
 
 ```http
@@ -450,6 +500,7 @@ GET /v1/auth/me
 
 ```json
 {
+  "operator_id": "550e8400-e29b-41d4-a716-446655440000",
   "username": "admin",
   "role": "admin"
 }
@@ -988,12 +1039,12 @@ Requires session authentication (send session cookie).
 **Message Types:**
 
 ```json
-{"type": "MitigationCreated", "mitigation": {...}}
-{"type": "MitigationUpdated", "mitigation": {...}}
-{"type": "MitigationExpired", "mitigation_id": "mit_abc123"}
-{"type": "MitigationWithdrawn", "mitigation_id": "mit_abc123"}
-{"type": "EventIngested", "event": {...}}
-{"type": "ResyncRequired"}
+{"type": "mitigation_created", "mitigation": {...}}
+{"type": "mitigation_updated", "mitigation": {...}}
+{"type": "mitigation_expired", "mitigation_id": "mit_abc123"}
+{"type": "mitigation_withdrawn", "mitigation_id": "mit_abc123"}
+{"type": "event_ingested", "event": {...}}
+{"type": "resync_required"}
 ```
 
 **ResyncRequired:** Sent when server detects client may have missed messages. Client should refresh data.
@@ -1098,7 +1149,11 @@ Some handlers intentionally return status-only errors (no JSON body), especially
 | 500 | Internal server error |
 | 503 | Service unavailable |
 
-### Notification Preferences
+---
+
+## Notification Preferences
+
+### Get Notification Preferences
 
 ```http
 GET /v1/preferences
@@ -1142,6 +1197,8 @@ Content-Type: application/json
 ```
 
 Updates the current operator's notification preferences. `muted_events` contains event type strings that should not produce dashboard toast notifications. `quiet_hours_start`/`quiet_hours_end` are UTC hours (0-23); during quiet hours, only critical events (`mitigation.created`, `mitigation.escalated`) produce toasts. Set both to `null` to disable quiet hours.
+
+**Response:** `200 OK` with no body on success.
 
 **Validation:**
 - `quiet_hours_start` and `quiet_hours_end` must both be present or both be `null` (no half-configured state)

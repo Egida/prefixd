@@ -120,6 +120,7 @@ pre-commit install
 
 ```
 src/
+├── alerting/      # Webhook alerting (Slack, Discord, Teams, PagerDuty, etc.)
 ├── api/           # HTTP handlers and routes
 ├── bgp/           # GoBGP client, FlowSpec construction
 ├── config/        # YAML configuration parsing
@@ -133,6 +134,7 @@ src/
 ├── ws/            # WebSocket handler
 ├── error.rs       # Error types
 ├── state.rs       # Shared application state
+├── lib.rs         # Public module exports
 └── main.rs        # CLI and startup
 
 tests/

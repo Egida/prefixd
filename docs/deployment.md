@@ -306,7 +306,7 @@ postgres:
     POSTGRES_USER: prefixd
     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prefixd_secret}
   volumes:
-    - postgres_data:/var/lib/postgresql/data
+    - postgres-data:/var/lib/postgresql/data
 ```
 
 ### External PostgreSQL
@@ -349,10 +349,12 @@ Applied migrations are tracked in the `schema_migrations` table:
 SELECT * FROM schema_migrations ORDER BY version;
 -- version | name                | applied_at
 -- --------+---------------------+---------------------
---       1 | initial             | 2026-01-15 10:00:00
---       2 | operators_sessions  | 2026-01-15 10:00:00
---       3 | raw_details         | 2026-01-28 12:00:00
---       4 | schema_migrations   | 2026-02-20 10:00:00
+--       1 | initial                  | 2026-01-15 10:00:00
+--       2 | operators_sessions       | 2026-01-15 10:00:00
+--       3 | raw_details              | 2026-01-28 12:00:00
+--       4 | schema_migrations        | 2026-02-20 10:00:00
+--       5 | acknowledge              | 2026-03-18 14:37:00
+--       6 | notification_preferences | 2026-03-18 14:37:00
 ```
 
 ### Check Migration Status
@@ -671,7 +673,6 @@ curl -H "Authorization: Bearer $TOKEN" http://localhost/v1/health/detail
 # Returns: BGP sessions, database status, GoBGP connectivity, uptime, active mitigations
 
 # CLI status (uses /v1/health/detail)
-prefixdctl status
 prefixdctl status
 prefixdctl peers
 ```

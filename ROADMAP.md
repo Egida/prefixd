@@ -37,7 +37,7 @@ These blockers map directly to the `v1.0` release gates below. Keep both section
 
 ### Documentation Polish
 
-- [ ] Review all docs for accuracy (release-candidate freeze)
+- [x] Review all docs for accuracy (release-candidate freeze)
 - [x] Add example Grafana dashboards
 - [ ] Record demo video: attack → detection → mitigation → recovery
 
@@ -200,7 +200,7 @@ Target: Validated with real routers, stable API, production-proven. Operators tr
 
 ### Documentation Polish
 
-- [ ] Review all docs for accuracy (release-candidate freeze)
+- [x] Review all docs for accuracy (release-candidate freeze)
 - [ ] Record demo video: attack → detection → mitigation → recovery
 - [x] Vendor quirks documented
 
