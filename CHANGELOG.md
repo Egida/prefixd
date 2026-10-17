@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Tolerate Docker CI cache export failures after successful image builds and
+  pushes, and let each image matrix job finish independently.
+
 - Dashboard installs now use Bun 1.3.14 and the frozen Bun lock in CI/containers;
   remove the stale npm lock and obsolete `next lint` command.
 - Retire dashboard mock mode and unused legacy toast/CSS files; keep real API
