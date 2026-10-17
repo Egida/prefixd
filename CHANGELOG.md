@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Refresh compatible Rust patches to futures 0.3.33, prost 0.14.4 and
+  serde_json 1.0.151 while preserving the existing advisory fixes.
+
 - Recover every eligible desired rule when creation timestamps tie. Reconciliation
   reads a strict complete owner inventory scoped to the controller's POP; pending
   creation rows remain excluded from repairs and active-status gauges.
