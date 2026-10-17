@@ -20,7 +20,7 @@ use crate::db::{ListParams, NotificationPreferences};
 use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackEventInput, AttackVector, FlowSpecAction,
     FlowSpecNlri, FlowSpecRule, MatchCriteria, Mitigation, MitigationIntent, MitigationStatus,
-    ensure_no_pending_withdrawal, execute_withdrawal, request_withdrawal,
+    execute_withdrawal, find_mitigation_owner, request_withdrawal,
 };
 use crate::error::PrefixdError;
 use crate::guardrails::Guardrails;
@@ -495,6 +495,7 @@ async fn withdraw_and_notify(
         actor_type,
         actor,
         reason,
+        !state.is_dry_run(),
     )
     .await?;
     let mitigation = execute_withdrawal(
@@ -678,13 +679,14 @@ async fn handle_ban(
         state.settings.timers.default_ttl_seconds,
     );
     let candidate_intent = policy.evaluate(&event, context.as_ref());
+    let mut existing_owner = None;
     // Reject before storing the detector ID so the same event remains retryable.
     if let Ok(intent) = &candidate_intent {
         let rule = FlowSpecRule::new(
             FlowSpecNlri::from(&intent.match_criteria),
             FlowSpecAction::from((intent.action_type, &intent.action_params)),
         );
-        ensure_no_pending_withdrawal(
+        existing_owner = find_mitigation_owner(
             state.repo.as_ref(),
             &state.settings.pop,
             &rule,
@@ -1015,14 +1017,7 @@ async fn handle_ban(
         }
     };
 
-    // Check for existing mitigation with same scope
-    let scope_hash = intent.match_criteria.compute_scope_hash();
-    if let Some(mut existing) = state
-        .repo
-        .find_active_by_scope(&scope_hash, &state.settings.pop)
-        .await
-        .map_err(AppError)?
-    {
+    if let Some(mut existing) = existing_owner {
         // Extend TTL
         existing.extend_ttl(intent.ttl_seconds, event.event_id);
         state
@@ -1584,7 +1579,7 @@ pub async fn create_mitigation(
         FlowSpecNlri::from(&intent.match_criteria),
         FlowSpecAction::from((intent.action_type, &intent.action_params)),
     );
-    if let Err(error) = ensure_no_pending_withdrawal(
+    match find_mitigation_owner(
         state.repo.as_ref(),
         &state.settings.pop,
         &rule,
@@ -1592,7 +1587,14 @@ pub async fn create_mitigation(
     )
     .await
     {
-        return Ok(AppError(error).into_response());
+        Ok(Some(_)) => {
+            return Ok(AppError(PrefixdError::Conflict(
+                "FlowSpec rule already has an active owner".into(),
+            ))
+            .into_response());
+        }
+        Ok(None) => {}
+        Err(error) => return Ok(AppError(error).into_response()),
     }
 
     // Validate

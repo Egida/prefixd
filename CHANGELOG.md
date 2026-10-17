@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or downgrading to a binary that ignores the queue.
 - Continue independent reconciliation housekeeping and peer observations after
   mutation failures; release the lifecycle lock between scheduler rules.
+- Preserve enforced-mode withdrawal requests across dry-run restarts. Reject
+  canonical duplicate creation before RPC, extend a single canonical detector
+  owner, and let expired legacy duplicate owners complete TTL cleanup once no
+  live owner remains.
+- Keep pending or failed-expiry rows in status-active mitigation gauges. Use
+  rustbgpd peer addresses for unique session names and skip unnecessary locked
+  database reads for already-observed announcement candidates.
 - Bound complete GoBGP and rustbgpd mutation responses, including stalled bodies
   and trailers, to 30 seconds per attempt with at most three attempts.
 

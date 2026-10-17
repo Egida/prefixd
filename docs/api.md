@@ -356,7 +356,13 @@ Returns the full mitigation object (same shape as [Get Mitigation](#get-mitigati
 |--------|--------|
 | 400 | Invalid request (bad IP, invalid protocol, police without rate_bps, etc.) |
 | 401 | Authentication required |
+| 409 | Scope already has an active canonical owner or pending withdrawal |
 | 422 | Guardrail rejection (safelist, quotas, prefix length, etc.) |
+
+Canonical ownership ignores equivalent IPv6 spelling and duplicate destination
+ports. A duplicate manual request is rejected before speaker mutation, preserving
+the original rule, action and TTL. Detector events extend a single existing owner;
+ambiguous legacy ownership is rejected before consuming the external event ID.
 
 ### Get Mitigation
 
@@ -410,10 +416,15 @@ Pending cleanup is excluded from announcement repair. The original principal
 and reason are retained when the scheduler completes the request; the legacy
 `operator_id` request field does not override the authenticated principal.
 
-A withdrawal targeting another POP or a rule with another active owner returns
+A withdrawal targeting another POP or a rule with another live owner returns
 409 before deleting anything. A new event or manual request that would revive
 a pending deletion also returns 409. Bulk requests report these conflicts in
 their per-item errors.
+
+Enforced-mode pending requests remain pending while the controller runs in
+dry-run. No terminal state, success notification or completion audit is produced
+until confirmed deletion after enforcement resumes. Requests originally created
+in dry-run remain local simulations.
 
 If an earlier TTL-expiry request is already pending, a successful retry completes
 that original operation as `expired`. The single-withdraw response and mitigation
