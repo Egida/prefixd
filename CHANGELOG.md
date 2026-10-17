@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep pending or failed-expiry rows in status-active mitigation gauges. Use
   rustbgpd peer addresses for unique session names and skip unnecessary locked
   database reads for already-observed announcement candidates.
+- Correct the documented history-pruning transaction to retire completed
+  withdrawals safely and retain pending cleanup, recent history and referenced
+  detector/correlation events. Preserve audit records and run vacuum separately.
 - Bound complete GoBGP and rustbgpd mutation responses, including stalled bodies
   and trailers, to 30 seconds per attempt with at most three attempts.
 
