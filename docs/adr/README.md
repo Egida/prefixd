@@ -32,7 +32,6 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 | [022](022-confidence-decay.md) | Confidence Decay for Signal Groups | Accepted | 2026-05-11 |
 | [023](023-rustbgpd-over-grpc.md) | Drive rustbgpd over gRPC instead of embedding its crates | Accepted (updates 001) | 2026-09-28 |
 | [024](024-loco-staged-migration.md) | Migrate to loco-rs in stages | Accepted | 2026-09-28 |
-
 | [025](025-pluggable-speaker-backends.md) | Pluggable speakers with rustbgpd preferred and GoBGP supported | Accepted | 2026-10-17 |
 
 ADRs are numbered sequentially as written. Retroactive ADRs (009-013) were documented on 2026-02-18 but dated to when the decision was originally made.
