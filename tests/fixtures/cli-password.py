@@ -14,21 +14,27 @@ import time
 def interactive(username, password, expected, ending=b"\n"):
     pid, terminal = pty.fork()
     if pid == 0:
+        settings = termios.tcgetattr(0)
+        settings[3] |= termios.ECHO | termios.ICANON | termios.ISIG
+        termios.tcsetattr(0, termios.TCSANOW, settings)
         os.execv(sys.argv[1], [sys.argv[1], "operators", "create", "--username", username])
 
     output = bytearray()
-    original_flags = termios.tcgetattr(terminal)[3]
     finished = 0
+    eof = False
     sent = False
     deadline = time.monotonic() + 15
     try:
         while time.monotonic() < deadline:
             if select.select([terminal], [], [], 0.05)[0]:
                 try:
-                    output.extend(os.read(terminal, 4096))
+                    chunk = os.read(terminal, 4096)
+                    output.extend(chunk)
+                    eof = not chunk
                 except OSError as error:
                     if error.errno != errno.EIO:
                         raise
+                    eof = True
             if not sent and b"Password:" in output:
                 # The prompt can precede the terminal-mode change by a few instructions.
                 echo_deadline = time.monotonic() + 2
@@ -37,8 +43,13 @@ def interactive(username, password, expected, ending=b"\n"):
                     time.sleep(0.01)
                 os.write(terminal, password + ending)
                 sent = True
-            finished, status = os.waitpid(pid, os.WNOHANG)
-            if finished:
+                # Exercise child exit before its final PTY output is consumed.
+                while not os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG):
+                    assert time.monotonic() < deadline, "child did not exit before the capture deadline"
+                    time.sleep(0.001)
+            if not finished:
+                finished, status = os.waitpid(pid, os.WNOHANG)
+            if finished and eof:
                 break
         else:
             raise AssertionError("password command timed out")
@@ -47,7 +58,7 @@ def interactive(username, password, expected, ending=b"\n"):
         exit_code = os.waitstatus_to_exitcode(status)
         assert exit_code == expected, "unexpected command exit status"
         terminal_flags = termios.ECHO | termios.ICANON | termios.ISIG
-        assert termios.tcgetattr(terminal)[3] & terminal_flags == original_flags & terminal_flags, "terminal mode was not restored"
+        assert termios.tcgetattr(terminal)[3] & terminal_flags == terminal_flags, "terminal mode was not restored"
         if password:
             assert password.strip() not in output, "password appeared in terminal output"
         elif ending == b"\n":
