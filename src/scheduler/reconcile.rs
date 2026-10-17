@@ -448,8 +448,14 @@ impl ReconciliationLoop {
                 && !pending_keys.contains(self.build_flowspec_rule(mitigation).nlri_hash().as_str())
         });
 
-        // Get actual state from BGP
-        let announced = self.announcer.list_active().await?;
+        let Some(reader) = self.announcer.reader() else {
+            tracing::debug!(
+                backend = self.announcer.backend(),
+                "rule observation unsupported; repair skipped"
+            );
+            return Ok(());
+        };
+        let announced = reader.list_active().await?;
         let announced_hashes: std::collections::HashSet<_> =
             announced.iter().map(|r| r.nlri_hash()).collect();
 
@@ -545,7 +551,10 @@ impl ReconciliationLoop {
     }
 
     async fn update_bgp_session_metrics(&self) {
-        match self.announcer.session_status().await {
+        let Some(observer) = self.announcer.peer_observer() else {
+            return;
+        };
+        match observer.session_status().await {
             Ok(peers) => {
                 for peer in &peers {
                     let value = if peer.state.is_established() {
@@ -575,7 +584,7 @@ impl ReconciliationLoop {
 mod tests {
     use super::*;
     use crate::{
-        bgp::{MockAnnouncer, PeerStatus},
+        bgp::{FlowSpecReader, FlowSpecWriter, MockAnnouncer, PeerObserver, PeerStatus},
         db::MockRepository,
         domain::{
             ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
@@ -594,8 +603,20 @@ mod tests {
         inventories: AtomicUsize,
     }
 
-    #[async_trait::async_trait]
     impl FlowSpecAnnouncer for FailingWithdrawal {
+        fn backend(&self) -> &'static str {
+            "mock"
+        }
+        fn reader(&self) -> Option<&dyn FlowSpecReader> {
+            Some(self)
+        }
+        fn peer_observer(&self) -> Option<&dyn PeerObserver> {
+            Some(self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for FailingWithdrawal {
         async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
             self.announcements.fetch_add(1, SeqCst);
             if self.mode.load(SeqCst) == 3 && rule.nlri.dst_prefix == "192.0.2.1/32" {
@@ -605,7 +626,6 @@ mod tests {
             }
             self.inner.announce(rule).await
         }
-
         async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
             let mode = self.mode.load(SeqCst);
             if rule.nlri.dst_prefix == "192.0.2.1/32" && mode != 0 {
@@ -618,13 +638,27 @@ mod tests {
             }
             self.inner.withdraw(rule).await
         }
-
+    }
+    #[async_trait::async_trait]
+    impl FlowSpecReader for FailingWithdrawal {
         async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
             self.inventories.fetch_add(1, SeqCst);
+            if self.mode.load(SeqCst) == 4 {
+                return Err(PrefixdError::BgpAnnouncementFailed(
+                    "inventory unavailable".into(),
+                ));
+            }
             self.inner.list_active().await
         }
-
+    }
+    #[async_trait::async_trait]
+    impl PeerObserver for FailingWithdrawal {
         async fn session_status(&self) -> Result<Vec<PeerStatus>> {
+            if self.mode.load(SeqCst) == 5 {
+                return Err(PrefixdError::BgpAnnouncementFailed(
+                    "peers unavailable".into(),
+                ));
+            }
             self.inner.session_status().await
         }
     }
@@ -654,6 +688,163 @@ mod tests {
         mitigation
     }
 
+    // Deliberately implements no observation traits: writing alone is sufficient.
+    #[derive(Default)]
+    struct WriteOnly {
+        announcements: AtomicUsize,
+        withdrawals: AtomicUsize,
+    }
+
+    impl FlowSpecAnnouncer for WriteOnly {
+        fn backend(&self) -> &'static str {
+            "write-only-test"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for WriteOnly {
+        async fn announce(&self, _: &FlowSpecRule) -> Result<()> {
+            self.announcements.fetch_add(1, SeqCst);
+            Ok(())
+        }
+        async fn withdraw(&self, _: &FlowSpecRule) -> Result<()> {
+            self.withdrawals.fetch_add(1, SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn write_only_speaker_skips_repairs_but_finishes_cleanup_and_updates_counts() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(WriteOnly::default());
+        let selected: &dyn FlowSpecAnnouncer = speaker.as_ref();
+        assert!(!selected.capabilities().rule_reader);
+        assert!(!selected.capabilities().peer_observer);
+        let expired = expired_mitigation("192.0.2.1");
+        let mut active = expired_mitigation("192.0.2.2");
+        active.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+        let mut pending = expired_mitigation("192.0.2.3");
+        pending.expires_at = active.expires_at;
+        for mitigation in [&expired, &active, &pending] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        request_withdrawal(
+            repo.as_ref(),
+            &pending,
+            false,
+            "operator",
+            "test",
+            "cleanup".into(),
+            true,
+        )
+        .await
+        .unwrap();
+        let peer =
+            crate::observability::metrics::BGP_SESSION_UP.with_label_values(&["write-only-peer"]);
+        peer.set(1.0);
+        let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+        for _ in 0..2 {
+            reconciler.reconcile().await.unwrap();
+        }
+        assert_eq!(speaker.announcements.load(SeqCst), 0);
+        assert_eq!(speaker.withdrawals.load(SeqCst), 2);
+        assert_eq!(
+            repo.get_mitigation(expired.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Expired
+        );
+        assert_eq!(
+            repo.get_mitigation(pending.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Withdrawn
+        );
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+        assert_eq!(
+            crate::observability::metrics::MITIGATIONS_ACTIVE
+                .with_label_values(&["discard", "test"])
+                .get(),
+            1.0
+        );
+        assert_eq!(
+            crate::observability::metrics::RECONCILIATION_ACTIVE_COUNT
+                .with_label_values(&["local"])
+                .get(),
+            1.0
+        );
+        assert_eq!(peer.get(), 1.0);
+    }
+
+    #[tokio::test]
+    async fn supported_reader_failure_is_an_error_without_repairs_and_cleanup_continues() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FailingWithdrawal {
+            inner: MockAnnouncer::new(),
+            mode: AtomicUsize::new(4),
+            announcements: AtomicUsize::new(0),
+            inventories: AtomicUsize::new(0),
+        });
+        let expired = expired_mitigation("192.0.2.2");
+        let mut active = expired_mitigation("192.0.2.3");
+        active.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+        for mitigation in [&expired, &active] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(
+            repo.get_mitigation(expired.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Expired
+        );
+        assert_eq!(speaker.announcements.load(SeqCst), 0);
+        let errors =
+            crate::observability::metrics::RECONCILIATION_RUNS.with_label_values(&["error"]);
+        let before = errors.get();
+        let (shutdown, rx) = broadcast::channel(1);
+        shutdown.send(()).unwrap();
+        reconciler.run(rx).await;
+        assert_eq!(errors.get(), before + 1.0);
+        assert_eq!(speaker.inventories.load(SeqCst), 2);
+        assert_eq!(speaker.announcements.load(SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn supported_peer_failure_preserves_last_successful_metric() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let speaker = Arc::new(FailingWithdrawal {
+            inner: MockAnnouncer::with_peers(vec![PeerStatus {
+                name: "failed-peer-observation".into(),
+                address: "192.0.2.254".into(),
+                state: crate::bgp::SessionState::Established,
+            }]),
+            mode: AtomicUsize::new(0),
+            announcements: AtomicUsize::new(0),
+            inventories: AtomicUsize::new(0),
+        });
+        let reconciler =
+            ReconciliationLoop::new(Arc::new(MockRepository::new()), speaker.clone(), 30, false);
+        reconciler.update_bgp_session_metrics().await;
+        speaker.mode.store(5, SeqCst);
+        reconciler.update_bgp_session_metrics().await;
+        assert_eq!(
+            crate::observability::metrics::BGP_SESSION_UP
+                .with_label_values(&["failed-peer-observation"])
+                .get(),
+            1.0
+        );
+    }
+
     #[tokio::test]
     async fn pending_creation_is_excluded_from_gauges_and_fresh_repair_checks() {
         let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
@@ -662,20 +853,38 @@ mod tests {
             id: uuid::Uuid,
             inner: MockAnnouncer,
         }
-        #[async_trait::async_trait]
         impl FlowSpecAnnouncer for PendingDuringInventory {
+            fn backend(&self) -> &'static str {
+                "mock"
+            }
+            fn reader(&self) -> Option<&dyn FlowSpecReader> {
+                Some(self)
+            }
+            fn peer_observer(&self) -> Option<&dyn PeerObserver> {
+                Some(self)
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl FlowSpecWriter for PendingDuringInventory {
             async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
                 self.inner.announce(rule).await
             }
             async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
                 self.inner.withdraw(rule).await
             }
+        }
+        #[async_trait::async_trait]
+        impl FlowSpecReader for PendingDuringInventory {
             async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
                 let mut mitigation = self.repo.get_mitigation(self.id).await?.unwrap();
                 mitigation.status = MitigationStatus::Pending;
                 self.repo.update_mitigation(&mitigation).await?;
                 self.inner.list_active().await
             }
+        }
+        #[async_trait::async_trait]
+        impl PeerObserver for PendingDuringInventory {
             async fn session_status(&self) -> Result<Vec<PeerStatus>> {
                 self.inner.session_status().await
             }

@@ -2,6 +2,7 @@
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use prefixd::bgp::{FlowSpecReader, FlowSpecWriter, PeerObserver};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -22,8 +23,20 @@ struct RecoveringWithdrawal {
     failing: std::sync::atomic::AtomicBool,
 }
 
-#[async_trait::async_trait]
 impl prefixd::bgp::FlowSpecAnnouncer for RecoveringWithdrawal {
+    fn backend(&self) -> &'static str {
+        "mock"
+    }
+    fn reader(&self) -> Option<&dyn prefixd::bgp::FlowSpecReader> {
+        Some(self)
+    }
+    fn peer_observer(&self) -> Option<&dyn prefixd::bgp::PeerObserver> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl prefixd::bgp::FlowSpecWriter for RecoveringWithdrawal {
     async fn announce(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
         self.inner.announce(rule).await
     }
@@ -36,9 +49,15 @@ impl prefixd::bgp::FlowSpecAnnouncer for RecoveringWithdrawal {
         }
         self.inner.withdraw(rule).await
     }
+}
+#[async_trait::async_trait]
+impl prefixd::bgp::FlowSpecReader for RecoveringWithdrawal {
     async fn list_active(&self) -> prefixd::error::Result<Vec<prefixd::domain::FlowSpecRule>> {
         self.inner.list_active().await
     }
+}
+#[async_trait::async_trait]
+impl prefixd::bgp::PeerObserver for RecoveringWithdrawal {
     async fn session_status(&self) -> prefixd::error::Result<Vec<prefixd::bgp::PeerStatus>> {
         self.inner.session_status().await
     }
@@ -292,8 +311,20 @@ async fn test_repair_yields_to_operator_and_rechecks_stale_candidate() {
         release: tokio::sync::Notify,
         repairs: std::sync::Mutex<Vec<String>>,
     }
-    #[async_trait::async_trait]
     impl FlowSpecAnnouncer for GatedRepair {
+        fn backend(&self) -> &'static str {
+            "mock"
+        }
+        fn reader(&self) -> Option<&dyn FlowSpecReader> {
+            Some(self)
+        }
+        fn peer_observer(&self) -> Option<&dyn PeerObserver> {
+            Some(self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for GatedRepair {
         async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
             self.repairs
                 .lock()
@@ -306,9 +337,15 @@ async fn test_repair_yields_to_operator_and_rechecks_stale_candidate() {
         async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
             self.inner.withdraw(rule).await
         }
+    }
+    #[async_trait::async_trait]
+    impl FlowSpecReader for GatedRepair {
         async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
             self.inner.list_active().await
         }
+    }
+    #[async_trait::async_trait]
+    impl PeerObserver for GatedRepair {
         async fn session_status(&self) -> Result<Vec<PeerStatus>> {
             Ok(vec![])
         }
@@ -454,7 +491,7 @@ async fn test_authenticated_single_and_bulk_withdrawals_record_session_actor() {
         );
         mitigation.activate();
         repo.insert_mitigation(&mitigation).await.unwrap();
-        prefixd::bgp::FlowSpecAnnouncer::announce(speaker.as_ref(), &mitigation_rule(&mitigation))
+        prefixd::bgp::FlowSpecWriter::announce(speaker.as_ref(), &mitigation_rule(&mitigation))
             .await
             .unwrap();
         targets.push(mitigation);
@@ -578,7 +615,6 @@ async fn test_authenticated_single_and_bulk_withdrawals_record_session_actor() {
 #[tokio::test]
 async fn test_foreign_pop_cannot_delete_local_rule_or_receive_local_repair() {
     use prefixd::{
-        bgp::FlowSpecAnnouncer,
         domain::{
             ActionParams, ActionType, AttackEvent, AttackEventInput, MatchCriteria, Mitigation,
             MitigationIntent, MitigationStatus, mitigation_rule,
@@ -727,11 +763,8 @@ async fn test_foreign_pop_cannot_delete_local_rule_or_receive_local_repair() {
 
 #[tokio::test]
 async fn test_canonical_owner_preflight_preserves_existing_rule_and_reuses_detector_owner() {
-    use prefixd::{
-        bgp::FlowSpecAnnouncer,
-        domain::{
-            ActionParams, ActionType, MatchCriteria, Mitigation, MitigationIntent, mitigation_rule,
-        },
+    use prefixd::domain::{
+        ActionParams, ActionType, MatchCriteria, Mitigation, MitigationIntent, mitigation_rule,
     };
     let repo = Arc::new(MockRepository::new());
     let speaker = Arc::new(MockAnnouncer::new());
@@ -1088,6 +1121,115 @@ async fn test_health_detail_endpoint() {
         json["uptime_seconds"].is_number(),
         "uptime_seconds should be present on detail"
     );
+}
+
+#[tokio::test]
+async fn health_distinguishes_unsupported_failed_empty_and_populated_peer_observation() {
+    use prefixd::bgp::{FlowSpecAnnouncer, PeerStatus, SessionState};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    struct HealthSpeaker {
+        mode: usize,
+        peer_calls: AtomicUsize,
+    }
+    impl FlowSpecAnnouncer for HealthSpeaker {
+        fn backend(&self) -> &'static str {
+            "health-test"
+        }
+        fn reader(&self) -> Option<&dyn FlowSpecReader> {
+            if self.mode == 4 { None } else { Some(self) }
+        }
+        fn peer_observer(&self) -> Option<&dyn PeerObserver> {
+            if self.mode == 0 { None } else { Some(self) }
+        }
+    }
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for HealthSpeaker {
+        async fn announce(&self, _: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+            panic!("health must not mutate rules")
+        }
+        async fn withdraw(&self, _: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+            panic!("health must not mutate rules")
+        }
+    }
+    #[async_trait::async_trait]
+    impl FlowSpecReader for HealthSpeaker {
+        async fn list_active(&self) -> prefixd::error::Result<Vec<prefixd::domain::FlowSpecRule>> {
+            panic!("health must not read the RIB")
+        }
+    }
+    #[async_trait::async_trait]
+    impl PeerObserver for HealthSpeaker {
+        async fn session_status(&self) -> prefixd::error::Result<Vec<PeerStatus>> {
+            self.peer_calls.fetch_add(1, SeqCst);
+            match self.mode {
+                1 => Err(prefixd::error::PrefixdError::BgpAnnouncementFailed(
+                    "peer RPC failed".into(),
+                )),
+                2 => Ok(vec![]),
+                3 | 4 => Ok(vec![PeerStatus {
+                    name: "router".into(),
+                    address: "192.0.2.1".into(),
+                    state: SessionState::Established,
+                }]),
+                _ => panic!("unsupported observer must not be called"),
+            }
+        }
+    }
+    for mode in 0..5 {
+        let speaker = Arc::new(HealthSpeaker {
+            mode,
+            peer_calls: AtomicUsize::new(0),
+        });
+        let state = AppState::new(
+            test_settings(),
+            test_inventory(),
+            test_playbooks(),
+            Arc::new(MockRepository::new()),
+            speaker.clone(),
+            ".".into(),
+        )
+        .unwrap();
+        let response = create_test_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/health/detail")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["speaker"]["backend"], "health-test");
+        assert_eq!(json["speaker"]["capabilities"]["rule_reader"], mode != 4);
+        assert_eq!(json["speaker"]["capabilities"]["peer_observer"], mode != 0);
+        assert_eq!(speaker.peer_calls.load(SeqCst), usize::from(mode != 0));
+        assert_eq!(
+            json["gobgp"]["status"],
+            [
+                "unsupported",
+                "error",
+                "connected",
+                "connected",
+                "connected"
+            ][mode]
+        );
+        assert_eq!(
+            json["status"],
+            if mode == 1 { "degraded" } else { "healthy" }
+        );
+        assert_eq!(json["gobgp"]["error"].is_string(), mode == 1);
+        assert_eq!(
+            json["bgp_sessions"].as_object().unwrap().len(),
+            usize::from(mode >= 3)
+        );
+        if mode >= 3 {
+            assert_eq!(json["bgp_sessions"]["router"], "established");
+        }
+    }
 }
 
 #[tokio::test]

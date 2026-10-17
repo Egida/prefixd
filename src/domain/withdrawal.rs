@@ -244,7 +244,7 @@ pub async fn execute_withdrawal(
 mod tests {
     use super::*;
     use crate::{
-        bgp::MockAnnouncer,
+        bgp::{FlowSpecWriter, MockAnnouncer},
         db::MockRepository,
         domain::{ActionParams, ActionType, AttackVector, MatchCriteria, MitigationIntent},
     };

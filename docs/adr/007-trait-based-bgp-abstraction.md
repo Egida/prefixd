@@ -14,19 +14,45 @@ The policy engine and reconciliation loop need to announce and withdraw FlowSpec
 
 ## Decision
 
-Define a `FlowSpecAnnouncer` trait that abstracts BGP operations:
+Keep `Arc<dyn FlowSpecAnnouncer>` as the selected-speaker facade, with required
+writing and optional observation (updated October 2026):
 
 ```rust
 #[async_trait]
-pub trait FlowSpecAnnouncer: Send + Sync {
+pub trait FlowSpecWriter: Send + Sync {
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()>;
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()>;
+}
+
+#[async_trait]
+pub trait FlowSpecReader: Send + Sync {
     async fn list_active(&self) -> Result<Vec<FlowSpecRule>>;
+}
+
+#[async_trait]
+pub trait PeerObserver: Send + Sync {
     async fn session_status(&self) -> Result<Vec<PeerStatus>>;
+}
+
+pub trait FlowSpecAnnouncer: FlowSpecWriter {
+    fn backend(&self) -> &'static str;
+    fn reader(&self) -> Option<&dyn FlowSpecReader> { None }
+    fn peer_observer(&self) -> Option<&dyn PeerObserver> { None }
 }
 ```
 
-(The trait is defined in `src/bgp/announcer.rs`; `Result` is `crate::error::Result`.)
+The traits live in `src/bgp/announcer.rs`; `Result` is `crate::error::Result`.
+Announcement is a retry-safe upsert, withdrawal is idempotent, and success only
+acknowledges the backend's local mutation stage. Observer availability is derived
+from accessors, never inferred from an empty response or a failed RPC. Implementing
+an observer requires explicit opt-in; test wrappers expose themselves so faults
+and barriers remain visible.
+
+Without rule observation, the scheduler preserves desired inventory validation,
+status gauges, TTL expiry and pending cleanup, but skips repairs. Supported read
+errors fail reconciliation. Peer observation errors retain last successful metrics;
+unsupported observation skips those updates. Existing adapters expose both observers.
+A production write-only backend still requires a durable announcement ledger.
 
 Implementations:
 - `GoBgpAnnouncer` — GoBGP gRPC client (the shipped backend, ADR 001)

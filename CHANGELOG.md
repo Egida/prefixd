@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Split required speaker writes from optional rule and peer observation while
+  retaining the selected-speaker facade. Health reports backend/availability;
+  CLI and dashboard distinguish unsupported, failed and empty peer reads.
+  All existing adapters retain both observations. Write-only reconciliation skips
+  repairs while preserving desired counts, TTL expiry and pending cleanup;
+  production write-only backends remain gated on a durable announcement ledger.
+
 - Digest-pinned rustbgpd v0.76.0/v0.77.0 CI coverage for local lifecycle, TTL
   withdrawal and recovery through the same client after a speaker restart.
 - Reconciliation repair outcome counters and operator recovery/alert guidance.

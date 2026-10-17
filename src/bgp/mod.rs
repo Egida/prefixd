@@ -63,6 +63,8 @@ mod tests {
             speaker_factory(&config)
                 .await
                 .unwrap()
+                .reader()
+                .unwrap()
                 .list_active()
                 .await
                 .unwrap()

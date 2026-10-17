@@ -20,8 +20,10 @@ to work. Embedding rustbgpd's private runtime crates would couple policy and
 protocol lifecycles to an unsupported library boundary. Its controller gRPC API
 already supplies the operations prefixd needs.
 
-The current four-method `FlowSpecAnnouncer` trait requires rule read-back and
-peer observation. Both GoBGP and rustbgpd can satisfy it. A generic write-only
+The original four-method `FlowSpecAnnouncer` trait required rule read-back and
+peer observation. The optional observation split is now implemented in
+[ADR 007](007-trait-based-bgp-abstraction.md); both GoBGP and rustbgpd retain
+both observers. A generic write-only
 adapter cannot honestly return an empty RIB: reconciliation would continually
 reannounce every desired rule. A durable announcement ledger is a prerequisite
 for that class of backend.

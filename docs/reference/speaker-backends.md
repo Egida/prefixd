@@ -7,16 +7,40 @@ to use GoBGP while the rustbgpd path is qualified.
 
 ## Current boundary
 
-`FlowSpecAnnouncer` has four required operations: announce, withdraw, list active
-local rules, and observe peer state. A factory selects the configured adapter;
-the policy engine and scheduler use the same trait for every backend.
+`FlowSpecAnnouncer` remains the selected `Arc<dyn FlowSpecAnnouncer>` facade.
+Its required `FlowSpecWriter` contract provides announce/upsert and idempotent
+withdraw: repeating a request after an ambiguous response must be safe.
+`reader()` optionally exposes `FlowSpecReader`; `peer_observer()` optionally
+exposes `PeerObserver`. Availability is derived from these accessors. All three
+current adapters provide both observers; no deployment default changes.
+
+Without a reader, reconciliation still loads the strict complete desired
+inventory and updates status gauges, but performs no announcement repairs.
+Independent TTL and pending-withdrawal cleanup continue. A supported reader
+failure fails the pass and increments the run error counter; it never becomes
+an empty inventory. Unsupported peer observation skips peer metric updates;
+a failed observation also retains the last successful metric values.
+
+Health detail adds `speaker.backend` and two availability booleans under
+`speaker.capabilities`: `rule_reader` and `peer_observer`. The legacy `gobgp`
+component reports `unsupported` without an error when peer observation is absent,
+`error` when it fails, and `connected` when it succeeds (even with zero peers).
+`bgp_sessions` remains the same peer-name/state map. Missing optional observation
+alone does not make overall health degraded. Health does not probe the RIB.
+These fields describe API availability and peer observation, not announcement,
+export, or enforcement confirmation.
+
+`prefixdctl peers` fails explicitly on unsupported or failed peer observation;
+successful JSON remains the peer map. Status and dashboard clients tolerate older
+health responses without `speaker` metadata. The dashboard distinguishes
+unsupported observation, observation errors, and a successful empty peer list.
 
 | Backend | Runtime selection | Read-back / peers | Status |
 |---------|-------------------|-------------------|--------|
 | GoBGP | `gobgp` or existing `sidecar` | Implemented / implemented | Existing backend; existing lab receipts apply to this path |
 | rustbgpd | `rustbgpd`, built with `bgp-rustbgpd` | Local injected view / neighbor states | Experimental adapter; deployment and router parity gates remain open |
 | Mock | `mock` | In-memory / synthetic | Automated testing only |
-| Generic HTTP shim | Planned | Capability-dependent | Requires durable ledger and optional observation support |
+| Generic HTTP shim | Planned | Capability-dependent | Requires durable announcement ledger |
 | ExaBGP or another daemon | Planned adapter or shim | Must be verified | No support or interoperability claim yet |
 
 FRR, BIRD, and OpenBGPD are not selectable backends today. A router accepting a
@@ -187,8 +211,8 @@ Application status and local speaker intent do not prove router enforcement.
 | 1 | Keep GoBGP supported; selectable rustbgpd adapter, compatible config, authenticated RPC and codec tests |
 | 2 | Retry failed expiry withdrawals; real daemon TTL/restart recovery and transport/deployment wiring |
 | 3 | Router interop, migration and rollback evidence; only then change deployment defaults |
-| 4 | Split required writing from optional reading/peer observation; persist confirmed announcement state and pending cleanup |
-| 5 | Expose capabilities in health/CLI/dashboard/metrics; retain legacy public fields during migration |
+| 4 | Optional observation split implemented; durable confirmed announcement state remains required (pending withdrawal cleanup exists) |
+| 5 | Health availability metadata and CLI/dashboard observation states implemented; retain legacy public fields |
 | 6 | HTTP shim, a second transport proof, shared conformance and per-backend CI |
 
 The capability/ledger work can proceed before the default switch, but a
@@ -198,13 +222,12 @@ rewrites are outside this first slice.
 
 ## Contributor and certification gates
 
-Add an adapter module, its config subsection, and a factory entry. Preserve the
-shared trait until optional-capability handling is implemented. Test exact RPC
+Add an adapter module, its config subsection, and a factory entry. Implement required writing and explicitly opt into supported observers. Test exact RPC
 or transport payloads, authentication, transient and permanent failures, rule
 identity, replacement, repeated delete, both families, and action read-back.
 Run against a pinned real daemon before calling the adapter supported. Record
 router evidence separately and include restart/TTL behavior in the release gate.
 
 The existing `gobgp` health field and `apipb` export remain compatibility
-surfaces. They do not select the active backend. Operator-facing generic naming
-and capability badges belong to the later compatibility stage.
+surfaces. They do not select the active backend. Production write-only adapters
+remain gated on the durable announcement ledger and verified recovery semantics.

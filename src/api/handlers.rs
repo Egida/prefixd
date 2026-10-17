@@ -228,15 +228,23 @@ pub struct HealthResponse {
     active_mitigations: u32,
     /// Database connectivity status
     database: String,
-    /// GoBGP connectivity status
+    /// Peer observation status (legacy field name)
     gobgp: ComponentHealth,
+    /// Selected backend and available observations; no extra RPC is performed
+    speaker: SpeakerHealth,
     /// Authentication mode (none, bearer, credentials, mtls)
     auth_mode: String,
 }
 
 #[derive(Serialize, ToSchema)]
+pub struct SpeakerHealth {
+    backend: &'static str,
+    capabilities: crate::bgp::SpeakerCapabilities,
+}
+
+#[derive(Serialize, ToSchema)]
 pub struct ComponentHealth {
-    /// Component status (connected, error)
+    /// Component status (connected, error, unsupported)
     status: String,
     /// Error message if status is error
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2206,15 +2214,26 @@ async fn check_health_status(
     String,
     ComponentHealth,
 ) {
-    let (sessions, gobgp_health) = match state.announcer.session_status().await {
-        Ok(s) => (
+    let observation = match state.announcer.peer_observer() {
+        Some(observer) => Some(observer.session_status().await),
+        None => None,
+    };
+    let (sessions, gobgp_health) = match observation {
+        None => (
+            vec![],
+            ComponentHealth {
+                status: "unsupported".into(),
+                error: None,
+            },
+        ),
+        Some(Ok(s)) => (
             s,
             ComponentHealth {
                 status: "connected".to_string(),
                 error: None,
             },
         ),
-        Err(e) => (
+        Some(Err(e)) => (
             vec![],
             ComponentHealth {
                 status: "error".to_string(),
@@ -2292,6 +2311,10 @@ pub async fn health_detail(
         active_mitigations: active,
         database: db_status,
         gobgp: gobgp_health,
+        speaker: SpeakerHealth {
+            backend: state.announcer.backend(),
+            capabilities: state.announcer.capabilities(),
+        },
         auth_mode: resolve_auth_mode(&state),
     }))
 }

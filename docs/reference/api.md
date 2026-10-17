@@ -1389,14 +1389,29 @@ Full operational health. Requires authentication.
   "gobgp": {
     "status": "connected"
   },
+  "speaker": {
+    "backend": "gobgp",
+    "capabilities": { "rule_reader": true, "peer_observer": true }
+  },
   "auth_mode": "none"
 }
 ```
 
 | Status | Meaning |
 |--------|---------|
-| `healthy` | All systems operational |
-| `degraded` | Partial functionality (DB or GoBGP issues) |
+| `healthy` | Database and supported peer observation succeeded |
+| `degraded` | Database or supported peer observation failed |
+
+`speaker` is additive metadata: backend identity plus observation availability.
+Older daemons may omit it. Capabilities do not report recent read success or
+rule delivery. Health performs no rule inventory probe.
+
+The compatibility field `gobgp.status` describes the selected speaker's peer
+observation: `connected` means a successful read, including zero peers; `error`
+includes an error string; `unsupported` omits `error` and leaves `bgp_sessions`
+empty. Unsupported optional observation alone allows `healthy`. An empty peer
+map must be interpreted together with that status. The public liveness response
+is unchanged. None of these fields proves announcement or router enforcement.
 
 > **Migration note (v0.8.2 → v0.8.3):** The public `GET /v1/health` endpoint no longer returns BGP sessions, database status, or operational details. Monitoring systems and scripts that parse these fields must switch to `GET /v1/health/detail` with authentication. See [ADR 015](../adr/015-health-endpoint-split.md).
 
