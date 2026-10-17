@@ -225,6 +225,10 @@ rewrites are outside this first slice.
 
 ## Contributor and certification gates
 
+Custom `RepositoryTrait` implementations must provide the strict
+`expired_mitigation_inventory` boundary. The legacy required expiry method remains
+available, but the new boundary reports unsupported until explicitly implemented.
+
 Add an adapter module, its config subsection, and a factory entry. Implement required writing and explicitly opt into supported observers. Test exact RPC
 or transport payloads, authentication, transient and permanent failures, rule
 identity, replacement, repeated delete, both families, and action read-back.
