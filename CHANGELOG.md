@@ -15,11 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Digest-pinned rustbgpd v0.76.0/v0.77.0 CI coverage for local lifecycle, TTL
+  withdrawal and recovery through the same client after a speaker restart.
+- Reconciliation repair outcome counters and operator recovery/alert guidance.
+
 - Experimental rustbgpd speaker adapter behind `bgp-rustbgpd`, with explicit
   backend selection, authenticated gRPC, local-rule read-back, and IPv4/IPv6
   discard/policing support. Existing GoBGP and mock configurations remain valid.
 
 ### Fixed
+
+- Failed announcement repairs now make reconciliation fail while other repairs
+  continue. Startup performs one immediate pass, then waits for the interval.
+- Grafana reconciliation runs and configuration reloads now group and label
+  the actual `status` series.
 
 - Persist withdrawal intent before speaker RPCs so ambiguous replies and database
   failures cannot restore a requested deletion. Retry across controller restarts,

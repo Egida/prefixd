@@ -65,6 +65,13 @@ listing modes. Existing pre-v1 compatibility rules apply during 0.x. This does
 not promote receive-side diagnostics/validation, `Config.flowspec`, or general
 GR/LLGR guarantees into that controller contract.
 
+The release gate for the controller promotion is resolved: v0.76.0 and v0.77.0
+both contain ADR 0139. The minimum controller version is v0.76.0; the current
+qualification pin is v0.77.0. Immutable image identities live in
+[the release fixture](../../tests/fixtures/rustbgpd/releases.json), and CI runs
+local lifecycle/TTL/restart checks on both releases. This does not qualify router
+enforcement or the still-separate deployment transport work.
+
 Pin the exact released daemon used for deployment qualification and review its
 contract and changelog on upgrade. The proto, generated clients, tonic/prost,
 GoBGP tests and public compatibility exports remain maintained while both

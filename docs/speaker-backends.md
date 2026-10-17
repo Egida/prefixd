@@ -54,6 +54,43 @@ The relevant vendored controller message fields were checked against rustbgpd
 `v0.77.0`. This is a protocol baseline, not proof that an arbitrary binary
 reporting that version has passed the deployment or router tests.
 
+## Released controller qualification
+
+The scoped controller promotion is released: v0.76.0 is the minimum controller
+contract version, and v0.77.0 is the current qualification pin. CI runs the
+lifecycle, TTL and restart suite against both immutable image references in
+[releases.json](../tests/fixtures/rustbgpd/releases.json). Image OCI source
+revisions match the dereferenced release-tag commits. This qualifies the local
+controller boundary on Linux, independently of router interoperability.
+
+Run the same isolated suite locally with Docker available:
+
+```bash
+scripts/test-rustbgpd.sh
+PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 scripts/test-rustbgpd.sh
+```
+
+Fixtures bind ephemeral loopback ports, create an owner-only bearer token, and
+remove their containers and token files afterward. They reuse the existing
+client/channel and desired-state repository across a forced speaker-process
+restart, prove local intent was lost, and verify exact dual-family actions are
+restored by the running poller within its configured interval after readiness.
+The next converged poll performs no repairs. Unknown local keys are preserved.
+
+On a speaker restart, prefixd's active database rows remain desired state. The
+next successful inventory poll repairs missing rules sequentially; there is no
+additional restart detector or concurrent replay fan-out. Recovery time includes
+speaker readiness, polling and RPC completion, so the configured interval alone
+is not a wall-clock SLA under failures or a large backlog.
+
+Monitor `prefixd_reconciliation_repairs_total{status="success"}` for repaired
+local intent and `{status="error"}` for rejected repairs. Repair errors also make
+`prefixd_reconciliation_runs_total{status="error"}` increase; other missing
+rules are still attempted. For example, alert on
+`increase(prefixd_reconciliation_repairs_total{status="error"}[5m]) > 0`, and
+investigate unexpected repair spikes after restarts. These metrics report local
+RPC outcomes, not downstream enforcement or a confirmed restart count.
+
 ## Rule and reconciliation semantics
 
 The adapter supports destination prefix, optional protocol, equality lists of

@@ -55,6 +55,11 @@ the speaker's BGP sessions, and injected rules carry no application expiry
 lease. Restore reconciliation or explicitly withdraw rules after controller
 failure; monitor controller availability independently from BGP session health.
 
+For isolated released-container lifecycle, TTL and restart validation, run
+`scripts/test-rustbgpd.sh`; the [backend runbook](speaker-backends.md#released-controller-qualification)
+records the version floor, immutable pins, recovery behavior and alert queries.
+This suite is independent of the production Compose and router gates.
+
 ## Quick Start
 
 ### Docker Compose (Recommended)

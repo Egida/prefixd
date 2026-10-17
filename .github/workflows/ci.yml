@@ -45,6 +45,33 @@ jobs:
       - name: Test rustbgpd backend
         run: cargo test --features bgp-rustbgpd,test-utils
 
+  rustbgpd:
+    name: rustbgpd (${{ matrix.version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["0.76.0", "0.77.0"]
+    env:
+      PREFIXD_RUSTBGPD_TEST_VERSION: ${{ matrix.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-rustbgpd-${{ matrix.version }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Released controller lifecycle, TTL and restart recovery
+        run: scripts/test-rustbgpd.sh
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

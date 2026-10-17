@@ -1,7 +1,9 @@
-#![cfg(all(feature = "bgp-rustbgpd", feature = "test-utils"))]
+#![cfg(all(feature = "bgp-rustbgpd", feature = "test-utils", target_os = "linux"))]
+mod common;
+#[path = "common/rustbgpd.rs"]
+mod fixture;
 use prefixd::{
-    bgp::{FlowSpecAnnouncer, RustBgpdAnnouncer},
-    config::RustBgpdConfig,
+    bgp::FlowSpecAnnouncer,
     domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule},
 };
 
@@ -17,15 +19,10 @@ fn rule() -> FlowSpecRule {
 }
 
 #[tokio::test]
-#[ignore = "requires an explicitly configured isolated rustbgpd controller"]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
 async fn live_rustbgpd_controller_roundtrip() {
-    let speaker = RustBgpdAnnouncer::connect(&RustBgpdConfig {
-        endpoint: std::env::var("PREFIXD_RUSTBGPD_TEST_ENDPOINT").unwrap(),
-        bearer_token_env: "PREFIXD_RUSTBGPD_TEST_TOKEN".into(),
-        ca_cert_path: None,
-    })
-    .await
-    .unwrap();
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
     for prefix in ["192.0.2.231/32", "2001:0DB8:0:0:0:0:0:231/128"] {
         let mut rule = rule();
         rule.nlri.dst_prefix = prefix.into();
@@ -56,7 +53,7 @@ async fn live_rustbgpd_controller_roundtrip() {
 }
 
 #[tokio::test]
-#[ignore = "requires an explicitly configured isolated rustbgpd controller"]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
 async fn live_rustbgpd_ttl_reconciliation() {
     use prefixd::{
         db::{MockRepository, RepositoryTrait},
@@ -68,15 +65,8 @@ async fn live_rustbgpd_ttl_reconciliation() {
     };
     use std::sync::Arc;
 
-    let speaker = Arc::new(
-        RustBgpdAnnouncer::connect(&RustBgpdConfig {
-            endpoint: std::env::var("PREFIXD_RUSTBGPD_TEST_ENDPOINT").unwrap(),
-            bearer_token_env: "PREFIXD_RUSTBGPD_TEST_TOKEN".into(),
-            ca_cert_path: None,
-        })
-        .await
-        .unwrap(),
-    );
+    let fixture = fixture::Speaker::start().await;
+    let speaker = Arc::new(fixture.connect().await);
     let repo = Arc::new(MockRepository::new());
     let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
     for (ip, length) in [("192.0.2.232", 32), ("2001:db8::232", 128)] {
@@ -133,4 +123,216 @@ async fn live_rustbgpd_ttl_reconciliation() {
                 .any(|r| r.nlri_hash() == rule.nlri_hash())
         );
     }
+}
+
+struct PollingSpeaker {
+    inner: std::sync::Arc<prefixd::bgp::RustBgpdAnnouncer>,
+    inventory_gate: tokio::sync::RwLock<()>,
+    observed: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl FlowSpecAnnouncer for PollingSpeaker {
+    async fn announce(&self, rule: &FlowSpecRule) -> prefixd::error::Result<()> {
+        self.inner.announce(rule).await
+    }
+    async fn withdraw(&self, rule: &FlowSpecRule) -> prefixd::error::Result<()> {
+        self.inner.withdraw(rule).await
+    }
+    async fn list_active(&self) -> prefixd::error::Result<Vec<FlowSpecRule>> {
+        let _gate = self.inventory_gate.read().await;
+        self.inner.list_active().await
+    }
+    async fn session_status(&self) -> prefixd::error::Result<Vec<prefixd::bgp::PeerStatus>> {
+        let result = self.inner.session_status().await;
+        self.observed.notify_one();
+        result
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
+async fn live_rustbgpd_restart_recovers_with_the_same_client_and_desired_state() {
+    use prefixd::{
+        db::{MockRepository, RepositoryTrait},
+        domain::{
+            ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+            MitigationStatus,
+        },
+        observability::metrics,
+        scheduler::ReconciliationLoop,
+    };
+    use std::{sync::Arc, time::Duration};
+    let fixture = fixture::Speaker::start().await;
+    let speaker = Arc::new(fixture.connect().await);
+    let repo = Arc::new(MockRepository::new());
+    let mut desired = Vec::new();
+    for (ip, length, action_type, rate_bps) in [
+        ("192.0.2.233", 32, ActionType::Discard, None),
+        ("2001:db8::233", 128, ActionType::Police, Some(8_000_000)),
+    ] {
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: "restart-test".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: format!("{ip}/{length}"),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                },
+                action_type,
+                action_params: ActionParams { rate_bps },
+                ttl_seconds: 300,
+                reason: "restart test".into(),
+            },
+            ip.into(),
+            AttackVector::UdpFlood,
+        );
+        mitigation.activate();
+        repo.insert_mitigation(&mitigation).await.unwrap();
+        let rule = FlowSpecRule::new(
+            (&mitigation.match_criteria).into(),
+            FlowSpecAction {
+                action_type,
+                rate_bps,
+            },
+        );
+        speaker.announce(&rule).await.unwrap();
+        desired.push((mitigation, rule));
+    }
+    let mut foreign = rule();
+    foreign.nlri.dst_prefix = "198.51.100.233/32".into();
+    speaker.announce(&foreign).await.unwrap();
+    let observed = Arc::new(PollingSpeaker {
+        inner: speaker.clone(),
+        inventory_gate: tokio::sync::RwLock::new(()),
+        observed: tokio::sync::Notify::new(),
+    });
+    let interval = Duration::from_secs(3);
+    let reconciler = ReconciliationLoop::new(
+        repo.clone(),
+        observed.clone(),
+        interval.as_secs() as u32,
+        false,
+    );
+    let (shutdown, rx) = tokio::sync::broadcast::channel(1);
+    let task = tokio::spawn(async move { reconciler.run(rx).await });
+    tokio::time::timeout(interval, observed.observed.notified())
+        .await
+        .unwrap();
+    assert_eq!(speaker.list_active().await.unwrap().len(), 3);
+
+    // Hold only the poller while proving lost intent directly through the same channel.
+    let gate = observed.inventory_gate.write().await;
+    fixture.container.stop_with_timeout(Some(0)).await.unwrap();
+    assert!(!matches!(
+        tokio::time::timeout(Duration::from_secs(2), speaker.list_active()).await,
+        Ok(Ok(_))
+    ));
+    fixture.container.start().await.unwrap();
+    fixture.ready().await;
+    assert!(speaker.list_active().await.unwrap().is_empty());
+    for (mitigation, _) in &desired {
+        assert_eq!(
+            repo.get_mitigation(mitigation.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Active
+        );
+    }
+    speaker.announce(&foreign).await.unwrap();
+    let before = metrics::RECONCILIATION_REPAIRS
+        .with_label_values(&["success"])
+        .get();
+    drop(gate);
+    tokio::time::timeout(interval, async {
+        loop {
+            let actual = speaker.list_active().await.unwrap();
+            if actual.len() == 3 {
+                for (_, expected) in &desired {
+                    let restored = actual
+                        .iter()
+                        .find(|r| r.nlri_hash() == expected.nlri_hash())
+                        .unwrap();
+                    assert_eq!(restored.actions.len(), expected.actions.len());
+                    for (actual, wanted) in restored.actions.iter().zip(&expected.actions) {
+                        assert_eq!(actual.action_type, wanted.action_type);
+                        assert_eq!(actual.rate_bps, wanted.rate_bps);
+                    }
+                }
+                assert!(actual.iter().any(|r| r.nlri_hash() == foreign.nlri_hash()
+                    && r.actions.len() == 1
+                    && r.actions[0].action_type == foreign.actions[0].action_type
+                    && r.actions[0].rate_bps == foreign.actions[0].rate_bps));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("recovery within one configured interval after readiness");
+    tokio::time::timeout(
+        interval + Duration::from_secs(1),
+        observed.observed.notified(),
+    )
+    .await
+    .unwrap();
+    // The following converged poll must not inject or withdraw anything.
+    tokio::time::timeout(
+        interval + Duration::from_secs(1),
+        observed.observed.notified(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        metrics::RECONCILIATION_REPAIRS
+            .with_label_values(&["success"])
+            .get(),
+        before + 2.0
+    );
+    assert_eq!(speaker.list_active().await.unwrap().len(), 3);
+
+    metrics::init_metrics();
+    let state = prefixd::AppState::new(
+        common::test_settings(),
+        common::test_inventory(),
+        common::test_playbooks(),
+        repo,
+        speaker,
+        ".".into(),
+    )
+    .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, prefixd::api::create_test_router(state))
+            .await
+            .unwrap()
+    });
+    let scrape = reqwest::get(format!("http://{address}/metrics"))
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    for metric in [
+        "prefixd_reconciliation_runs_total",
+        "prefixd_reconciliation_repairs_total",
+    ] {
+        for status in ["success", "error"] {
+            assert!(
+                scrape.contains(&format!("{metric}{{status=\"{status}\"}}")),
+                "missing actual status-labelled sample"
+            );
+        }
+    }
+    server.abort();
+    shutdown.send(()).unwrap();
+    task.await.unwrap();
 }

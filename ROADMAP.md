@@ -251,7 +251,7 @@ capability boundary, evidence limits, and delivery order.
 
 ### Phase 2: Qualification and Default Migration
 
-- [ ] Verify real-daemon TTL withdrawal and restart re-injection
+- [x] Verify local-controller TTL withdrawal and same-channel restart re-injection against digest-pinned rustbgpd v0.76.0/v0.77.0; router/deployment qualification remains separate
 - [ ] Re-run FRR and Juniper interop against rustbgpd; qualify Arista/Cisco independently
 - [ ] Re-run bounded chaos/load checks and attribute evidence to the tested backend
 - [ ] Publish migration/rollback instructions and an explicit version pin/upgrade policy
