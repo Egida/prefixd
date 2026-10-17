@@ -1,0 +1,40 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+beforeEach(() => {
+  vi.resetModules()
+  vi.useFakeTimers()
+})
+
+afterEach(() => {
+  vi.clearAllTimers()
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+})
+
+describe("GET request cache", () => {
+  it.each([401, 403, 500, "offline"])("returns handled %s failures to every caller and permits retry", async (failure) => {
+    const fetchMock = vi.fn()
+    if (failure === "offline") {
+      fetchMock.mockRejectedValueOnce(new TypeError("network offline"))
+    } else {
+      fetchMock.mockResolvedValueOnce(new Response("denied", { status: failure as number }))
+    }
+    vi.stubGlobal("fetch", fetchMock)
+    const { getHealth } = await import("@/lib/api")
+
+    const results = await Promise.allSettled([getHealth(), getHealth()])
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    for (const result of results) {
+      expect(result.status).toBe("rejected")
+      if (result.status === "rejected") {
+        expect(result.reason.message).toContain(failure === "offline" ? "network offline" : `API error ${failure}`)
+      }
+    }
+
+    // Vitest must also see no unhandled rejection from the cache cleanup.
+    await vi.advanceTimersByTimeAsync(101)
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ status: "ok" })))
+    await expect(getHealth()).resolves.toEqual({ status: "ok" })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+})

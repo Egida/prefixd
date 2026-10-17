@@ -369,3 +369,57 @@ async fn rejects_unsafe_transport_and_credentials() {
     }
     assert!(RustBgpdAnnouncer::connect(&config).await.is_err());
 }
+
+#[tokio::test]
+async fn complete_rpc_deadline_bounds_stalled_response_body() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let incoming = futures_util::stream::unfold(listener, |listener| async {
+        Some((listener.accept().await.map(|(stream, _)| stream), listener))
+    });
+    let headers_sent = Arc::new(AtomicUsize::new(0));
+    let observed = headers_sent.clone();
+    // The real HTTP/2 response sends headers, then never sends body frames or trailers.
+    let stall_body = tower::util::MapResponseLayer::new(
+        move |mut response: tonic::codegen::http::Response<tonic::body::Body>| {
+            observed.fetch_add(1, SeqCst);
+            *response.body_mut() = tonic::body::Body::new(axum::body::Body::from_stream(
+                futures_util::stream::pending::<
+                    std::result::Result<axum::body::Bytes, std::io::Error>,
+                >(),
+            ));
+            response
+        },
+    );
+    let server = tokio::spawn(
+        tonic::transport::Server::builder()
+            .layer(stall_body)
+            .add_service(pb::injection_service_server::InjectionServiceServer::new(
+                Fake::default(),
+            ))
+            .serve_with_incoming(incoming),
+    );
+    // Omit the transport's header timeout so only the complete-RPC bound can end this call.
+    let speaker = RustBgpdAnnouncer {
+        channel: Endpoint::from_shared(format!("http://{address}"))
+            .unwrap()
+            .connect()
+            .await
+            .unwrap(),
+        token: "Bearer test-secret".parse().unwrap(),
+    };
+    tokio::time::pause();
+    let start = tokio::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(95),
+        speaker.announce(&rule("192.0.2.231/32", 0)),
+    )
+    .await
+    .expect("a stalled body must not outlive all three RPC deadlines");
+    assert!(result.unwrap_err().to_string().contains("DeadlineExceeded"));
+    assert_eq!(headers_sent.load(SeqCst), 3);
+    assert!(start.elapsed() >= Duration::from_secs(90));
+    assert!(start.elapsed() < Duration::from_secs(91));
+    tokio::time::resume();
+    server.abort();
+}

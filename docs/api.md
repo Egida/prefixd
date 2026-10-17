@@ -402,6 +402,25 @@ Content-Type: application/json
 }
 ```
 
+Withdrawal intent is saved before calling the speaker. An uncertain speaker
+reply or database completion failure leaves cleanup pending; reconciliation
+retries it, including after a controller restart. The mitigation keeps its
+previous status until deletion and the terminal-state/audit transaction succeed.
+Pending cleanup is excluded from announcement repair. The original principal
+and reason are retained when the scheduler completes the request; the legacy
+`operator_id` request field does not override the authenticated principal.
+
+A withdrawal targeting another POP or a rule with another active owner returns
+409 before deleting anything. A new event or manual request that would revive
+a pending deletion also returns 409. Bulk requests report these conflicts in
+their per-item errors.
+
+If an earlier TTL-expiry request is already pending, a successful retry completes
+that original operation as `expired`. The single-withdraw response and mitigation
+detail show the actual terminal status. Detector event processing and bulk
+withdrawal results retain their legacy `withdrawn` success labels, which describe
+successful deletion processing rather than overriding that terminal status.
+
 ### Bulk Withdraw Mitigations
 
 ```http

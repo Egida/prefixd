@@ -7,6 +7,37 @@
 - **Mitigations survive restarts.** Active mitigations are stored in PostgreSQL and re-announced by the reconciliation loop after startup.
 - **Always back up the database** before upgrading.
 
+## Pending withdrawals and rollback
+
+Migration 013 adds durable withdrawal requests. A failed or uncertain deletion
+is retried against the same speaker without waiting for the mitigation TTL.
+Restarting the controller preserves the original operation, actor and reason.
+
+Run one controller per POP/speaker target. The in-process lifecycle mutex does
+not fence multiple controller processes. It releases between scheduler rules so
+operator requests can proceed between repairs.
+
+Before changing the POP, backend, speaker endpoint or controller ownership, or
+downgrading to a binary that does not understand this queue, drain pending
+requests on the original target. Check PostgreSQL:
+
+```sql
+SELECT pop, count(*) AS pending
+FROM withdrawal_requests
+WHERE completed_at IS NULL
+GROUP BY pop;
+```
+
+No rows means there are no pending requests. Keep the current controller and
+original target available until cleanup succeeds, then verify that speaker's
+local intent before proceeding. Do not delete queue rows to bypass cleanup.
+An older binary ignores the queue and could reannounce a requested deletion;
+a different target cannot confirm cleanup on the original speaker.
+
+This queue covers withdrawals. Durable create/replace intent and target/process
+generation fencing remain separate work; it is not a complete announcement
+ledger or an active-active controller protocol.
+
 ---
 
 ## Docker Compose Upgrade
