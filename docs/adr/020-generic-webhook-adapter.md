@@ -106,7 +106,7 @@ When `root_path` is set, the JSONPath is evaluated against the payload and each 
 ### Negative
 
 - **Less type safety than native adapters** — A malformed payload shape produces a 400 or a per-event error result instead of a compile-time check. Mitigated by tests and by validating JSONPath expressions at config load.
-- **Operators must understand JSONPath** — Documented with examples in `docs/configuration.md`; most operators already know the basics from Kubernetes.
+- **Operators must understand JSONPath** — Documented with examples in `docs/reference/configuration.md`; most operators already know the basics from Kubernetes.
 - **No transform functions yet** — Unit conversion, regex extraction, and computed fields are not supported. Deferred to a follow-up; most detectors already emit numeric values and vector strings that the mapping can pass through directly.
 
 ### Neutral

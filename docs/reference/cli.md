@@ -207,7 +207,7 @@ prefixdctl migrations
 
 ### Send a Corroborating Signal
 
-Post a [corroborating signal](../docs/detectors/corroborating-signals.md)
+Post a [corroborating signal](../how-to/detectors/corroborating-signals.md)
 from a source configured with `mode: corroborating` in
 `correlation.yaml`. Useful for ad-hoc testing or for coarse telemetry
 scripts that don't carry a victim `/32`.

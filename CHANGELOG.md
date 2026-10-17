@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Refresh the October audit baseline: `rustls` 0.23.46, `quinn-proto` 0.11.18, `h2` 0.4.19 and non-yanked `chacha20` 0.10.2 address current lockfile findings. Patch both `rand` branches to 0.8.6/0.9.3 and remove the now-obsolete RUSTSEC-2026-0097 exception. The only remaining vulnerability exception is `rsa` (RUSTSEC-2023-0071), present through sqlx's optional, uncompiled MySQL driver with no patched release. The unmaintained YAML dependency warning remains visible and tracked separately.
 - Replace unmaintained `rustls-pemfile` with `rustls-pki-types` for certificate, CA and private-key loading; remove its audit exception while preserving mandatory mTLS client verification.
-- Refresh Next.js to 16.3.8, Undici to 7.29.1, and affected frontend transitive dependencies including sharp, source-map-js, js-yaml, Vitest and nanoid. `bun audit` reports no vulnerabilities.
+- Set the Next.js manifest floor to 16.3.8 (lock resolves 16.4.2), the Undici floor to 7.29.1 (lock resolves 7.30.1), and affected frontend transitive dependencies including sharp, source-map-js, js-yaml, Vitest and nanoid. `bun audit` reports no vulnerabilities.
 
 ### Added
 
@@ -38,7 +38,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Safelist removal from the dashboard returned 404.** The Next.js API proxy joins percent-decoded route segments, so `DELETE /v1/safelist/8.9.8.9%2F32` reached the backend as `/v1/safelist/8.9.8.9/32` and missed the single-segment route. The proxy now re-encodes each segment, and the route accepts a literal slash form (`{*prefix}`) for proxies that decode `%2F`.
 - **Dashboard had no sign-out (and no role-based permissions).** `/v1/auth/login` and `/v1/auth/me` return a flat operator (`operator_id`), but the client read `data.operator`, leaving `operator` as `undefined`. The user menu (and therefore sign-out) never rendered, and role checks denied admin actions to authenticated admins. Auth responses are now mapped to the client `Operator` shape and `isAuthenticated` is a strict boolean.
 - **FastNetMon SYN floods labelled `udp_flood`.** Vector detection matched the first protocol word anywhere in the attack details, so an idle line such as `outgoing udp traffic: 0 mbps` won over `syn_flood`. Zero-metric lines are ignored, TCP flag vectors are matched before `udp`, and matches are word-bounded (`ack` no longer matches inside `packets`).
-- **Copy buttons failed silently on plain-HTTP deployments.** `navigator.clipboard` only exists in secure contexts, so the incident report, FlowSpec rule, and webhook endpoint copy actions threw and reported nothing when the dashboard was served over HTTP. The copy helper now falls back to a hidden textarea, checks `clipboard-write` permission, and surfaces a "Copy failed — clipboard unavailable" toast instead of claiming success. Chrome ignores clipboard writes entirely for plain-HTTP origins (other than `localhost`), so production dashboards need HTTPS for clipboard actions — documented in `docs/deployment.md`.
+- **Copy buttons failed silently on plain-HTTP deployments.** `navigator.clipboard` only exists in secure contexts, so the incident report, FlowSpec rule, and webhook endpoint copy actions threw and reported nothing when the dashboard was served over HTTP. The copy helper now falls back to a hidden textarea, checks `clipboard-write` permission, and surfaces a "Copy failed — clipboard unavailable" toast instead of claiming success. Chrome ignores clipboard writes entirely for plain-HTTP origins (other than `localhost`), so production dashboards need HTTPS for clipboard actions — documented in `docs/how-to/deployment.md`.
 - Run pull-request CI for stacked topic branches as well as `main`, so dependency-ordered PRs receive their own checks.
 - Build both Docker images on pull requests without registry login or publishing; main/tag pushes retain publishing.
 - Update `async-trait` to 0.1.92 for strict Clippy on Rust 1.99 and select the Rustls provider before TLS startup.
@@ -51,6 +51,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   equivalent IPv6 addresses do not trigger repeated reconciliation injections.
 
 ### Documentation
+
+- Organize guides, references, explanations and historical evidence with a
+  documentation index and local-stack tutorial; retain ADR identifiers.
 
 - Record the rustbgpd-first, pluggable-speaker rollout while retaining GoBGP.
   Correct the controller-crash claim: a separate BGP daemon can keep advertising
@@ -172,13 +175,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New endpoint `GET /v1/signals/corroborator/activity?minutes=N` returns per-source `(last_seen, count)` aggregated across the live cache *and* attached `signal_group_events` rows. The frontend merges this into the Signal Sources tab so `mode: corroborating` sources no longer render as "never seen" simply because they don't post to `/v1/events`.
   - Dashboard: per-source mode + dimension picker in the Correlation Config tab (switching back to `primary` auto-clears declared dimensions); corroborating badge on signal group detail's contributing-events list; null-safe `ingested_at` rendering for corroborator rows.
   - New CLI: `prefixdctl send-corroborator --source router-cpu --pop iad1 ...`.
-  - See [ADR 021](docs/adr/021-corroborating-signals.md) for rationale; migrations 009 + 010 for schema; [docs/detectors/corroborating-signals.md](docs/detectors/corroborating-signals.md) for operator quickstart.
+  - See [ADR 021](docs/adr/021-corroborating-signals.md) for rationale; migrations 009 + 010 for schema; [docs/how-to/detectors/corroborating-signals.md](docs/how-to/detectors/corroborating-signals.md) for operator quickstart.
 
 ## [0.15.0] - 2026-04-18
 
 ### Added
 
-- **Generic webhook adapter** — Integrate any detector or telemetry source that can POST JSON without writing Rust. Configure a named adapter in `correlation.yaml` with JSONPath field mappings, HMAC/bearer/none auth, optional batching via `root_path`, vector normalization, and confidence scaling. Events flow through the standard correlation and policy pipeline. New endpoint: `POST /v1/signals/webhook/{name}`. See [ADR 020](docs/adr/020-generic-webhook-adapter.md) for design rationale, [docs/detectors/generic-webhook.md](docs/detectors/generic-webhook.md) for an end-to-end walkthrough, and `docs/configuration.md` / `docs/api.md` for schema reference.
+- **Generic webhook adapter** — Integrate any detector or telemetry source that can POST JSON without writing Rust. Configure a named adapter in `correlation.yaml` with JSONPath field mappings, HMAC/bearer/none auth, optional batching via `root_path`, vector normalization, and confidence scaling. Events flow through the standard correlation and policy pipeline. New endpoint: `POST /v1/signals/webhook/{name}`. See [ADR 020](docs/adr/020-generic-webhook-adapter.md) for design rationale, [docs/how-to/detectors/generic-webhook.md](docs/how-to/detectors/generic-webhook.md) for an end-to-end walkthrough, and `docs/reference/configuration.md` / `docs/reference/api.md` for schema reference.
 - **Webhook adapter config validation** — `CorrelationConfig::validate()` now rejects `confidence_scale <= 0` or non-finite, empty `auth.secret_env` / `auth.header`, and non-`sha256` HMAC algorithms. Misconfiguration surfaces as a 400 on PUT/reload instead of runtime 500s.
 - **Frontend CRUD editor** for webhook adapters on the Correlation Config tab (all three auth modes, JSONPath field mapping, vector normalization, HMAC secret env-var reference, endpoint copy button).
 
@@ -271,7 +274,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Bulk withdraw** — `POST /v1/mitigations/withdraw` accepts up to 100 mitigation IDs with partial success semantics. Frontend adds checkbox selection on active/escalated rows, select-all, selection toolbar, and confirmation dialog.
 - **FlowSpec rule preview** — Mitigation detail page shows a router-style one-liner (`match destination ... protocol ... then ...`) above the structured grid. Copy Rule button for quick comparison with router CLI output.
 - **CVE gate in CI** — Security audit (`cargo audit` + `bun audit`) now gates Docker publishing. CycloneDX SBOM generated on version tags.
-- **Vendor capability matrix** — `docs/vendors.md` with tested status for Juniper (verified), Arista (partially verified), Cisco IOS-XR, Nokia SR OS, and FRR. Reference import policies per vendor.
+- **Vendor capability matrix** — `docs/reference/vendors.md` with tested status for Juniper (verified), Arista (partially verified), Cisco IOS-XR, Nokia SR OS, and FRR. Reference import policies per vendor.
 
 ### Security
 
@@ -289,7 +292,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`victim_ip` filter on mitigations API** — `GET /v1/mitigations?victim_ip=X` filters by exact victim IP address. Supported in both single-POP and all-POPs queries. (#65)
-- **FastNetMon integration guide** — New `docs/detectors/fastnetmon.md` with full setup, env vars, testing, and troubleshooting
+- **FastNetMon integration guide** — New `docs/how-to/detectors/fastnetmon.md` with full setup, env vars, testing, and troubleshooting
 - **Integration test** — `test_list_mitigations_filters_by_victim_ip` validates API filtering end-to-end
 
 ### Fixed
@@ -334,7 +337,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Alerting API endpoints** — `GET /v1/config/alerting` (secrets redacted) and `POST /v1/config/alerting/test` (sends test alert, returns per-destination pass/fail)
 - **Chaos test suite** — `scripts/chaos-test.sh` with 17 resilience tests across 4 categories: Postgres chaos (kill during ingestion, restart recovery, state preservation), GoBGP chaos (kill during mitigations, reconciliation re-announce), prefixd chaos (restart, rapid restart, SIGKILL recovery), network chaos (nginx outage and recovery)
 - **HTTP load test suite** — `scripts/load-test.sh` with 7 tests across 5 profiles (quick/default/sustained/burst/all), using `hey` for HTTP benchmarking. Baseline results: ~8,000 health req/s, ~4,700 ingestion req/s, P99 1.6ms
-- **Benchmarks documentation rewrite** — `docs/benchmarks.md` updated with fresh criterion micro-benchmark numbers, HTTP load test baselines, chaos test summary, bottleneck analysis, and instructions for running all three test suites
+- **Benchmarks documentation rewrite** — `docs/perf/benchmarks.md` updated with fresh criterion micro-benchmark numbers, HTTP load test baselines, chaos test summary, bottleneck analysis, and instructions for running all three test suites
 
 ### Security
 
@@ -380,8 +383,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **HTTPS via nginx production example** — Full TLS termination config with HSTS, HTTP→HTTPS redirect, Let's Encrypt note
 - **Reconciliation loop pagination** — Pages through all active mitigations instead of capping at 1000; adds `prefixd_reconciliation_active_count` gauge metric
 - **Database migration tracking** — `schema_migrations` table records applied migrations with version, name, and timestamp; `prefixdctl migrations` command to check status
-- **API versioning policy** — `docs/api-versioning.md` documents backward compatibility guarantees, deprecation process, and `Sunset` header convention
-- **Upgrade guide** — `docs/upgrading.md` covers Docker Compose and bare metal upgrade procedures, rollback guidance, and migration verification
+- **API versioning policy** — `docs/reference/api-versioning.md` documents backward compatibility guarantees, deprecation process, and `Sunset` header convention
+- **Upgrade guide** — `docs/how-to/upgrading.md` covers Docker Compose and bare metal upgrade procedures, rollback guidance, and migration verification
 - **IP validation on history endpoint** — Returns 400 on invalid IP input
 - **4 new tests** — IP history rejects invalid IP, timeseries sub-hour bucket alignment, plus 2 timeseries/IP-history structure tests
 - **CSV helper tests** (4 tests: headers/rows, comma escaping, quote escaping, null handling)
@@ -510,7 +513,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **RwLock guards dropped early** - Inventory and playbooks handlers clone data and release locks before building JSON response
 - **Route definitions deduplicated** - `create_router()` and `create_test_router()` now share `public_routes()`, `session_routes()`, `api_routes()`, and `common_layers()` helpers (eliminates ~80 lines of duplication)
 - **OpenAPI spec updated** - All new endpoints (`health_detail`, `config/settings`, `config/inventory`, `config/playbooks`) registered with utoipa annotations and `PublicHealthResponse` schema
-- **API documentation** - `docs/api.md` updated with config endpoint documentation, example payloads, and health endpoint migration note
+- **API documentation** - `docs/reference/api.md` updated with config endpoint documentation, example payloads, and health endpoint migration note
 - **Integration test coverage** - 4 new tests: `health_detail` (validates full operational response), `config_settings` (verifies allowlist redaction of sensitive fields), `config_inventory`, `config_playbooks` (12 integration tests total, up from 8)
 
 ### Security
@@ -641,7 +644,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `scripts/prefixd-fastnetmon.sh` notify script for FastNetMon Community
   - Computes stable `event_id` for idempotency and ban/unban matching
   - Auto-detects vector from attack details (UDP/SYN/ACK/ICMP)
-  - `docs/detectors/fastnetmon.md` setup guide
+  - `docs/how-to/detectors/fastnetmon.md` setup guide
 
 - **API/Frontend Contract Fixes**
   - Health endpoint now returns `version`, `pop`, `uptime_seconds`
@@ -831,10 +834,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - 5 auth integration tests (bearer flows, security headers validation)
 
 - **Documentation**
-  - `docs/configuration.md` - Complete YAML reference for all config options
-  - `docs/deployment.md` - Docker, bare metal, GoBGP, router config, mTLS setup
-  - `docs/troubleshooting.md` - Operational runbook with common issues
-  - `docs/benchmarks.md` - Performance analysis with optimization recommendations
+  - `docs/reference/configuration.md` - Complete YAML reference for all config options
+  - `docs/how-to/deployment.md` - Docker, bare metal, GoBGP, router config, mTLS setup
+  - `docs/how-to/troubleshooting.md` - Operational runbook with common issues
+  - `docs/perf/benchmarks.md` - Performance analysis with optimization recommendations
 
 - **Benchmark Suite** (criterion)
   - Inventory lookup benchmarks (hit/miss/is_owned)

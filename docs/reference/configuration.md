@@ -353,7 +353,7 @@ correlation:
 | `window_seconds` | integer | `300` | Time window for grouping signals (seconds) |
 | `min_sources` | integer | `1` | Minimum distinct sources to trigger mitigation |
 | `confidence_threshold` | float | `0.5` | Minimum derived confidence to trigger |
-| `confidence_decay_half_life_seconds` | integer | `0` | Exponential half-life (seconds) for time-decaying per-event confidence contributions; 0 disables decay. Bounded by `10 × window_seconds`. See [ADR 022](adr/022-confidence-decay.md). |
+| `confidence_decay_half_life_seconds` | integer | `0` | Exponential half-life (seconds) for time-decaying per-event confidence contributions; 0 disables decay. Bounded by `10 × window_seconds`. See [ADR 022](../adr/022-confidence-decay.md). |
 | `default_weight` | float | `1.0` | Weight for unknown/unconfigured sources |
 | `sources` | map | `{}` | Per-source weight and type configuration |
 
@@ -391,8 +391,8 @@ primary event before it can trigger a mitigation — corroborators alone
 are never sufficient. Misconfiguration (`mode=corroborating` with empty
 `match_dimensions`, or `mode=primary` with non-empty `match_dimensions`)
 is rejected both on `PUT /v1/config/correlation` and on daemon boot.
-See [ADR 021](adr/021-corroborating-signals.md) and
-[docs/detectors/corroborating-signals.md](detectors/corroborating-signals.md).
+See [ADR 021](../adr/021-corroborating-signals.md) and
+[docs/how-to/detectors/corroborating-signals.md](../how-to/detectors/corroborating-signals.md).
 
 **Derived confidence** is computed as a weighted average:
 
@@ -613,7 +613,7 @@ services:
 |-------|------|-------------|
 | `ip` | string | Asset IPv4 or IPv6 address (exact match) |
 | `role` | string | Optional free-form role tag (e.g. `web`, `db`) |
-| `interface` | string | Optional router/switch interface name. When present, the interface is attached to the resolved `IpContext` on incoming events and flows into the signal group's `primary_dimensions`. Required if you want interface-only corroborating signals (see [ADR 021](adr/021-corroborating-signals.md)) to match this asset's groups. |
+| `interface` | string | Optional router/switch interface name. When present, the interface is attached to the resolved `IpContext` on incoming events and flows into the signal group's `primary_dimensions`. Required if you want interface-only corroborating signals (see [ADR 021](../adr/021-corroborating-signals.md)) to match this asset's groups. |
 
 ### Allowed Ports
 

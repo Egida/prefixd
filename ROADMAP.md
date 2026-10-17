@@ -158,8 +158,8 @@ Target: Validated with real routers, stable API, production-proven. Operators tr
 - [ ] Arista cEOS / 7xxx (EOS 4.20+) — validate FlowSpec announce/withdraw/reconcile
 - [ ] Cisco XRd / IOS-XR (ASR 9000, NCS) — known FlowSpec quirks to document
 - [x] Juniper quirks documented (FlowSpec-only AFI-SAFI, import policy, no-validate)
-- [x] Vendor capability matrix (what works, what doesn't, per vendor) — `docs/vendors.md`
-- [x] Reference import policies per vendor (copy-paste ready) — in `docs/vendors.md` and `docs/deployment.md`
+- [x] Vendor capability matrix (what works, what doesn't, per vendor) — `docs/reference/vendors.md`
+- [x] Reference import policies per vendor (copy-paste ready) — in `docs/reference/vendors.md` and `docs/how-to/deployment.md`
 - [ ] Graceful degradation for unsupported features
 
 ### Dependency Security Cadence
@@ -171,9 +171,9 @@ Target: Validated with real routers, stable API, production-proven. Operators tr
 
 ### Stability (Done)
 
-- [x] API versioning and deprecation policy (`docs/api-versioning.md`)
+- [x] API versioning and deprecation policy (`docs/reference/api-versioning.md`)
 - [x] Database migration tooling (`schema_migrations` table, `prefixdctl migrations`)
-- [x] Upgrade path documentation (`docs/upgrading.md`)
+- [x] Upgrade path documentation (`docs/how-to/upgrading.md`)
 
 ### Hardening (Done)
 
@@ -238,7 +238,7 @@ Target: Quality-of-life for operators during active incidents. These are the fea
 Use [rustbgpd](https://github.com/lance0/rustbgpd) through its controller gRPC
 API, keeping GoBGP as a supported alternative. Peer lifecycle stays in the
 speaker daemon. [ADR 025](docs/adr/025-pluggable-speaker-backends.md) records the
-support decision; [speaker backends](docs/speaker-backends.md) tracks the
+support decision; [speaker backends](docs/reference/speaker-backends.md) tracks the
 capability boundary, evidence limits, and delivery order.
 
 ### Phase 1: Selectable rustbgpd Adapter

@@ -20,10 +20,10 @@ Comprehensive list of prefixd capabilities.
 
 Any system that can POST JSON works. Tested with:
 
-- **FastNetMon Community** - Notify script integration ([setup guide](docs/detectors/fastnetmon.md))
+- **FastNetMon Community** - Notify script integration ([setup guide](docs/how-to/detectors/fastnetmon.md))
 - **FastNetMon** (native webhook) - `POST /v1/signals/fastnetmon` accepts FastNetMon's JSON payload directly, classifies vector from traffic breakdown, configurable confidence mapping
 - **Prometheus/Alertmanager** - `POST /v1/signals/alertmanager` accepts Alertmanager v4 webhook payloads, maps labels/annotations to event fields, handles batched alerts with per-alert results
-- **Generic webhook adapter** - `POST /v1/signals/webhook/{name}` for detectors without a native adapter. Configured per-adapter in `correlation.yaml` with JSONPath field mappings, HMAC-SHA256 / bearer / none authentication, optional array batching via `root_path`, vector normalization, and confidence scaling. See ADR 020 and [docs/detectors/generic-webhook.md](docs/detectors/generic-webhook.md).
+- **Generic webhook adapter** - `POST /v1/signals/webhook/{name}` for detectors without a native adapter. Configured per-adapter in `correlation.yaml` with JSONPath field mappings, HMAC-SHA256 / bearer / none authentication, optional array batching via `root_path`, vector normalization, and confidence scaling. See ADR 020 and [docs/how-to/detectors/generic-webhook.md](docs/how-to/detectors/generic-webhook.md).
 - **Corroborating signals** - `POST /v1/signals/corroborator` for coarse telemetry (router CPU, per-PoP interface utilization, customer NetFlow). Sources configured with `mode: corroborating` strengthen open signal groups without ever triggering mitigations on their own. See [ADR 021](docs/adr/021-corroborating-signals.md).
 - **Custom scripts** - Simple curl calls to `POST /v1/events`
 
@@ -704,7 +704,7 @@ Each POP:
 
 ## Performance
 
-Benchmarked on Docker Compose stack (see [benchmarks.md](docs/benchmarks.md)):
+Benchmarked on Docker Compose stack (see [benchmarks.md](docs/perf/benchmarks.md)):
 
 ### HTTP Load Tests (end-to-end through nginx)
 

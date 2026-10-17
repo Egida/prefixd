@@ -1,6 +1,7 @@
 # Benchmark Results
 
-Last updated: v0.15.0
+Historical measurement snapshot: v0.15.0. Values below have not been remeasured
+for the current daemon or the rustbgpd adapter.
 
 ## How to Run
 

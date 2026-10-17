@@ -96,10 +96,13 @@ frontend/
 
 configs/                       # prefixd.yaml, inventory.yaml, playbooks.yaml, correlation.yaml, nginx.conf, gobgp.conf
 docs/
-├── api.md                     # Full API reference with examples
-├── deployment.md              # Docker + nginx deployment guide
-├── configuration.md           # Full configuration reference
-└── adr/                       # 25 Architecture Decision Records (001-025)
+├── README.md                  # Reader-oriented documentation index
+├── tutorials/                 # Local-stack walkthrough
+├── how-to/                    # Deployment, upgrades, monitoring, troubleshooting and detectors
+├── reference/                 # API, CLI, configuration, speaker and vendor boundaries
+├── explanation/               # Architecture
+├── perf/                      # Historical benchmark evidence
+└── adr/                       # 25 numbered Architecture Decision Records
 grafana/                       # Prometheus config, Grafana provisioning, dashboard JSON
 tests/
 ├── integration.rs             # 161 integration tests (health, config, mitigations, events, filters, bulk withdraw, cursor pagination, bulk acknowledge, per-dest routing, preferences, event batch, incident reports, signal groups, correlation, signal adapters, operators CRUD, safelist CRUD, manual mitigate, audit, stats, auth)
@@ -294,7 +297,7 @@ Completed:
 2. Add route to the appropriate shared function in `src/api/routes.rs` (`public_routes()`, `session_routes()`, or `api_routes()`)
 3. Add `#[utoipa::path]` annotation and register in `src/api/openapi.rs`
 4. Add integration test in `tests/integration.rs`
-5. Document in `docs/api.md`
+5. Document in `docs/reference/api.md`
 
 ### Adding a new frontend page
 1. Create `frontend/app/(dashboard)/your-page/page.tsx` (auto-guarded by route group)

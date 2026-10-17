@@ -160,7 +160,7 @@ sources:
 
 With `min_sources: 1`, events flow through the correlation engine but mitigate immediately on the first signal — identical to pre-correlation behavior. Increase to 2+ to require corroboration from multiple detectors.
 
-See [configuration.md#correlation](configuration.md#correlation) for full reference.
+See [configuration.md#correlation](../reference/configuration.md#correlation) for full reference.
 
 ##### New database migration (007)
 
@@ -242,7 +242,7 @@ The default `docker-compose.yml` now mounts `./configs:/etc/prefixd` (writable) 
 
 #### Breaking: Offset pagination removed
 
-`GET /v1/mitigations`, `GET /v1/events`, and `GET /v1/audit` no longer accept the `offset` query parameter. Use cursor-based pagination instead. See [ADR 016](adr/016-cursor-pagination.md) for rationale.
+`GET /v1/mitigations`, `GET /v1/events`, and `GET /v1/audit` no longer accept the `offset` query parameter. Use cursor-based pagination instead. See [ADR 016](../adr/016-cursor-pagination.md) for rationale.
 
 **Before (v0.11.0):**
 
@@ -284,14 +284,14 @@ If you have **custom scripts or integrations** that page through results with `o
 - **New endpoint:** `POST /v1/mitigations/acknowledge` for bulk acknowledging mitigations.
 - **New endpoint:** `GET/PUT /v1/preferences` for notification preferences (muted events, quiet hours). Quiet hours require both `start` and `end` or both `null` — partial configuration is rejected (400).
 - **New query params:** `?start=`, `?end=` (ISO 8601) for date range filtering on all list endpoints. `?acknowledged=true|false` on mitigations.
-- **Per-destination event routing:** Alerting destinations now accept an optional `events` array to override the global event filter. Existing configs without per-destination events are unaffected (backward-compatible, see [ADR 017](adr/017-notification-routing-preferences.md)).
+- **Per-destination event routing:** Alerting destinations now accept an optional `events` array to override the global event filter. Existing configs without per-destination events are unaffected (backward-compatible, see [ADR 017](../adr/017-notification-routing-preferences.md)).
 - **Frontend:** API hooks now return response objects (`{mitigations, count, next_cursor, has_more}`) instead of bare arrays. If you have custom frontend code consuming these hooks, update accordingly.
 - No config file changes required. Existing `alerting.yaml` files work as-is.
 
 ### v0.10.1 -> v0.11.0
 
 - **CVE gate in CI:** `cargo audit` and `bun audit` now gate Docker publishing. CycloneDX SBOM generated on version tags.
-- **Vendor capability matrix:** New `docs/vendors.md`.
+- **Vendor capability matrix:** New `docs/reference/vendors.md`.
 - **Security fixes:** Next.js 16.1.7, undici 7.24.4, quinn-proto 0.11.14, rollup 4.59.0.
 - **New features:** Bulk withdraw (`POST /v1/mitigations/withdraw`), FlowSpec rule preview on mitigation detail page.
 - No database migrations required.
