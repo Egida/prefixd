@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Recover every eligible desired rule when creation timestamps tie. Reconciliation
+  reads a strict complete owner inventory scoped to the controller's POP; pending
+  creation rows remain excluded from repairs and active-status gauges.
+
 - Tolerate Docker CI cache export failures after successful image builds and
   pushes, and let each image matrix job finish independently.
 

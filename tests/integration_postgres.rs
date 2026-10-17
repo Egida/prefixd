@@ -1992,3 +1992,424 @@ async fn test_documented_retention_preserves_live_intent_and_referenced_history(
         .unwrap();
     assert_eq!(membership_count, 1);
 }
+
+struct InventorySpeaker {
+    inner: prefixd::bgp::MockAnnouncer,
+    announcements: std::sync::Mutex<Vec<String>>,
+    withdrawals: std::sync::Mutex<Vec<String>>,
+    reject_withdrawals: bool,
+}
+
+impl InventorySpeaker {
+    fn new(reject_withdrawals: bool) -> Self {
+        Self {
+            inner: prefixd::bgp::MockAnnouncer::new(),
+            announcements: std::sync::Mutex::new(Vec::new()),
+            withdrawals: std::sync::Mutex::new(Vec::new()),
+            reject_withdrawals,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl prefixd::bgp::FlowSpecAnnouncer for InventorySpeaker {
+    async fn announce(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+        self.announcements.lock().unwrap().push(rule.nlri_hash());
+        self.inner.announce(rule).await
+    }
+
+    async fn withdraw(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+        self.withdrawals.lock().unwrap().push(rule.nlri_hash());
+        if self.reject_withdrawals {
+            return Err(prefixd::error::PrefixdError::BgpWithdrawalFailed(
+                "retained for retry".into(),
+            ));
+        }
+        self.inner.withdraw(rule).await
+    }
+
+    async fn list_active(&self) -> prefixd::error::Result<Vec<prefixd::domain::FlowSpecRule>> {
+        self.inner.list_active().await
+    }
+
+    async fn session_status(&self) -> prefixd::error::Result<Vec<prefixd::bgp::PeerStatus>> {
+        self.inner.session_status().await
+    }
+}
+
+fn inventory_mitigation(
+    prefix: &str,
+    pop: &str,
+    created_at: chrono::DateTime<chrono::Utc>,
+    status: MitigationStatus,
+) -> prefixd::domain::Mitigation {
+    use prefixd::domain::{
+        ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+    };
+    let mut mitigation = Mitigation::from_intent(
+        MitigationIntent {
+            event_id: uuid::Uuid::new_v4(),
+            customer_id: None,
+            service_id: None,
+            pop: pop.into(),
+            match_criteria: MatchCriteria {
+                dst_prefix: prefix.into(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+            },
+            action_type: ActionType::Discard,
+            action_params: ActionParams { rate_bps: None },
+            ttl_seconds: 3600,
+            reason: "inventory correctness fixture".into(),
+        },
+        prefix.split('/').next().unwrap().into(),
+        AttackVector::UdpFlood,
+    );
+    mitigation.status = status;
+    mitigation.created_at = created_at;
+    mitigation.updated_at = created_at;
+    mitigation
+}
+
+#[tokio::test]
+async fn test_reconciliation_recovers_every_tied_timestamp_once() {
+    use chrono::Timelike;
+    use prefixd::{
+        AppState,
+        bgp::FlowSpecAnnouncer,
+        domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule, mitigation_rule},
+        scheduler::ReconciliationLoop,
+    };
+    use std::{collections::BTreeSet, sync::Arc};
+    let context = TestContext::new().await;
+    let created_at = chrono::Utc::now().with_nanosecond(0).unwrap();
+    let mut local_keys = BTreeSet::new();
+    for index in 0..1001 {
+        let prefix = format!("198.18.{}.{}/32", index / 256, index % 256);
+        let status = if index == 1000 {
+            MitigationStatus::Escalated
+        } else {
+            MitigationStatus::Active
+        };
+        let mitigation = inventory_mitigation(&prefix, "test-pop", created_at, status);
+        local_keys.insert(mitigation_rule(&mitigation).nlri_hash());
+        context.repo.insert_mitigation(&mitigation).await.unwrap();
+    }
+    let foreign = inventory_mitigation(
+        "203.0.113.254/32",
+        "other-pop",
+        created_at,
+        MitigationStatus::Active,
+    );
+    context.repo.insert_mitigation(&foreign).await.unwrap();
+    let (local_count, timestamp_count): (i64, i64) = sqlx::query_as(
+        "SELECT COUNT(*), COUNT(DISTINCT created_at) FROM mitigations WHERE pop = 'test-pop'",
+    )
+    .fetch_one(&context.pool)
+    .await
+    .unwrap();
+    assert_eq!((local_count, timestamp_count), (1001, 1));
+    let version: String = sqlx::query_scalar("SELECT version()")
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    eprintln!(
+        "PostgreSQL: {version}; local distinct NLRIs: {}; local rows: {local_count}; creation timestamps: {timestamp_count}; created_at: {created_at}",
+        local_keys.len()
+    );
+    for scoped in [true, false] {
+        let speaker = Arc::new(InventorySpeaker::new(false));
+        let unknown = FlowSpecRule::new(
+            FlowSpecNlri {
+                dst_prefix: "203.0.113.253/32".into(),
+                protocol: None,
+                dst_ports: vec![],
+            },
+            FlowSpecAction::discard(),
+        );
+        speaker.inner.announce(&unknown).await.unwrap();
+        let mut expected = local_keys.clone();
+        if !scoped {
+            expected.insert(mitigation_rule(&foreign).nlri_hash());
+        }
+        let mut reconciler =
+            ReconciliationLoop::new(context.repo.clone(), speaker.clone(), 30, false);
+        if scoped {
+            let state = AppState::new(
+                common::test_settings(),
+                common::test_inventory(),
+                common::test_playbooks(),
+                context.repo.clone(),
+                speaker.clone(),
+                ".".into(),
+            )
+            .unwrap();
+            reconciler = reconciler.with_app_state(state);
+        }
+        reconciler.reconcile().await.unwrap();
+        let calls = speaker.announcements.lock().unwrap().clone();
+        assert_eq!(calls.len(), expected.len(), "scoped={scoped}");
+        assert_eq!(calls.into_iter().collect::<BTreeSet<_>>(), expected);
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.announcements.lock().unwrap().len(), expected.len());
+        assert!(speaker.withdrawals.lock().unwrap().is_empty());
+        let actual: BTreeSet<_> = speaker
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .map(|rule| rule.nlri_hash())
+            .collect();
+        expected.insert(unknown.nlri_hash());
+        assert_eq!(actual, expected);
+    }
+}
+
+#[tokio::test]
+async fn test_reconciliation_inventory_excludes_ineligible_owners() {
+    use prefixd::{
+        AppState,
+        domain::{mitigation_rule, request_withdrawal},
+        scheduler::ReconciliationLoop,
+    };
+    use std::{collections::BTreeSet, sync::Arc};
+    let context = TestContext::new().await;
+    let created_at = chrono::Utc::now();
+    let active = inventory_mitigation(
+        "192.0.2.1/32",
+        "test-pop",
+        created_at,
+        MitigationStatus::Active,
+    );
+    let escalated = inventory_mitigation(
+        "192.0.2.2/32",
+        "test-pop",
+        created_at,
+        MitigationStatus::Escalated,
+    );
+    let foreign = inventory_mitigation(
+        "192.0.2.3/32",
+        "other-pop",
+        created_at,
+        MitigationStatus::Active,
+    );
+    let pending = inventory_mitigation(
+        "192.0.2.4/32",
+        "test-pop",
+        created_at,
+        MitigationStatus::Pending,
+    );
+    let mut expired = inventory_mitigation(
+        "192.0.2.5/32",
+        "test-pop",
+        created_at,
+        MitigationStatus::Active,
+    );
+    expired.expires_at = created_at - chrono::Duration::seconds(1);
+    let deleting = inventory_mitigation(
+        "192.0.2.6/32",
+        "test-pop",
+        created_at,
+        MitigationStatus::Active,
+    );
+    for mitigation in [&active, &escalated, &foreign, &pending, &expired, &deleting] {
+        context.repo.insert_mitigation(mitigation).await.unwrap();
+    }
+    let deleting = context
+        .repo
+        .get_mitigation(deleting.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    request_withdrawal(
+        context.repo.as_ref(),
+        &deleting,
+        false,
+        "operator",
+        "fixture",
+        "pending withdrawal".into(),
+        true,
+    )
+    .await
+    .unwrap();
+    for scoped in [true, false] {
+        let speaker = Arc::new(InventorySpeaker::new(true));
+        let mut expected = BTreeSet::from([
+            mitigation_rule(&active).nlri_hash(),
+            mitigation_rule(&escalated).nlri_hash(),
+        ]);
+        if !scoped {
+            expected.insert(mitigation_rule(&foreign).nlri_hash());
+        }
+        let mut reconciler =
+            ReconciliationLoop::new(context.repo.clone(), speaker.clone(), 30, false);
+        if scoped {
+            let state = AppState::new(
+                common::test_settings(),
+                common::test_inventory(),
+                common::test_playbooks(),
+                context.repo.clone(),
+                speaker.clone(),
+                ".".into(),
+            )
+            .unwrap();
+            reconciler = reconciler.with_app_state(state);
+        }
+        // Deletions deliberately fail so expired and pending-delete rows remain status-active.
+        assert!(reconciler.reconcile().await.is_err());
+        let calls = speaker.announcements.lock().unwrap().clone();
+        assert_eq!(calls.len(), expected.len());
+        assert_eq!(calls.into_iter().collect::<BTreeSet<_>>(), expected);
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(speaker.announcements.lock().unwrap().len(), expected.len());
+        let withdrawn: BTreeSet<_> = speaker
+            .withdrawals
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        assert_eq!(
+            withdrawn,
+            BTreeSet::from([
+                mitigation_rule(&expired).nlri_hash(),
+                mitigation_rule(&deleting).nlri_hash()
+            ])
+        );
+        assert_eq!(
+            context
+                .repo
+                .get_mitigation(pending.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Pending
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_reconciliation_inventory_is_strict_and_isolates_foreign_corruption() {
+    use prefixd::{AppState, scheduler::ReconciliationLoop};
+    use std::sync::Arc;
+    let context = TestContext::new().await;
+    let created_at = chrono::Utc::now();
+    let mut good = inventory_mitigation(
+        "192.0.2.1/32",
+        "test-pop",
+        created_at,
+        MitigationStatus::Active,
+    );
+    good.mitigation_id = uuid::Uuid::from_u128(1);
+    let mut later_bad = inventory_mitigation(
+        "192.0.2.2/32",
+        "test-pop",
+        created_at,
+        MitigationStatus::Escalated,
+    );
+    later_bad.mitigation_id = uuid::Uuid::from_u128(2);
+    let foreign = inventory_mitigation(
+        "192.0.2.3/32",
+        "other-pop",
+        created_at,
+        MitigationStatus::Active,
+    );
+    for mitigation in [&good, &later_bad, &foreign] {
+        context.repo.insert_mitigation(mitigation).await.unwrap();
+    }
+    sqlx::query("UPDATE mitigations SET match_json = '{' WHERE mitigation_id = $1")
+        .bind(foreign.mitigation_id)
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        context
+            .repo
+            .active_mitigation_inventory(Some("test-pop"))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        context
+            .repo
+            .active_mitigations_for_pop("test-pop")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    let speaker = Arc::new(InventorySpeaker::new(false));
+    let state = AppState::new(
+        common::test_settings(),
+        common::test_inventory(),
+        common::test_playbooks(),
+        context.repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    ReconciliationLoop::new(context.repo.clone(), speaker.clone(), 30, false)
+        .with_app_state(state)
+        .reconcile()
+        .await
+        .unwrap();
+    assert_eq!(speaker.announcements.lock().unwrap().len(), 2);
+    assert!(
+        context
+            .repo
+            .active_mitigation_inventory(None)
+            .await
+            .is_err()
+    );
+    let all_pop_speaker = Arc::new(InventorySpeaker::new(false));
+    assert!(
+        ReconciliationLoop::new(context.repo.clone(), all_pop_speaker.clone(), 30, false)
+            .reconcile()
+            .await
+            .is_err()
+    );
+    assert!(all_pop_speaker.announcements.lock().unwrap().is_empty());
+
+    sqlx::query("UPDATE mitigations SET match_json = $2 WHERE mitigation_id = $1")
+        .bind(foreign.mitigation_id)
+        .bind(serde_json::to_string(&foreign.match_criteria).unwrap())
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE mitigations SET match_json = '{' WHERE mitigation_id = $1")
+        .bind(later_bad.mitigation_id)
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    assert!(
+        context
+            .repo
+            .active_mitigation_inventory(Some("test-pop"))
+            .await
+            .is_err()
+    );
+    let speaker = Arc::new(InventorySpeaker::new(false));
+    let state = AppState::new(
+        common::test_settings(),
+        common::test_inventory(),
+        common::test_playbooks(),
+        context.repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    assert!(
+        ReconciliationLoop::new(context.repo.clone(), speaker.clone(), 30, false)
+            .with_app_state(state)
+            .reconcile()
+            .await
+            .is_err()
+    );
+    assert!(
+        speaker.announcements.lock().unwrap().is_empty(),
+        "malformed intent must prevent partial repairs"
+    );
+}
