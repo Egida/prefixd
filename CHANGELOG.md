@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Require complete dual-family GoBGP local read-back. Received paths are excluded;
+  malformed or unsupported local rules and stream failures fail observation.
+  Bound full inventory and peer streams to 30 seconds, and reject lossy action
+  decoding instead of inventing discard or truncating policing rates.
+
 - Refresh compatible Rust patches to futures 0.3.33, prost 0.14.4 and
   serde_json 1.0.151 while preserving the existing advisory fixes.
 

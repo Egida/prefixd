@@ -23,6 +23,31 @@ FRR, BIRD, and OpenBGPD are not selectable backends today. A router accepting a
 FlowSpec route is distinct from a daemon exposing the origination/control API
 prefixd needs. Each proposed adapter needs that evidence before implementation.
 
+## GoBGP read-back
+
+GoBGP inventory reads both IPv4 and IPv6 FlowSpec GLOBAL tables, including
+nonselected local paths. In GoBGP v4.10.0, an empty `neighbor_ip` identifies
+GoBGP-local provenance; received paths are excluded before decoding. UUIDs are
+not populated by ListPath and do not identify ownership. Local paths from other
+controllers are not distinguished from prefixd's paths; unknown rules are never
+deleted by reconciliation. These provenance fields follow the pinned
+[GoBGP v4.10.0 serializer](https://github.com/osrg/gobgp/blob/da824d99912e02124b53741245ee4186c381adcc/pkg/server/grpc_server.go#L214).
+
+This is the accepted local RIB, not retained pre-policy injection intent. Global
+import policy can reject an injected route, so successful AddPath alone does not
+prove it appears in this inventory; see the pinned
+[AddPath policy processing](https://github.com/osrg/gobgp/blob/da824d99912e02124b53741245ee4186c381adcc/pkg/server/server.go#L1323).
+
+Both family streams must finish successfully, including trailers. Any family
+failure or malformed/unsupported local row fails the entire observation; no
+partial inventory is returned. The complete dual-family read and each peer read
+have a 30-second deadline, including response bodies. Destination prefixes,
+optional protocol equality, destination-port equality lists, and one traffic-rate
+action are supported. Byte rates convert to bits/sec before exact integer/range
+validation; zero means discard. Missing or ambiguous actions and extra match or
+action semantics are errors. Unsupported unrelated local rules can therefore
+block reconciliation observation and require operator attention.
+
 ## rustbgpd configuration
 
 Build with `cargo build --features bgp-rustbgpd`. A local authenticated TCP
@@ -93,8 +118,8 @@ RPC outcomes, not downstream enforcement or a confirmed restart count.
 
 ## Rule and reconciliation semantics
 
-The adapter supports destination prefix, optional protocol, equality lists of
-destination ports, and discard or traffic policing. Components are sent in RFC
+The rustbgpd adapter supports destination prefix, optional protocol, equality
+lists of destination ports, and discard or traffic policing. Components are sent in RFC
 type order. Policing uses bits/sec in prefixd and floating-point bytes/sec in
 the daemon; rates that cannot be represented exactly are rejected. Unsupported matches or
 actions must produce an error instead of being dropped during decoding.
