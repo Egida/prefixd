@@ -18,6 +18,7 @@ pub struct WithdrawalRequest {
     pub rule_json: String,
     pub mitigation_updated_at: DateTime<Utc>,
     pub terminal_status: String,
+    pub speaker_delete_required: bool,
     pub actor_type: String,
     pub actor: String,
     pub reason: String,
@@ -32,6 +33,7 @@ impl WithdrawalRequest {
         actor_type: &str,
         actor: &str,
         reason: String,
+        speaker_delete_required: bool,
     ) -> Result<Self> {
         let rule = mitigation_rule(mitigation);
         Ok(Self {
@@ -42,6 +44,7 @@ impl WithdrawalRequest {
             rule_json: serde_json::to_string(&rule)?,
             mitigation_updated_at: mitigation.updated_at,
             terminal_status: if expired { "expired" } else { "withdrawn" }.into(),
+            speaker_delete_required,
             actor_type: actor_type.into(),
             actor: actor.into(),
             reason,
@@ -91,35 +94,64 @@ pub async fn request_withdrawal(
     actor_type: &str,
     actor: &str,
     reason: String,
+    speaker_delete_required: bool,
 ) -> Result<WithdrawalRequest> {
-    let request = WithdrawalRequest::new(mitigation, expired, actor_type, actor, reason)?;
+    let request = WithdrawalRequest::new(
+        mitigation,
+        expired,
+        actor_type,
+        actor,
+        reason,
+        speaker_delete_required,
+    )?;
     check_withdrawal_owner(repo, &request).await?;
     repo.begin_withdrawal(&request).await
 }
 
-pub async fn ensure_no_pending_withdrawal(
+fn ownership_key(rule: &FlowSpecRule) -> String {
+    let mut nlri = rule.nlri.clone();
+    nlri.dst_ports.sort_unstable();
+    nlri.dst_ports.dedup();
+    nlri.compute_hash()
+}
+
+/// Caller holds the lifecycle mutex; reject ambiguous or deleting owners before consuming an event ID.
+pub async fn find_mitigation_owner(
     repo: &dyn RepositoryTrait,
     pop: &str,
     rule: &FlowSpecRule,
     scope_hash: &str,
-) -> Result<()> {
+) -> Result<Option<Mitigation>> {
     let pending = repo.pending_withdrawals(Some(pop)).await?;
-    let existing = if pending.is_empty() {
-        None
-    } else {
-        repo.find_active_by_scope(scope_hash, pop).await?
-    };
-    if pending.iter().any(|request| {
-        request.nlri_hash == rule.nlri_hash()
-            || existing
-                .as_ref()
-                .is_some_and(|mitigation| request.mitigation_id == mitigation.mitigation_id)
-    }) {
+    let key = ownership_key(rule);
+    let owners: Vec<_> = repo
+        .active_mitigations_for_pop(pop)
+        .await?
+        .into_iter()
+        .filter(|owner| {
+            owner.scope_hash == scope_hash
+                || owner.match_criteria.compute_scope_hash() == scope_hash
+                || ownership_key(&mitigation_rule(owner)) == key
+        })
+        .collect();
+    for request in pending {
+        let pending_rule: FlowSpecRule = serde_json::from_str(&request.rule_json)?;
+        if ownership_key(&pending_rule) == key
+            || owners
+                .iter()
+                .any(|owner| owner.mitigation_id == request.mitigation_id)
+        {
+            return Err(PrefixdError::Conflict(
+                "FlowSpec rule has a pending withdrawal".into(),
+            ));
+        }
+    }
+    if owners.len() > 1 {
         return Err(PrefixdError::Conflict(
-            "FlowSpec rule has a pending withdrawal".into(),
+            "FlowSpec rule has multiple active owners".into(),
         ));
     }
-    Ok(())
+    Ok(owners.into_iter().next())
 }
 
 async fn check_withdrawal_owner(
@@ -139,13 +171,16 @@ async fn check_withdrawal_owner(
             "withdrawal intent no longer matches mitigation".into(),
         ));
     }
+    let key = ownership_key(&mitigation_rule(&current));
+    let now = Utc::now();
     if repo
         .active_mitigations_for_pop(&request.pop)
         .await?
         .iter()
         .any(|owner| {
             owner.mitigation_id != request.mitigation_id
-                && mitigation_rule(owner).nlri_hash() == request.nlri_hash
+                && owner.expires_at > now
+                && ownership_key(&mitigation_rule(owner)) == key
         })
     {
         return Err(PrefixdError::Conflict(
@@ -172,6 +207,11 @@ pub async fn execute_withdrawal(
         .ok_or_else(|| {
             PrefixdError::Conflict("withdrawal operation is no longer pending".into())
         })?;
+    if request.speaker_delete_required && dry_run {
+        return Err(PrefixdError::Conflict(
+            "pending withdrawal requires enforced mode".into(),
+        ));
+    }
     check_withdrawal_owner(repo, &request).await?;
     let rule: FlowSpecRule = serde_json::from_str(&request.rule_json)?;
     if rule.nlri_hash() != request.nlri_hash {
@@ -180,14 +220,14 @@ pub async fn execute_withdrawal(
         ));
     }
     let start = std::time::Instant::now();
-    if !dry_run {
+    if request.speaker_delete_required {
         announcer.withdraw(&rule).await?;
     }
     let rpc_seconds = start.elapsed().as_secs_f64();
     let mitigation = repo.finish_withdrawal(&request).await?.ok_or_else(|| {
         PrefixdError::Conflict("withdrawal completion no longer matches mitigation".into())
     })?;
-    if !dry_run {
+    if request.speaker_delete_required {
         crate::observability::metrics::ANNOUNCEMENTS_TOTAL
             .with_label_values(&["withdrawn"])
             .inc();
@@ -245,7 +285,16 @@ mod tests {
             mitigation_rule(&second).nlri_hash()
         );
         assert!(matches!(
-            request_withdrawal(&repo, &first, false, "operator", "alice", "test".into()).await,
+            request_withdrawal(
+                &repo,
+                &first,
+                false,
+                "operator",
+                "alice",
+                "test".into(),
+                true
+            )
+            .await,
             Err(PrefixdError::Conflict(_))
         ));
         assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
@@ -258,9 +307,17 @@ mod tests {
         original.match_criteria.dst_ports = vec![53, 53];
         original.scope_hash = original.match_criteria.compute_scope_hash();
         repo.insert_mitigation(&original).await.unwrap();
-        request_withdrawal(&repo, &original, false, "operator", "alice", "test".into())
-            .await
-            .unwrap();
+        request_withdrawal(
+            &repo,
+            &original,
+            false,
+            "operator",
+            "alice",
+            "test".into(),
+            true,
+        )
+        .await
+        .unwrap();
         let candidate = mitigation("192.0.2.1/32");
         assert_eq!(candidate.scope_hash, original.scope_hash);
         assert_ne!(
@@ -268,7 +325,7 @@ mod tests {
             mitigation_rule(&original).nlri_hash()
         );
         assert!(matches!(
-            ensure_no_pending_withdrawal(
+            find_mitigation_owner(
                 &repo,
                 "test",
                 &mitigation_rule(&candidate),
@@ -277,6 +334,79 @@ mod tests {
             .await,
             Err(PrefixdError::Conflict(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn dry_run_preserves_enforced_intent_and_only_completes_explicit_simulation() {
+        let repo = MockRepository::new();
+        let speaker = MockAnnouncer::new();
+        let enforced = mitigation("192.0.2.1/32");
+        repo.insert_mitigation(&enforced).await.unwrap();
+        speaker.announce(&mitigation_rule(&enforced)).await.unwrap();
+        let request = request_withdrawal(
+            &repo,
+            &enforced,
+            false,
+            "operator",
+            "alice",
+            "enforced".into(),
+            true,
+        )
+        .await
+        .unwrap();
+        let retried = request_withdrawal(
+            &repo,
+            &enforced,
+            false,
+            "operator",
+            "bob",
+            "dry-run retry".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(retried.speaker_delete_required);
+        assert!(
+            execute_withdrawal(&repo, &speaker, true, &retried)
+                .await
+                .is_err()
+        );
+        assert_eq!(speaker.announced_count().await, 1);
+        assert!(
+            repo.get_mitigation(enforced.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active()
+        );
+        assert_eq!(repo.pending_withdrawals(None).await.unwrap().len(), 1);
+        execute_withdrawal(&repo, &speaker, false, &request)
+            .await
+            .unwrap();
+        assert_eq!(speaker.announced_count().await, 0);
+
+        let simulated = mitigation("192.0.2.2/32");
+        repo.insert_mitigation(&simulated).await.unwrap();
+        let request = request_withdrawal(
+            &repo,
+            &simulated,
+            false,
+            "operator",
+            "alice",
+            "simulation".into(),
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(!request.speaker_delete_required);
+        assert_eq!(
+            execute_withdrawal(&repo, &speaker, true, &request)
+                .await
+                .unwrap()
+                .status,
+            MitigationStatus::Withdrawn
+        );
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -296,6 +426,7 @@ mod tests {
             "operator",
             "alice",
             "first reason".into(),
+            true,
         )
         .await
         .unwrap();
@@ -306,6 +437,7 @@ mod tests {
             "system",
             "scheduler",
             "TTL expired".into(),
+            false,
         )
         .await
         .unwrap();

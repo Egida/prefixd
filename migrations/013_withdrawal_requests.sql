@@ -16,3 +16,7 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
 
 CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_pending
     ON withdrawal_requests(pop) WHERE completed_at IS NULL;
+
+-- Earlier instances of this migration did not record the originating mode.
+ALTER TABLE withdrawal_requests
+    ADD COLUMN IF NOT EXISTS speaker_delete_required BOOLEAN NOT NULL DEFAULT TRUE;

@@ -194,6 +194,7 @@ impl ReconciliationLoop {
                     "system",
                     "scheduler",
                     "TTL expired".into(),
+                    !self.dry_run,
                 )
                 .await
                 {
@@ -442,12 +443,7 @@ impl ReconciliationLoop {
             }
         }
 
-        let now = chrono::Utc::now();
-        active.retain(|mitigation| {
-            mitigation.expires_at > now
-                && pop.is_none_or(|pop| mitigation.pop == pop)
-                && !pending_keys.contains(self.build_flowspec_rule(mitigation).nlri_hash().as_str())
-        });
+        active.retain(|mitigation| pop.is_none_or(|pop| mitigation.pop == pop));
 
         crate::observability::metrics::RECONCILIATION_ACTIVE_COUNT
             .with_label_values(&["local"])
@@ -469,6 +465,12 @@ impl ReconciliationLoop {
             }
         }
 
+        let now = chrono::Utc::now();
+        active.retain(|mitigation| {
+            mitigation.expires_at > now
+                && !pending_keys.contains(self.build_flowspec_rule(mitigation).nlri_hash().as_str())
+        });
+
         // Get actual state from BGP
         let announced = self.announcer.list_active().await?;
         let announced_hashes: std::collections::HashSet<_> =
@@ -477,6 +479,9 @@ impl ReconciliationLoop {
         // Re-announce missing rules
         let mut repair_error = None;
         for candidate in &active {
+            if announced_hashes.contains(&self.build_flowspec_rule(candidate).nlri_hash()) {
+                continue;
+            }
             let _guard = match &self.state {
                 Some(state) => Some(state.mitigation_lock.lock().await),
                 None => None,
@@ -594,6 +599,9 @@ mod tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
+    // Reconciliation resets process-global Prometheus gauges.
+    static RECONCILIATION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     struct FailingWithdrawal {
         inner: MockAnnouncer,
         mode: AtomicUsize,
@@ -655,7 +663,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn converged_inventory_skips_lifecycle_reads_but_repairs_recheck() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(MockAnnouncer::new());
+        let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+        for suffix in 1..=10 {
+            let mut mitigation = expired_mitigation(&format!("192.0.2.{suffix}"));
+            mitigation.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+            repo.insert_mitigation(&mitigation).await.unwrap();
+            speaker
+                .announce(&reconciler.build_flowspec_rule(&mitigation))
+                .await
+                .unwrap();
+        }
+        reconciler.sync_announcements().await.unwrap();
+        assert_eq!(repo.lifecycle_read_counts(), (0, 1));
+        let missing = speaker.list_active().await.unwrap().pop().unwrap();
+        speaker.withdraw(&missing).await.unwrap();
+        reconciler.sync_announcements().await.unwrap();
+        assert_eq!(repo.lifecycle_read_counts(), (1, 3));
+        assert_eq!(speaker.list_active().await.unwrap().len(), 10);
+    }
+
+    #[tokio::test]
+    async fn legacy_canonical_owners_expire_after_the_last_live_owner() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(MockAnnouncer::new());
+        let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+        let first = expired_mitigation("192.0.2.10");
+        let mut second = first.clone();
+        second.mitigation_id = uuid::Uuid::new_v4();
+        second.scope_hash = "legacy noncanonical hash".into();
+        second.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+        for mitigation in [&first, &second] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        speaker
+            .announce(&reconciler.build_flowspec_rule(&first))
+            .await
+            .unwrap();
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+        assert!(
+            repo.get_mitigation(first.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active()
+        );
+        second.expires_at = first.expires_at;
+        repo.update_mitigation(&second).await.unwrap();
+        reconciler.reconcile().await.unwrap();
+        for mitigation in [&first, &second] {
+            assert_eq!(
+                repo.get_mitigation(mitigation.mitigation_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                MitigationStatus::Expired
+            );
+        }
+        assert!(speaker.list_active().await.unwrap().is_empty());
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn expiry_retries_failed_withdrawals_without_false_events_or_reannouncement() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
         // Cover rejection before removal and an ambiguous reply after removal.
         for failure_mode in [1, 2] {
             let repo = Arc::new(MockRepository::new());
@@ -736,6 +813,12 @@ mod tests {
                     .unwrap()
                     .unattached_total(),
                 0
+            );
+            assert_eq!(
+                crate::observability::metrics::MITIGATIONS_ACTIVE
+                    .with_label_values(&["discard", "test"])
+                    .get(),
+                2.0
             );
             assert_eq!(speaker.announcements.load(SeqCst), 1);
             assert_eq!(
