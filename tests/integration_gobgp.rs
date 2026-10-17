@@ -4,7 +4,8 @@
 //!
 //! To run:
 //!   docker compose up -d gobgp
-//!   cargo test --test integration_gobgp -- --ignored
+//!   cargo test --test integration_gobgp -- --ignored --test-threads=1
+//! Set PREFIXD_GOBGP_TEST_ENDPOINT for an isolated non-default listener.
 
 use prefixd::bgp::{FlowSpecAnnouncer, GoBgpAnnouncer};
 use prefixd::domain::{ActionType, FlowSpecAction, FlowSpecNlri, FlowSpecRule};
@@ -14,7 +15,9 @@ const GOBGP_ENDPOINT: &str = "127.0.0.1:50051";
 
 /// Helper to create and connect a GoBGP announcer
 async fn connect_gobgp() -> GoBgpAnnouncer {
-    let mut announcer = GoBgpAnnouncer::new(GOBGP_ENDPOINT.to_string());
+    let endpoint =
+        std::env::var("PREFIXD_GOBGP_TEST_ENDPOINT").unwrap_or_else(|_| GOBGP_ENDPOINT.into());
+    let mut announcer = GoBgpAnnouncer::new(endpoint);
     announcer
         .connect()
         .await
@@ -369,9 +372,16 @@ async fn test_ipv6_flowspec_roundtrip() {
         .expect("Failed to announce IPv6 rule");
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // Note: list_active() currently only queries IPv4 FlowSpec (AFI=1)
-    // For full IPv6 support, we'd need to also query AFI=2
-    // This test verifies announce/withdraw work for IPv6
+    let active = announcer
+        .list_active()
+        .await
+        .expect("Failed to list dual-family inventory");
+    let parsed = active
+        .iter()
+        .find(|candidate| candidate.nlri_hash() == rule.nlri_hash())
+        .expect("IPv6 rule missing from local inventory");
+    assert_eq!(parsed.actions[0].action_type, ActionType::Police);
+    assert_eq!(parsed.actions[0].rate_bps, Some(1_000_000_000));
 
     // Cleanup
     announcer
@@ -485,4 +495,100 @@ async fn test_reconciliation_reannounces_after_manual_delete() {
 
     // Cleanup
     announcer.withdraw(&rule).await.ok();
+}
+
+/// Use an isolated speaker: the unsupported local row deliberately blocks strict inventory.
+#[tokio::test]
+#[ignore] // Requires isolated GoBGP; run this file with --test-threads=1.
+async fn test_local_provenance_and_unsupported_local_rule() {
+    use prefixd::bgp::apipb::{
+        self, flow_spec_rule, go_bgp_service_client::GoBgpServiceClient, nlri,
+    };
+    let announcer = connect_gobgp().await;
+    let rule = FlowSpecRule::new(
+        FlowSpecNlri {
+            dst_prefix: "198.51.100.211/32".into(),
+            protocol: Some(17),
+            dst_ports: vec![53],
+        },
+        FlowSpecAction::discard(),
+    );
+    announcer.announce(&rule).await.unwrap();
+    let endpoint =
+        std::env::var("PREFIXD_GOBGP_TEST_ENDPOINT").unwrap_or_else(|_| GOBGP_ENDPOINT.into());
+    let endpoint = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint
+    } else {
+        format!("http://{endpoint}")
+    };
+    let mut client = GoBgpServiceClient::connect(endpoint).await.unwrap();
+    let family = apipb::Family { afi: 1, safi: 133 };
+    let mut stream = client
+        .list_path(apipb::ListPathRequest {
+            table_type: apipb::TableType::Global as i32,
+            family: Some(family),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let mut local_path = None;
+    while let Some(response) = stream.message().await.unwrap() {
+        for path in response.destination.unwrap().paths {
+            if path
+                .nlri
+                .as_ref()
+                .and_then(|nlri| announcer.decode_flowspec_nlri(nlri).ok())
+                .is_some_and(|nlri| nlri.compute_hash() == rule.nlri_hash())
+            {
+                local_path = Some(path);
+            }
+        }
+    }
+    let mut local_path = local_path.expect("injected path must appear in GLOBAL RIB");
+    assert!(
+        local_path.neighbor_ip.is_empty(),
+        "GoBGP-local provenance uses an empty neighbor address"
+    );
+    assert!(
+        local_path.uuid.is_empty(),
+        "ListPath does not serialize injection UUIDs"
+    );
+    let Some(nlri::Nlri::FlowSpec(nlri)) = &mut local_path.nlri.as_mut().unwrap().nlri else {
+        panic!("expected FlowSpec");
+    };
+    nlri.rules.push(apipb::FlowSpecRule {
+        rule: Some(flow_spec_rule::Rule::Component(apipb::FlowSpecComponent {
+            r#type: 6,
+            items: vec![apipb::FlowSpecComponentItem {
+                op: 0x81,
+                value: 123,
+            }],
+        })),
+    });
+    let added = client
+        .add_path(apipb::AddPathRequest {
+            table_type: apipb::TableType::Global as i32,
+            path: Some(local_path),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let observed = announcer.list_active().await;
+    client
+        .delete_path(apipb::DeletePathRequest {
+            table_type: apipb::TableType::Global as i32,
+            family: Some(family),
+            uuid: added.uuid,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    announcer.withdraw(&rule).await.unwrap();
+    assert!(observed.unwrap_err().to_string().contains("unsupported"));
+    announcer
+        .list_active()
+        .await
+        .expect("observation recovers once unsupported local rule is removed");
 }

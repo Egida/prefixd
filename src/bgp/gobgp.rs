@@ -455,81 +455,86 @@ impl FlowSpecAnnouncer for GoBgpAnnouncer {
     }
 
     async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
-        let mut rules = Vec::new();
-
-        // Query both IPv4 and IPv6 FlowSpec tables
-        // Continue if one address family isn't configured
-        for afi in [AFI_IP, AFI_IP6] {
-            match self.list_active_for_afi(afi).await {
-                Ok(afi_rules) => rules.extend(afi_rules),
-                Err(e) => {
-                    // IPv6 FlowSpec may not be configured - log and continue
-                    let afi_name = if afi == AFI_IP6 { "ipv6" } else { "ipv4" };
-                    tracing::debug!(
-                        afi = afi_name,
-                        error = %e,
-                        "failed to query FlowSpec RIB for address family"
-                    );
-                }
-            }
-        }
-
-        Ok(rules)
+        self.observe("ListPath", async {
+            let mut rules = self.list_active_for_afi(AFI_IP).await?;
+            rules.extend(self.list_active_for_afi(AFI_IP6).await?);
+            Ok(rules)
+        })
+        .await
     }
 
     async fn session_status(&self) -> Result<Vec<PeerStatus>> {
-        let mut client = self.get_client().await?;
+        self.observe("ListPeer", async {
+            let mut client = self.get_client().await?;
 
-        let request = ListPeerRequest {
-            ..Default::default()
-        };
+            let request = ListPeerRequest {
+                ..Default::default()
+            };
 
-        let mut stream = client
-            .list_peer(request)
-            .await
-            .map_err(|e| PrefixdError::Internal(format!("GoBGP ListPeer failed: {}", e)))?
-            .into_inner();
+            let mut stream = client
+                .list_peer(request)
+                .await
+                .map_err(|e| PrefixdError::Internal(format!("GoBGP ListPeer failed: {}", e)))?
+                .into_inner();
 
-        let mut peers = Vec::new();
+            let mut peers = Vec::new();
 
-        while let Some(resp) = stream
-            .message()
-            .await
-            .map_err(|e| PrefixdError::Internal(format!("GoBGP stream error: {}", e)))?
-        {
-            if let Some(peer) = resp.peer {
-                let state = peer
-                    .state
-                    .map(|s| match s.session_state {
-                        1 => SessionState::Idle,
-                        2 => SessionState::Connect,
-                        3 => SessionState::Active,
-                        4 => SessionState::OpenSent,
-                        5 => SessionState::OpenConfirm,
-                        6 => SessionState::Established,
-                        _ => SessionState::Idle,
-                    })
-                    .unwrap_or(SessionState::Idle);
+            while let Some(resp) = stream
+                .message()
+                .await
+                .map_err(|e| PrefixdError::Internal(format!("GoBGP stream error: {}", e)))?
+            {
+                if let Some(peer) = resp.peer {
+                    let state = peer
+                        .state
+                        .map(|s| match s.session_state {
+                            1 => SessionState::Idle,
+                            2 => SessionState::Connect,
+                            3 => SessionState::Active,
+                            4 => SessionState::OpenSent,
+                            5 => SessionState::OpenConfirm,
+                            6 => SessionState::Established,
+                            _ => SessionState::Idle,
+                        })
+                        .unwrap_or(SessionState::Idle);
 
-                let name = peer
-                    .conf
-                    .as_ref()
-                    .map(|c| c.neighbor_address.clone())
-                    .unwrap_or_default();
+                    let name = peer
+                        .conf
+                        .as_ref()
+                        .map(|c| c.neighbor_address.clone())
+                        .unwrap_or_default();
 
-                peers.push(PeerStatus {
-                    name: name.clone(),
-                    address: name,
-                    state,
-                });
+                    peers.push(PeerStatus {
+                        name: name.clone(),
+                        address: name,
+                        state,
+                    });
+                }
             }
-        }
 
-        Ok(peers)
+            Ok(peers)
+        })
+        .await
     }
 }
 
 impl GoBgpAnnouncer {
+    // Endpoint timeouts stop at response headers; observation must include every row and trailer.
+    async fn observe<T>(
+        &self,
+        operation: &str,
+        future: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        tokio::time::timeout(GRPC_REQUEST_TIMEOUT, future)
+            .await
+            .unwrap_or_else(|_| {
+                Err(PrefixdError::BgpSessionError {
+                    peer: "gobgp".to_string(),
+                    error: format!("{operation} observation deadline exceeded"),
+                })
+            })
+    }
+
     /// Query FlowSpec RIB for a specific address family
     async fn list_active_for_afi(&self, afi: i32) -> Result<Vec<FlowSpecRule>> {
         let mut client = self.get_client().await?;
@@ -555,19 +560,25 @@ impl GoBgpAnnouncer {
             .await
             .map_err(|e| PrefixdError::Internal(format!("GoBGP stream error: {}", e)))?
         {
-            if let Some(dest) = resp.destination {
-                for path in dest.paths {
-                    match self.parse_flowspec_path(&path) {
-                        Ok(rule) => rules.push(rule),
-                        Err(e) => {
-                            tracing::warn!(
-                                error = %e,
-                                afi = afi,
-                                "failed to parse FlowSpec path from GoBGP RIB"
-                            );
-                        }
-                    }
+            let dest = resp.destination.ok_or_else(|| {
+                PrefixdError::Internal("GoBGP ListPath response has no destination".into())
+            })?;
+            for path in dest.paths {
+                // GoBGP leaves neighbor_ip empty for local paths; UUID is absent even on API paths.
+                if !path.neighbor_ip.is_empty() {
+                    continue;
                 }
+                if path.family
+                    != Some(Family {
+                        afi,
+                        safi: SAFI_FLOWSPEC,
+                    })
+                {
+                    return Err(PrefixdError::Internal(
+                        "GoBGP local path has wrong family".into(),
+                    ));
+                }
+                rules.push(self.parse_flowspec_path(&path)?);
             }
         }
 
@@ -579,6 +590,11 @@ impl GoBgpAnnouncer {
     /// desired state (DB) vs actual state (BGP RIB).
     /// Updated for GoBGP v4 API which uses typed oneof instead of Any.
     fn parse_flowspec_path(&self, path: &Path) -> Result<FlowSpecRule> {
+        if path.is_withdraw {
+            return Err(PrefixdError::Internal(
+                "GoBGP local inventory contains a withdrawal".into(),
+            ));
+        }
         // 1. Parse NLRI (now a typed Nlri message with oneof)
         let nlri_wrapper = path
             .nlri
@@ -586,6 +602,21 @@ impl GoBgpAnnouncer {
             .ok_or_else(|| PrefixdError::Internal("Path has no NLRI".to_string()))?;
 
         let flowspec_nlri = self.decode_flowspec_nlri(nlri_wrapper)?;
+
+        let afi = match flowspec_nlri.ip_version() {
+            IpVersion::V4 => AFI_IP,
+            IpVersion::V6 => AFI_IP6,
+        };
+        if path.family
+            != Some(Family {
+                afi,
+                safi: SAFI_FLOWSPEC,
+            })
+        {
+            return Err(PrefixdError::Internal(
+                "GoBGP local path NLRI/family mismatch".into(),
+            ));
+        }
 
         // 2. Parse path attributes for action (traffic-rate extended community)
         let action = self.parse_flowspec_action(&path.pattrs)?;
@@ -614,40 +645,68 @@ impl GoBgpAnnouncer {
         let mut protocol: Option<u8> = None;
         let mut dst_ports: Vec<u16> = Vec::new();
 
-        // Parse each rule in the NLRI - now typed with oneof
+        let mut previous_type = 0;
         for rule in &proto_nlri.rules {
-            match &rule.rule {
-                Some(flow_spec_rule::Rule::IpPrefix(ip_prefix)) if ip_prefix.r#type == 1 => {
-                    // FlowSpecIPPrefix destination prefix (type 1)
-                    dst_prefix = format!("{}/{}", ip_prefix.prefix, ip_prefix.prefix_len);
+            let component_type = match &rule.rule {
+                Some(flow_spec_rule::Rule::IpPrefix(prefix)) if prefix.r#type == 1 => {
+                    let address = prefix.prefix.parse::<std::net::IpAddr>().map_err(|_| {
+                        PrefixdError::Internal("GoBGP invalid destination address".into())
+                    })?;
+                    let max_len = if address.is_ipv4() { 32 } else { 128 };
+                    if prefix.offset != 0 || prefix.prefix_len > max_len {
+                        return Err(PrefixdError::Internal(
+                            "GoBGP unsupported destination prefix length/offset".into(),
+                        ));
+                    }
+                    dst_prefix = format!("{}/{}", prefix.prefix, prefix.prefix_len);
+                    1
                 }
-                Some(flow_spec_rule::Rule::IpPrefix(_)) => {
-                    // type 2 would be source prefix, which we don't support
-                }
-                Some(flow_spec_rule::Rule::Component(component)) => {
-                    match component.r#type {
-                        3 => {
-                            // IP Protocol
-                            if let Some(item) = component.items.first() {
-                                protocol = Some(item.value as u8);
-                            }
+                Some(flow_spec_rule::Rule::Component(component))
+                    if matches!(component.r#type, 3 | 5) =>
+                {
+                    if component.items.is_empty()
+                        || (component.r#type == 3 && component.items.len() != 1)
+                    {
+                        return Err(PrefixdError::Internal(
+                            "GoBGP unsupported numeric component cardinality".into(),
+                        ));
+                    }
+                    for (index, item) in component.items.iter().enumerate() {
+                        let expected = if index + 1 == component.items.len() {
+                            0x81
+                        } else {
+                            0x01
+                        };
+                        // Wire operand-width bits do not change equality semantics.
+                        if item.op & !0x30 != expected {
+                            return Err(PrefixdError::Internal(
+                                "GoBGP unsupported numeric operator".into(),
+                            ));
                         }
-                        5 => {
-                            // Destination ports
-                            for item in &component.items {
-                                dst_ports.push(item.value as u16);
-                            }
-                        }
-                        _ => {
-                            // Ignore other component types (src port, TCP flags, etc.)
+                        if component.r#type == 3 {
+                            protocol = Some(u8::try_from(item.value).map_err(|_| {
+                                PrefixdError::Internal("GoBGP protocol exceeds u8".into())
+                            })?);
+                        } else {
+                            dst_ports.push(u16::try_from(item.value).map_err(|_| {
+                                PrefixdError::Internal("GoBGP destination port exceeds u16".into())
+                            })?);
                         }
                     }
+                    component.r#type
                 }
-                Some(flow_spec_rule::Rule::Mac(_)) => {
-                    // L2 FlowSpec MAC - not supported for our use case
+                _ => {
+                    return Err(PrefixdError::Internal(
+                        "GoBGP unsupported or missing FlowSpec component".into(),
+                    ));
                 }
-                None => {}
+            };
+            if component_type <= previous_type {
+                return Err(PrefixdError::Internal(
+                    "GoBGP duplicate or unordered FlowSpec component".into(),
+                ));
             }
+            previous_type = component_type;
         }
 
         if dst_prefix.is_empty() {
@@ -666,36 +725,64 @@ impl GoBgpAnnouncer {
     /// Parse extended communities to extract the FlowSpec action (traffic-rate)
     /// GoBGP v4 uses typed Attribute with oneof instead of Any
     fn parse_flowspec_action(&self, pattrs: &[Attribute]) -> Result<FlowSpecAction> {
+        let mut action = None;
         for attr in pattrs {
-            if let Some(attribute::Attr::ExtendedCommunities(ext_comm)) = &attr.attr {
-                for community in &ext_comm.communities {
-                    if let Some(extended_community::Extcom::TrafficRate(traffic_rate)) =
-                        &community.extcom
-                    {
-                        // rate == 0 means discard, otherwise it's police with rate
-                        if traffic_rate.rate == 0.0 {
-                            return Ok(FlowSpecAction {
-                                action_type: ActionType::Discard,
-                                rate_bps: None,
-                            });
-                        } else {
-                            // Convert bytes/sec back to bps
-                            let rate_bps = (traffic_rate.rate as u64) * 8;
-                            return Ok(FlowSpecAction {
-                                action_type: ActionType::Police,
-                                rate_bps: Some(rate_bps),
-                            });
+            match &attr.attr {
+                Some(attribute::Attr::ExtendedCommunities(ext_comm)) => {
+                    for community in &ext_comm.communities {
+                        let Some(extended_community::Extcom::TrafficRate(rate)) = &community.extcom
+                        else {
+                            return Err(PrefixdError::Internal(
+                                "GoBGP unsupported or missing extended community".into(),
+                            ));
+                        };
+                        if action.is_some() {
+                            return Err(PrefixdError::Internal(
+                                "GoBGP ambiguous traffic-rate actions".into(),
+                            ));
                         }
+                        let bits = f64::from(rate.rate) * 8.0;
+                        // u64::MAX rounds up to 2^64 in f64, so the upper bound is exclusive.
+                        if rate.asn > u16::MAX as u32
+                            || !bits.is_finite()
+                            || bits < 0.0
+                            || bits >= 18_446_744_073_709_551_616.0
+                            || bits.fract() != 0.0
+                        {
+                            return Err(PrefixdError::Internal("GoBGP traffic rate is not exactly representable in integer bits/sec".into()));
+                        }
+                        action = Some(if bits == 0.0 {
+                            FlowSpecAction::discard()
+                        } else {
+                            FlowSpecAction::police(bits as u64)
+                        });
                     }
+                }
+                Some(
+                    attribute::Attr::Origin(_)
+                    | attribute::Attr::AsPath(_)
+                    | attribute::Attr::NextHop(_)
+                    | attribute::Attr::MultiExitDisc(_)
+                    | attribute::Attr::LocalPref(_)
+                    | attribute::Attr::AtomicAggregate(_)
+                    | attribute::Attr::Aggregator(_)
+                    | attribute::Attr::Communities(_)
+                    | attribute::Attr::OriginatorId(_)
+                    | attribute::Attr::ClusterList(_)
+                    | attribute::Attr::MpReach(_)
+                    | attribute::Attr::As4Path(_)
+                    | attribute::Attr::As4Aggregator(_)
+                    | attribute::Attr::Aigp(_)
+                    | attribute::Attr::LargeCommunities(_),
+                ) => {}
+                _ => {
+                    return Err(PrefixdError::Internal(
+                        "GoBGP unsupported or missing path attribute".into(),
+                    ));
                 }
             }
         }
-
-        // No traffic-rate found - default to discard (conservative)
-        Ok(FlowSpecAction {
-            action_type: ActionType::Discard,
-            rate_bps: None,
-        })
+        action.ok_or_else(|| PrefixdError::Internal("GoBGP missing traffic-rate action".into()))
     }
 }
 
@@ -1333,3 +1420,7 @@ mod proptests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "gobgp_tests.rs"]
+mod readback_tests;
