@@ -99,7 +99,7 @@ enum OperatorCommands {
         #[arg(short, long)]
         username: String,
 
-        /// Password (will prompt if not provided)
+        /// Password (omitting this option prompts without echo on a terminal)
         #[arg(short, long)]
         password: Option<String>,
 
@@ -738,14 +738,12 @@ async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<()
             // Get password (prompt if not provided)
             let password = match password {
                 Some(p) => p,
-                None => {
-                    eprint!("Password: ");
-                    let mut input = String::new();
-                    std::io::stdin()
-                        .read_line(&mut input)
-                        .map_err(|e| format!("failed to read password: {}", e))?;
-                    input.trim().to_string()
-                }
+                None => inquire::Password::new("Password:")
+                    .without_confirmation()
+                    .prompt()
+                    .map_err(|e| format!("failed to read password: {}", e))?
+                    .trim()
+                    .to_string(),
             };
 
             if password.is_empty() {

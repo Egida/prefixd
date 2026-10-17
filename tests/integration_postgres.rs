@@ -7,6 +7,55 @@ use tower::ServiceExt;
 use common::TestContext;
 use prefixd::domain::MitigationStatus;
 
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn test_cli_operator_password_terminal() {
+    use axum_login::AuthnBackend;
+    use prefixd::auth::{AuthBackend, Credentials};
+
+    let ctx = TestContext::new().await;
+    let output = tokio::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/cli-password.py"
+        ))
+        .arg(env!("CARGO_BIN_EXE_prefixdctl"))
+        .env(
+            "DATABASE_URL",
+            &ctx.state.settings.storage.connection_string,
+        )
+        .output()
+        .await
+        .expect("run CLI terminal regression");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let backend = AuthBackend::new(ctx.repo.clone());
+    for username in ["pty-admin", "pty-explicit"] {
+        let operator = backend
+            .authenticate(Credentials {
+                username: username.to_string(),
+                password: "pty-test-password".to_string(),
+            })
+            .await
+            .unwrap()
+            .expect("CLI-created operator authenticates through the real backend");
+        assert!(operator.password_hash.starts_with("$argon2id$"));
+    }
+    for username in ["pty-empty", "pty-interrupt", "pty-eof", "pty-no-terminal"] {
+        assert!(
+            ctx.repo
+                .get_operator_by_username(username)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
 #[tokio::test]
 async fn test_full_event_to_mitigation_flow() {
     let ctx = TestContext::new().await;

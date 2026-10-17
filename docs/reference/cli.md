@@ -131,12 +131,17 @@ prefixdctl mitigations withdraw <id> --reason "false positive"
 
 ### Create Operator
 
+Operator commands connect directly to PostgreSQL and require `DATABASE_URL`.
+Omit `--password` for hidden input on a controlling terminal. Without a terminal,
+the prompt fails; `--password` requires an explicit value for noninteractive use.
+An explicit value can appear in shell history and process arguments.
+
 ```bash
-# Interactive password prompt
+# Hidden interactive password prompt
 prefixdctl operators create --username admin --role admin
 
-# With password flag (prompts for password)
-prefixdctl operators create --username jsmith --role operator --password
+# Explicit value (consider shell history and process visibility)
+prefixdctl operators create --username jsmith --role operator --password "$OPERATOR_PASSWORD"
 
 # Roles: admin, operator, viewer
 ```

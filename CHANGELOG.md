@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Hide interactive operator-password entry in `prefixdctl` and restore terminal
+  echo after input. Fail explicitly when a controlling terminal is unavailable.
 - Refresh the October audit baseline: `rustls` 0.23.46, `quinn-proto` 0.11.18, `h2` 0.4.19 and non-yanked `chacha20` 0.10.2 address current lockfile findings. Patch both `rand` branches to 0.8.6/0.9.3 and remove the now-obsolete RUSTSEC-2026-0097 exception. The only remaining vulnerability exception is `rsa` (RUSTSEC-2023-0071), present through sqlx's optional, uncompiled MySQL driver with no patched release. The unmaintained YAML dependency warning remains visible and tracked separately.
 - Replace unmaintained `rustls-pemfile` with `rustls-pki-types` for certificate, CA and private-key loading; remove its audit exception while preserving mandatory mTLS client verification.
 - Set the Next.js manifest floor to 16.3.8 (lock resolves 16.4.2), the Undici floor to 7.29.1 (lock resolves 7.30.1), and affected frontend transitive dependencies including sharp, source-map-js, js-yaml, Vitest and nanoid. `bun audit` reports no vulnerabilities.
