@@ -272,37 +272,18 @@ prove that a router installed or enforced a rule.
 
 ---
 
-## Framework Migration: loco-rs (ADR 024)
+## Framework Migration: Deferred
 
-Adopt [loco-rs](https://loco.rs) as the target framework and migrate **in stages** — never a big-bang rewrite. The MSRV bump is accepted; the parity decisions (auth, WebSocket, metrics, config hot reload, `prefixdctl`, scheduler) are recorded in [ADR 024](docs/adr/024-loco-staged-migration.md).
+[ADR 026](docs/adr/026-facelift-framework-scope.md) defers Loco adoption during
+the speaker and operator-UI facelift. The earlier eventual-adoption direction
+in [ADR 024](docs/adr/024-loco-staged-migration.md) remains recorded intent.
 
-### Phase 0: Prerequisites
+Keep axum, sqlx, PostgreSQL, current authentication/configuration and the
+repository boundary. Establish an honest Rust baseline independently; do not
+add a framework, ORM migration or framework-driven MSRV bump to this work.
 
-- [ ] Raise `rust-version` to the verified MSRV of the chosen loco release in `Cargo.toml`, Dockerfile, CONTRIBUTING and CI docs
-- [ ] Pin an exact `loco-rs` version and write down the upgrade cadence
-
-### Phase 1: loco shell (zero behaviour change)
-
-- [ ] loco app boot via `Hooks`, `AppContext`, `cargo loco` CLI, `config/{env}.yaml`
-- [ ] Mount the existing `axum::Router` through `after_routes`; the full test suite stays green
-
-### Phase 2: Data layer, resource by resource
-
-- [ ] SeaORM entities and its migrations per resource, keeping `Repository` as the transitional seam
-- [ ] Replace `MockRepository` with loco's test fixtures where they actually fit
-
-### Phase 3: Handlers → controllers
-
-- [ ] Convert per resource, preserving utoipa annotations on the new signatures
-
-### Phase 4: Batteries
-
-- [ ] Move alert delivery onto loco's Postgres-backed job queue (retry + dead-letter)
-- [ ] Adopt background workers/tasks where they replace hand-rolled `tokio::spawn` loops
-
-### Phase 5: Cleanup
-
-- [ ] Retire the transitional seams; re-decide OpenAPI tooling; fold bespoke middleware into loco's stack where it is a real simplification
+A future migration needs a concrete unmet requirement, verified dependency
+choices and bounded parity checks before implementation resumes.
 
 
 ---

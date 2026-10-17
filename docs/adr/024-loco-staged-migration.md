@@ -2,9 +2,15 @@
 
 ## Status
 
-Accepted
+Deferred during the current facelift by
+[ADR 026](026-facelift-framework-scope.md). The eventual-adoption decision is
+retained; framework boot, ORM changes and framework-driven MSRV work are outside
+the current delivery scope. The evaluation and staged proposal below are
+historical context and must be revalidated before resuming.
 
-**Extends/Supersedes in part:** [ADR 009 — PostgreSQL Over SQLite](009-postgresql-over-sqlite.md) (the "no ORM abstraction layer" clause only; PostgreSQL-only storage stands)
+**Historical proposed supersession:** [ADR 009 — PostgreSQL Over SQLite](009-postgresql-over-sqlite.md)
+(the "no ORM abstraction layer" clause only). It is not activated while this
+migration is deferred; ADR 009 remains operative.
 
 Version, dependency and MSRV assumptions below record the original evaluation.
 Revalidate them against the selected release before Phase 0; this PR adds no

@@ -102,7 +102,7 @@ docs/
 ├── reference/                 # API, CLI, configuration, speaker and vendor boundaries
 ├── explanation/               # Architecture
 ├── perf/                      # Historical benchmark evidence
-└── adr/                       # 25 numbered Architecture Decision Records
+└── adr/                       # 26 numbered Architecture Decision Records
 grafana/                       # Prometheus config, Grafana provisioning, dashboard JSON
 tests/
 ├── integration.rs             # 161 integration tests (health, config, mitigations, events, filters, bulk withdraw, cursor pagination, bulk acknowledge, per-dest routing, preferences, event batch, incident reports, signal groups, correlation, signal adapters, operators CRUD, safelist CRUD, manual mitigate, audit, stats, auth)
@@ -125,9 +125,9 @@ tests/
 10. **Route-group auth guard** - Next.js `(dashboard)/layout.tsx` wraps all protected pages
 11. **Mode-aware auth** - `none`/`bearer`/`credentials`/`mtls` with role checks on protected endpoints
 12. **rustbgpd over gRPC** - rustbgpd is the preferred integration target behind `FlowSpecAnnouncer`; GoBGP remains supported and defaults change only after qualification (ADRs 023 and 025)
-13. **loco-rs as the target framework** - migrate in stages, starting with a loco shell that mounts the existing axum router; MSRV bump accepted (ADR 024)
+13. **Framework migration deferred** - keep the current axum/sqlx runtime during the facelift; eventual Loco adoption needs a separate parity proposal (ADRs 024 and 026)
 
-See `docs/adr/` for all 25 Architecture Decision Records.
+See `docs/adr/` for all 26 Architecture Decision Records.
 
 ## API Endpoints
 
@@ -273,7 +273,7 @@ Completed:
 - ErrorBoundary wrapping all dashboard pages
 - Cross-entity navigation (command palette → detail pages, event↔mitigation linking, audit log → mitigations, clickable stat cards)
 - Multi-signal correlation engine with signal groups, Alertmanager/FastNetMon adapters, a generic JSONPath-driven webhook adapter (ADR 020), corroborating-only signals from coarse telemetry (ADR 021), and exponential confidence decay over time (ADR 022)
-- 25 Architecture Decision Records
+- 26 Architecture Decision Records
 - CLI tool (prefixdctl) for all API operations
 - OpenAPI spec with utoipa annotations
 - 250 backend unit tests + 161 integration + 16 postgres tests (+ 17 ignored requiring GoBGP/Docker)
