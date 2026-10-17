@@ -390,11 +390,7 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
                     _ => return Err(invalid("unknown peer state")),
                 };
                 Ok(PeerStatus {
-                    name: if config.description.is_empty() {
-                        config.address.clone()
-                    } else {
-                        config.description
-                    },
+                    name: config.address.clone(),
                     address: config.address,
                     state,
                 })

@@ -12,6 +12,10 @@
 Migration 013 adds durable withdrawal requests. A failed or uncertain deletion
 is retried against the same speaker without waiting for the mitigation TTL.
 Restarting the controller preserves the original operation, actor and reason.
+Requests also retain whether they require a real speaker deletion. Switching to
+dry-run leaves enforced-mode requests pending; returning to enforced mode retries
+them. Requests originally made in dry-run remain local simulations. Existing
+queue rows conservatively require a real deletion.
 
 Run one controller per POP/speaker target. The in-process lifecycle mutex does
 not fence multiple controller processes. It releases between scheduler rules so
@@ -33,6 +37,18 @@ original target available until cleanup succeeds, then verify that speaker's
 local intent before proceeding. Do not delete queue rows to bypass cleanup.
 An older binary ignores the queue and could reannounce a requested deletion;
 a different target cannot confirm cleanup on the original speaker.
+
+Before switching an enforced deployment to dry-run, withdraw its active rules
+and drain pending cleanup on the original speaker. Older active mitigation rows
+do not record whether they were announced in enforced mode; dry-run cannot infer
+or remove that speaker state. Verify the original speaker's local intent before
+changing modes.
+
+Legacy rows can share a canonical rule despite different IPv6 spelling. A live
+owner prevents deletion by an expired sibling. Once all owners have expired,
+ordinary idempotent TTL cleanup retires each row. New manual creation rejects
+an owned canonical scope before RPC; detector events extend exactly one owner
+and reject ambiguous ownership without consuming their external event ID.
 
 This queue covers withdrawals. Durable create/replace intent and target/process
 generation fencing remain separate work; it is not a complete announcement
