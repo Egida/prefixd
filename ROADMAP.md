@@ -233,39 +233,42 @@ Target: Quality-of-life for operators during active incidents. These are the fea
 
 ---
 
-## BGP Speaker: rustbgpd (ADR 023)
+## Pluggable BGP Speakers (rustbgpd preferred)
 
-Replace the GoBGP container with the first-party [rustbgpd](https://github.com/lance0/rustbgpd) daemon, driven over gRPC behind the existing `FlowSpecAnnouncer` trait.
+Use [rustbgpd](https://github.com/lance0/rustbgpd) through its controller gRPC
+API, keeping GoBGP as a supported alternative. Peer lifecycle stays in the
+speaker daemon. [ADR 025](docs/adr/025-pluggable-speaker-backends.md) records the
+support decision. It defines the
+capability boundary, evidence limits, and delivery order.
 
-**Why not embedding:** rustbgpd's `rib`, `transport` and `api` crates are `publish = false` and its own `docs/reference/embedding.md` states *"Never publish as a library: transport, api, evpn, evpn-linux, the daemon binary"* while naming gRPC ("Shape A") as the recommended production embedding. Embedding would also drop the fail-open property of ADR 003, which depends on the speaker being a separate process whose session drop clears routes. See [ADR 023](docs/adr/023-rustbgpd-over-grpc.md).
+### Phase 1: Selectable rustbgpd Adapter
 
-### Phase 1: rustbgpd announcer (additive, GoBGP still shipped)
+- [ ] Vendor the controller proto behind `bgp-rustbgpd`
+- [ ] Implement and validate `RustBgpdAnnouncer` for announce, withdraw, retained local-rule read-back, and peer status (LAN-1947)
+- [ ] Add compatible `sidecar`, `gobgp`, `rustbgpd`, and `mock` selection; preserve existing defaults until qualification
+- [ ] Retry failed TTL withdrawals before marking mitigations expired (LAN-2288)
+- [ ] Complete UDS/client-certificate mTLS and rustbgpd deployment wiring (LAN-2125)
 
-- [ ] Generate a tonic client from rustbgpd's `proto/rustbgpd.proto`; pin an exact rustbgpd version
-- [ ] Implement `RustBgpdAnnouncer` behind `FlowSpecAnnouncer`: `announce` → `InjectionService.AddFlowSpec`, `withdraw` → `DeleteFlowSpec`, `list_active` → `RibService.ListFlowSpecRoutes`, `session_status` → `NeighborService.ListNeighbors`
-- [ ] `bgp.mode: gobgp | rustbgpd | mock` plus a rustbgpd compose service and its TOML config
-- [ ] Auth: bearer token + principal, or native mTLS (rustbgpd v0.73+)
-- [ ] Integration tests against a pinned rustbgpd container (announce, withdraw, TTL-expiry reconciliation)
+### Phase 2: Qualification and Default Migration
 
-### Phase 2: Parity and validation
+- [ ] Verify real-daemon TTL withdrawal and restart re-injection (LAN-2126, LAN-2127)
+- [ ] Re-run FRR and Juniper interop against rustbgpd; qualify Arista/Cisco independently (LAN-2128, LAN-2144)
+- [ ] Re-run bounded chaos/load checks and attribute evidence to the tested backend (LAN-2129)
+- [ ] Publish migration/rollback instructions and an explicit version pin/upgrade policy (LAN-2130, LAN-2131)
+- [ ] Switch default deployment to rustbgpd after these gates pass; retain GoBGP's adapter, proto, configuration, and CI
 
-- [ ] Reconciliation diffs against `RibService.ListFlowSpecRoutes`; `/v1/health/detail` reads `NeighborService`
-- [ ] Map `gobgp.conf` semantics onto rustbgpd's peer config (neighbours, AFI-SAFI, timers, import/export policy)
-- [ ] Re-run Juniper cJunosEvolved interop (announce, rate-limit, withdraw, TTL expiry) and FRR containerlab
-- [ ] Arista cEOS / Cisco XRd validation (hardware-gated)
-- [ ] Chaos and load suites against rustbgpd
-- [ ] Document the version-pinning policy for the `outside_v1` FlowSpec RPCs
+### Phase 3: Other Daemons
 
-### Phase 3: Remove GoBGP
+- [ ] Split required writing from optional RIB reading and peer observation; declare capabilities honestly (LAN-2132)
+- [ ] Persist announcement confirmations and retryable cleanup in a durable ledger before write-only adapters (LAN-2133)
+- [ ] Expose backend and capabilities through compatible health, CLI, dashboard, metrics and Grafana surfaces (LAN-2134, LAN-1948)
+- [ ] Define a generic HTTP shim; qualify ExaBGP or another API as an independent transport proof (LAN-2135, LAN-2137)
+- [ ] Require shared conformance, per-backend CI, maintainer ownership, and documented qualification (LAN-2136, LAN-2138, LAN-2139)
 
-- [ ] Delete `proto/`, `build.rs` proto compilation, tonic/prost GoBGP deps, the `gobgp` compose service, `tests/integration_gobgp.rs`
-- [ ] Drop the `apipb` re-export and rename the `gobgp` health-config keys
-- [ ] Update lab topologies, deployment docs, vendor configs and troubleshooting guides
-- [ ] Migration guide for existing GoBGP deployments
-
-### Revisit only on trigger
-
-- [ ] Re-evaluate in-process embedding if rustbgpd publishes a supported embedding API with a stability policy
+Controller TTL enforcement requires running reconciliation. A separate speaker
+can keep advertising after prefixd stops; crash cleanup needs its own explicit
+lease or lifecycle design. Successful RPCs and committed advertisements do not
+prove that a router installed or enforced a rule.
 
 ---
 
@@ -275,7 +278,7 @@ Adopt [loco-rs](https://loco.rs) as the target framework and migrate **in stages
 
 ### Phase 0: Prerequisites
 
-- [ ] Raise `rust-version` to loco's MSRV (1.94) in `Cargo.toml`, Dockerfile, CONTRIBUTING and CI docs
+- [ ] Raise `rust-version` to the verified MSRV of the chosen loco release in `Cargo.toml`, Dockerfile, CONTRIBUTING and CI docs
 - [ ] Pin an exact `loco-rs` version and write down the upgrade cadence
 
 ### Phase 1: loco shell (zero behaviour change)

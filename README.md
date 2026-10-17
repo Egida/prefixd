@@ -224,7 +224,11 @@ Configure GoBGP neighbors in `configs/gobgp.conf` and set up FlowSpec import pol
 7. **Router enforcement** → Traffic filtered at line rate
 8. **Auto-expiry** → Rule withdrawn when TTL expires
 
-**Fail-open design:** If prefixd dies, mitigations auto-expire. No permanent rules, no stuck state.
+**TTL enforcement:** The running controller withdraws expired mitigations.
+If prefixd stops while its separate BGP speaker stays up, rules can persist
+until reconciliation resumes or an operator withdraws them. See
+[ADR 025](docs/adr/025-pluggable-speaker-backends.md) for the rustbgpd rollout and failure
+semantics.
 
 ---
 
@@ -287,7 +291,7 @@ Current version: **v0.18.1**
 
 - **Issues:** [GitHub Issues](https://github.com/lance0/prefixd/issues)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
-- **Architecture Decision Records:** [docs/adr/](docs/adr/) (24 ADRs)
+- **Architecture Decision Records:** [docs/adr/](docs/adr/) (25 ADRs)
 
 ---
 

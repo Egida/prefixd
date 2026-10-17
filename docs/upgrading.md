@@ -36,7 +36,8 @@ For environments where downtime is unacceptable:
 1. Build the new image while the old one is running
 2. Run `docker compose up -d --no-deps prefixd` to replace only the prefixd container
 3. The reconciliation loop will re-announce any rules within 30 seconds
-4. Active mitigations are not affected (fail-open: GoBGP retains routes until explicitly withdrawn)
+4. GoBGP retains announcements while prefixd restarts. Application TTL expiry
+   pauses during controller downtime and resumes with reconciliation.
 
 ---
 

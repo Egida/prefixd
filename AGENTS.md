@@ -99,7 +99,7 @@ docs/
 ├── api.md                     # Full API reference with examples
 ├── deployment.md              # Docker + nginx deployment guide
 ├── configuration.md           # Full configuration reference
-└── adr/                       # 24 Architecture Decision Records (001-024)
+└── adr/                       # 25 Architecture Decision Records (001-025)
 grafana/                       # Prometheus config, Grafana provisioning, dashboard JSON
 tests/
 ├── integration.rs             # 161 integration tests (health, config, mitigations, events, filters, bulk withdraw, cursor pagination, bulk acknowledge, per-dest routing, preferences, event batch, incident reports, signal groups, correlation, signal adapters, operators CRUD, safelist CRUD, manual mitigate, audit, stats, auth)
@@ -115,16 +115,16 @@ tests/
 3. **axum** - Async HTTP framework
 4. **tonic** - gRPC client for GoBGP
 5. **Trait-based BGP abstraction** - `FlowSpecAnnouncer` with `GoBgpAnnouncer` and `MockAnnouncer`
-6. **Fail-open** - If prefixd dies, mitigations expire via TTL (no permanent rules)
+6. **Application TTLs** - Running reconciliation enforces expiry; rules can persist while prefixd is down and the separate speaker stays up (ADR 003, corrected)
 7. **Allowlist config redaction** - Only explicitly safe fields exposed via API (ADR 014)
 8. **Health endpoint split** - Public liveness vs authenticated detail (ADR 015)
 9. **Nginx single-origin** - All traffic through port 80, no split-origin CORS issues (ADR 005)
 10. **Route-group auth guard** - Next.js `(dashboard)/layout.tsx` wraps all protected pages
 11. **Mode-aware auth** - `none`/`bearer`/`credentials`/`mtls` with role checks on protected endpoints
-12. **rustbgpd over gRPC** - the GoBGP sidecar is being replaced by rustbgpd driven over gRPC behind the same `FlowSpecAnnouncer` trait; embedding rustbgpd's crates is not available (ADR 023, supersedes ADR 001)
+12. **rustbgpd over gRPC** - rustbgpd is the preferred integration target behind `FlowSpecAnnouncer`; GoBGP remains supported and defaults change only after qualification (ADRs 023 and 025)
 13. **loco-rs as the target framework** - migrate in stages, starting with a loco shell that mounts the existing axum router; MSRV bump accepted (ADR 024)
 
-See `docs/adr/` for all 24 Architecture Decision Records.
+See `docs/adr/` for all 25 Architecture Decision Records.
 
 ## API Endpoints
 
@@ -250,7 +250,7 @@ docker compose logs prefixd   # View daemon logs
 
 Services: nginx (80), prefixd (8080), dashboard (3000), postgres (5432), gobgp (50051/179), prometheus (9091), grafana (3001)
 
-## Current State (v0.19.0)
+## Current State (v0.19.1)
 
 Completed:
 - HTTP API with mode-aware auth and rate limiting
@@ -270,7 +270,7 @@ Completed:
 - ErrorBoundary wrapping all dashboard pages
 - Cross-entity navigation (command palette → detail pages, event↔mitigation linking, audit log → mitigations, clickable stat cards)
 - Multi-signal correlation engine with signal groups, Alertmanager/FastNetMon adapters, a generic JSONPath-driven webhook adapter (ADR 020), corroborating-only signals from coarse telemetry (ADR 021), and exponential confidence decay over time (ADR 022)
-- 24 Architecture Decision Records
+- 25 Architecture Decision Records
 - CLI tool (prefixdctl) for all API operations
 - OpenAPI spec with utoipa annotations
 - 250 backend unit tests + 161 integration + 16 postgres tests (+ 17 ignored requiring GoBGP/Docker)

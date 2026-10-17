@@ -6,6 +6,10 @@ Accepted
 
 **Extends/Supersedes in part:** [ADR 009 — PostgreSQL Over SQLite](009-postgresql-over-sqlite.md) (the "no ORM abstraction layer" clause only; PostgreSQL-only storage stands)
 
+Version, dependency and MSRV assumptions below record the original evaluation.
+Revalidate them against the selected release before Phase 0; this PR adds no
+framework dependency or runtime migration.
+
 ## Date
 
 2026-09-28
