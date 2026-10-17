@@ -60,6 +60,20 @@ For isolated released-container lifecycle, TTL and restart validation, run
 records the version floor, immutable pins, recovery behavior and alert queries.
 This suite is independent of the production Compose and router gates.
 
+## Dashboard dependency and development baseline
+
+Bun 1.3.14 and `frontend/bun.lock` define the dashboard install used by CI and
+the container builder. The runner copies standalone output and uses the same
+Bun version. Use `bun install --frozen-lockfile` when validating a
+checkout; do not create an npm lockfile. The current lock resolves Next.js
+16.4.2; `^16.3.8` is the manifest minimum, not the installed version.
+
+Application-level `NEXT_PUBLIC_MOCK_MODE` has been retired. Development uses the
+normal API client; component tests keep their own controlled API fixtures.
+The removed `next lint` command is no longer advertised. Tests and production
+build are the current frontend gates; the separate type-check/ESLint and browser
+work remains under LAN-2140.
+
 ## Quick Start
 
 ### Docker Compose (Recommended)
