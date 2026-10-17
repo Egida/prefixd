@@ -164,7 +164,7 @@ Target: Validated with real routers, stable API, production-proven. Operators tr
 
 ### Dependency Security Cadence
 
-- [ ] Monthly BGP speaker baseline bump policy — today GoBGP (track upstream releases, especially parser hardening like v3.35.0); after [ADR 023](docs/adr/023-rustbgpd-over-grpc.md) lands, the same cadence applies to the pinned rustbgpd release
+- [ ] Review and deliberately upgrade pinned releases for every maintained BGP backend, including GoBGP and rustbgpd, alongside Rust/frontend dependencies
 - [x] CVE gate in CI (cargo audit + bun audit gate Docker publishing; fail build on known vulnerabilities)
 - [x] SBOM generation (CycloneDX JSON, published as release artifact on version tags)
 - [x] FlowSpec NLRI parser fuzz/regression tests (proptest in CI + cargo-fuzz for offline coverage)
