@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Run pull-request CI for stacked topic branches as well as `main`, so dependency-ordered PRs receive their own checks.
+- Build both Docker images on pull requests without registry login or publishing; main/tag pushes retain publishing.
+- Update `async-trait` to 0.1.92 for strict Clippy on Rust 1.99 and select the Rustls provider before TLS startup.
+
+### Security
+- Refresh the October audit baseline: `rustls` 0.23.46, `quinn-proto` 0.11.18, `h2` 0.4.19 and non-yanked `chacha20` 0.10.2 address current lockfile findings. Patch both `rand` branches to 0.8.6/0.9.3 and remove the now-obsolete RUSTSEC-2026-0097 exception. The only remaining vulnerability exception is `rsa` (RUSTSEC-2023-0071), present through sqlx's optional, uncompiled MySQL driver with no patched release. The unmaintained YAML dependency warning remains visible and tracked separately.
+- Replace unmaintained `rustls-pemfile` with `rustls-pki-types` for certificate, CA and private-key loading; remove its audit exception while preserving mandatory mTLS client verification.
+- Refresh Next.js to 16.3.8, Undici to 7.29.1, and affected frontend transitive dependencies including sharp, source-map-js, js-yaml, Vitest and nanoid. `bun audit` reports no vulnerabilities.
+
 ## [0.19.1] - 2026-08-06
 
 ### Changed
