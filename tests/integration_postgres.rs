@@ -1631,3 +1631,315 @@ async fn test_legacy_canonical_owners_finish_ttl_cleanup_after_last_live_owner()
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn test_documented_retention_preserves_live_intent_and_referenced_history() {
+    use prefixd::{
+        domain::{
+            ActionParams, ActionType, AttackEvent, AttackEventInput, AttackVector, MatchCriteria,
+            Mitigation, MitigationIntent, mitigation_rule,
+        },
+        observability::{ActorType, AuditEntry},
+    };
+    enum RequestState {
+        Missing,
+        Pending,
+        Completed(i64),
+    }
+    use RequestState::{Completed, Missing, Pending};
+    let context = TestContext::new().await;
+    let now = chrono::Utc::now();
+    for (name, status, age_days, request, has_announcement) in [
+        (
+            "expired-completed",
+            MitigationStatus::Expired,
+            8,
+            Completed(8),
+            false,
+        ),
+        (
+            "withdrawn-completed",
+            MitigationStatus::Withdrawn,
+            8,
+            Completed(8),
+            false,
+        ),
+        (
+            "without-request",
+            MitigationStatus::Withdrawn,
+            8,
+            Missing,
+            false,
+        ),
+        (
+            "active-pending",
+            MitigationStatus::Active,
+            8,
+            Pending,
+            false,
+        ),
+        (
+            "terminal-pending",
+            MitigationStatus::Withdrawn,
+            8,
+            Pending,
+            false,
+        ),
+        (
+            "pending-parent",
+            MitigationStatus::Pending,
+            8,
+            Pending,
+            false,
+        ),
+        (
+            "active-completed",
+            MitigationStatus::Active,
+            8,
+            Completed(8),
+            false,
+        ),
+        (
+            "recent-completed",
+            MitigationStatus::Withdrawn,
+            1,
+            Completed(1),
+            false,
+        ),
+        (
+            "terminal-recent-completed",
+            MitigationStatus::Expired,
+            8,
+            Completed(1),
+            false,
+        ),
+        (
+            "with-announcement",
+            MitigationStatus::Expired,
+            8,
+            Completed(8),
+            true,
+        ),
+    ] {
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: "test-pop".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: "203.0.113.10/32".into(),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams { rate_bps: None },
+                ttl_seconds: 60,
+                reason: name.into(),
+            },
+            "203.0.113.10".into(),
+            AttackVector::UdpFlood,
+        );
+        mitigation.scope_hash = name.into();
+        mitigation.status = status;
+        mitigation.created_at = now - chrono::Duration::days(age_days);
+        mitigation.updated_at = mitigation.created_at;
+        mitigation.expires_at = mitigation.created_at + chrono::Duration::seconds(60);
+        context.repo.insert_mitigation(&mitigation).await.unwrap();
+        let rule = mitigation_rule(&mitigation);
+        if !matches!(request, Missing) {
+            let completed_at = match request {
+                Completed(days) => Some(now - chrono::Duration::days(days)),
+                _ => None,
+            };
+            sqlx::query(
+                r#"INSERT INTO withdrawal_requests (
+                operation_id, mitigation_id, pop, nlri_hash, rule_json, mitigation_updated_at,
+                terminal_status, actor_type, actor, reason, requested_at, completed_at
+            ) SELECT $1, mitigation_id, pop, $3, $4, updated_at, 'withdrawn',
+                'operator', 'retention-test', 'retention fixture', updated_at, $5
+              FROM mitigations WHERE mitigation_id = $2"#,
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(mitigation.mitigation_id)
+            .bind(rule.nlri_hash())
+            .bind(serde_json::to_string(&rule).unwrap())
+            .bind(completed_at)
+            .execute(&context.pool)
+            .await
+            .unwrap();
+        }
+        if has_announcement {
+            sqlx::query(
+                r#"INSERT INTO flowspec_announcements (
+                announcement_id, mitigation_id, pop, peer_name, peer_address,
+                nlri_hash, nlri_json, action_json, status
+            ) VALUES ($1, $2, 'test-pop', 'fixture', '127.0.0.1', $3, $4, $5, 'failed')"#,
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(mitigation.mitigation_id)
+            .bind(rule.nlri_hash())
+            .bind(serde_json::to_string(&rule.nlri).unwrap())
+            .bind(serde_json::to_string(&rule.actions).unwrap())
+            .execute(&context.pool)
+            .await
+            .unwrap();
+        }
+    }
+    let group =
+        prefixd::correlation::CorrelationEngine::create_group("203.0.113.10", "udp_flood", 300);
+    context.repo.insert_signal_group(&group).await.unwrap();
+    for (external_id, age_days) in [
+        ("old-ingestion", 8),
+        ("recent-ingestion", 1),
+        ("old-triggering-event", 8),
+        ("old-last-event", 8),
+        ("old-group-event", 8),
+        ("old-pruned-parent-event", 8),
+    ] {
+        let input: AttackEventInput = serde_json::from_value(serde_json::json!({
+            "event_id":external_id, "timestamp":now - chrono::Duration::days(20), "source":"retention-test",
+            "victim_ip":"203.0.113.10", "vector":"udp_flood"
+        })).unwrap();
+        let mut event = AttackEvent::from_input(input);
+        event.ingested_at = now - chrono::Duration::days(age_days);
+        context.repo.insert_event(&event).await.unwrap();
+        match external_id {
+            "old-triggering-event" => {
+                sqlx::query("UPDATE mitigations SET triggering_event_id = $1 WHERE reason = 'active-pending'")
+                    .bind(event.event_id).execute(&context.pool).await.unwrap();
+            }
+            "old-last-event" => {
+                sqlx::query(
+                    "UPDATE mitigations SET last_event_id = $1 WHERE reason = 'terminal-pending'",
+                )
+                .bind(event.event_id)
+                .execute(&context.pool)
+                .await
+                .unwrap();
+            }
+            "old-pruned-parent-event" => {
+                sqlx::query("UPDATE mitigations SET triggering_event_id = $1 WHERE reason = 'expired-completed'")
+                    .bind(event.event_id).execute(&context.pool).await.unwrap();
+            }
+            "old-group-event" => {
+                context
+                    .repo
+                    .add_event_to_group(group.group_id, event.event_id, 1.0)
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+    }
+    context
+        .repo
+        .insert_audit(&AuditEntry::new(
+            ActorType::System,
+            None,
+            "retention-preserve",
+            None,
+            None,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+
+    // Parent-only pruning from the previous guide fails on retained withdrawal references.
+    let mut transaction = context.pool.begin().await.unwrap();
+    let old_prune = sqlx::query("DELETE FROM mitigations WHERE status IN ('expired', 'withdrawn') AND updated_at < NOW() - INTERVAL '7 days' AND reason = 'expired-completed'")
+        .execute(&mut *transaction).await.unwrap_err();
+    assert_eq!(
+        old_prune.as_database_error().unwrap().code().as_deref(),
+        Some("23503")
+    );
+    assert_eq!(
+        old_prune.as_database_error().unwrap().constraint(),
+        Some("withdrawal_requests_mitigation_id_fkey")
+    );
+    transaction.rollback().await.unwrap();
+
+    let guide = include_str!("../docs/how-to/troubleshooting.md");
+    let (_, retention) = guide
+        .split_once("<!-- database-retention-prune -->")
+        .unwrap();
+    let (_, block) = retention.split_once("```sql\n").unwrap();
+    let (sql, remaining) = block.split_once("```").unwrap();
+    assert!(sql.trim().starts_with("BEGIN;"));
+    assert!(sql.trim().ends_with("COMMIT;"));
+    sqlx::raw_sql(sql).execute(&context.pool).await.unwrap();
+    let counts_query = "SELECT (SELECT COUNT(*) FROM mitigations), (SELECT COUNT(*) FROM withdrawal_requests), (SELECT COUNT(*) FROM events), (SELECT COUNT(*) FROM audit_log), (SELECT COUNT(*) FROM flowspec_announcements)";
+    let after_first: (i64, i64, i64, i64, i64) = sqlx::query_as(counts_query)
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(sql).execute(&context.pool).await.unwrap();
+    let after_second: (i64, i64, i64, i64, i64) = sqlx::query_as(counts_query)
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    assert_eq!(after_second, after_first);
+
+    let (_, vacuum) = remaining.split_once("```sql\n").unwrap();
+    let (vacuum, _) = vacuum.split_once("```").unwrap();
+    sqlx::raw_sql(vacuum).execute(&context.pool).await.unwrap();
+
+    let parents: Vec<String> = sqlx::query_scalar("SELECT reason FROM mitigations ORDER BY reason")
+        .fetch_all(&context.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        parents,
+        [
+            "active-completed",
+            "active-pending",
+            "pending-parent",
+            "recent-completed",
+            "terminal-pending",
+            "terminal-recent-completed",
+            "with-announcement"
+        ]
+    );
+    let requests: Vec<String> = sqlx::query_scalar("SELECT mitigation.reason FROM withdrawal_requests AS request JOIN mitigations AS mitigation USING (mitigation_id) ORDER BY mitigation.reason")
+        .fetch_all(&context.pool).await.unwrap();
+    assert_eq!(
+        requests,
+        [
+            "active-completed",
+            "active-pending",
+            "pending-parent",
+            "recent-completed",
+            "terminal-pending",
+            "terminal-recent-completed"
+        ]
+    );
+    let events: Vec<String> =
+        sqlx::query_scalar("SELECT external_event_id FROM events ORDER BY external_event_id")
+            .fetch_all(&context.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        events,
+        [
+            "old-group-event",
+            "old-last-event",
+            "old-triggering-event",
+            "recent-ingestion"
+        ]
+    );
+    let audit_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    let announcement_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM flowspec_announcements")
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    assert_eq!(audit_count, 1);
+    assert_eq!(announcement_count, 1);
+    let membership_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM signal_group_events")
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    assert_eq!(membership_count, 1);
+}
