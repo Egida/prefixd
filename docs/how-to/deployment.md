@@ -72,7 +72,7 @@ Application-level `NEXT_PUBLIC_MOCK_MODE` has been retired. Development uses the
 normal API client; component tests keep their own controlled API fixtures.
 The removed `next lint` command is no longer advertised. Tests and production
 build are the current frontend gates; the separate type-check/ESLint and browser
-work remains under LAN-2140.
+work remains part of the frontend tooling gate.
 
 ## Quick Start
 

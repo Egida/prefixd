@@ -20,6 +20,7 @@ use crate::db::{ListParams, NotificationPreferences};
 use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackEventInput, AttackVector, FlowSpecAction,
     FlowSpecNlri, FlowSpecRule, MatchCriteria, Mitigation, MitigationIntent, MitigationStatus,
+    ensure_no_pending_withdrawal, execute_withdrawal, request_withdrawal,
 };
 use crate::error::PrefixdError;
 use crate::guardrails::Guardrails;
@@ -475,6 +476,68 @@ pub async fn ingest_event(
     }
 }
 
+async fn withdraw_and_notify(
+    state: &AppState,
+    mitigation: &Mitigation,
+    actor_type: &str,
+    actor: &str,
+    reason: String,
+) -> crate::error::Result<Mitigation> {
+    if mitigation.pop != state.settings.pop {
+        return Err(PrefixdError::Conflict(
+            "mitigation belongs to another POP".into(),
+        ));
+    }
+    let request = request_withdrawal(
+        state.repo.as_ref(),
+        mitigation,
+        false,
+        actor_type,
+        actor,
+        reason,
+    )
+    .await?;
+    let mitigation = execute_withdrawal(
+        state.repo.as_ref(),
+        state.announcer.as_ref(),
+        state.is_dry_run(),
+        &request,
+    )
+    .await?;
+    let (message, alert) = if request.is_expiry() {
+        crate::observability::metrics::MITIGATIONS_EXPIRED
+            .with_label_values(&[&mitigation.action_type.to_string(), &mitigation.pop])
+            .inc();
+        (
+            crate::ws::WsMessage::MitigationExpired {
+                mitigation_id: mitigation.mitigation_id.to_string(),
+            },
+            crate::alerting::Alert::mitigation_expired(&mitigation),
+        )
+    } else {
+        crate::observability::metrics::MITIGATIONS_WITHDRAWN
+            .with_label_values(&[
+                mitigation.action_type.to_string().as_str(),
+                mitigation.pop.as_str(),
+                if request.actor_type == "detector" {
+                    "detector_unban"
+                } else {
+                    "operator"
+                },
+            ])
+            .inc();
+        (
+            crate::ws::WsMessage::MitigationWithdrawn {
+                mitigation_id: mitigation.mitigation_id.to_string(),
+            },
+            crate::alerting::Alert::mitigation_withdrawn(&mitigation),
+        )
+    };
+    let _ = state.ws_broadcast.send(message);
+    state.alerting.read().await.notify(alert);
+    Ok(mitigation)
+}
+
 /// Handle unban action - withdraw mitigation by external_event_id
 async fn handle_unban(
     state: Arc<AppState>,
@@ -496,6 +559,8 @@ async fn handle_unban(
             ));
         }
     };
+
+    let _mitigation_guard = state.mitigation_lock.lock().await;
 
     // Find original ban event
     let original_event = match state
@@ -520,7 +585,7 @@ async fn handle_unban(
     };
 
     // Find active mitigation for this event
-    let mut mitigation = match state
+    let mitigation = match state
         .repo
         .find_active_by_triggering_event(original_event.event_id)
         .await
@@ -548,54 +613,15 @@ async fn handle_unban(
         tracing::warn!(error = %e, "failed to insert unban event");
     }
 
-    // Withdraw from BGP (if not dry-run)
-    if !state.is_dry_run() {
-        let nlri = FlowSpecNlri::from(&mitigation.match_criteria);
-        let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
-        let rule = FlowSpecRule::new(nlri, action);
-
-        let start = std::time::Instant::now();
-        if let Err(e) = state.announcer.withdraw(&rule).await {
-            tracing::error!(error = %e, "BGP withdrawal failed");
-            return Err(AppError(e));
-        } else {
-            crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                .with_label_values(&["withdrawn"])
-                .inc();
-            crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-                .observe(start.elapsed().as_secs_f64());
-        }
-    }
-
-    // Update mitigation status
-    let action_type_str = mitigation.action_type.to_string();
-    mitigation.withdraw(Some(format!("Detector unban: {}", source)));
-    state
-        .repo
-        .update_mitigation(&mitigation)
-        .await
-        .map_err(AppError)?;
-
-    crate::observability::metrics::MITIGATIONS_WITHDRAWN
-        .with_label_values(&[
-            action_type_str.as_str(),
-            mitigation.pop.as_str(),
-            "detector_unban",
-        ])
-        .inc();
-
-    // Broadcast withdrawal via WebSocket
-    let _ = state
-        .ws_broadcast
-        .send(crate::ws::WsMessage::MitigationWithdrawn {
-            mitigation_id: mitigation.mitigation_id.to_string(),
-        });
-
-    state
-        .alerting
-        .read()
-        .await
-        .notify(crate::alerting::Alert::mitigation_withdrawn(&mitigation));
+    let mitigation = withdraw_and_notify(
+        &state,
+        &mitigation,
+        "detector",
+        &source,
+        format!("Detector unban: {}", source),
+    )
+    .await
+    .map_err(AppError)?;
 
     tracing::info!(
         mitigation_id = %mitigation.mitigation_id,
@@ -619,6 +645,8 @@ async fn handle_ban(
     state: Arc<AppState>,
     input: AttackEventInput,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
+    // shortcut: one controller per speaker; use a leader fence before supporting active-active controllers.
+    let _mitigation_guard = state.mitigation_lock.lock().await;
     // Check for duplicate ban event (only bans are checked, not unbans)
     if let Some(ref ext_id) = input.event_id {
         if let Ok(Some(_)) = state
@@ -639,6 +667,33 @@ async fn handle_ban(
     // Create internal event
     let event = AttackEvent::from_input(input);
 
+    let inventory = state.inventory.read().await;
+    let context = inventory.lookup_ip(&event.victim_ip);
+    let is_owned = context.is_some() || inventory.is_owned(&event.victim_ip);
+    drop(inventory);
+    let playbooks = state.playbooks.read().await.clone();
+    let policy = PolicyEngine::new(
+        playbooks.clone(),
+        state.settings.pop.clone(),
+        state.settings.timers.default_ttl_seconds,
+    );
+    let candidate_intent = policy.evaluate(&event, context.as_ref());
+    // Reject before storing the detector ID so the same event remains retryable.
+    if let Ok(intent) = &candidate_intent {
+        let rule = FlowSpecRule::new(
+            FlowSpecNlri::from(&intent.match_criteria),
+            FlowSpecAction::from((intent.action_type, &intent.action_params)),
+        );
+        ensure_no_pending_withdrawal(
+            state.repo.as_ref(),
+            &state.settings.pop,
+            &rule,
+            &intent.match_criteria.compute_scope_hash(),
+        )
+        .await
+        .map_err(AppError)?;
+    }
+
     // Store event
     state.repo.insert_event(&event).await.map_err(AppError)?;
 
@@ -651,11 +706,7 @@ async fn handle_ban(
         return Err(AppError(PrefixdError::ShuttingDown));
     }
 
-    // Lookup IP context
-    let inventory = state.inventory.read().await;
-    let context = inventory.lookup_ip(&event.victim_ip);
-
-    if context.is_none() && !inventory.is_owned(&event.victim_ip) {
+    if !is_owned {
         tracing::warn!(victim_ip = %event.victim_ip, "event for unowned IP, skipping mitigation");
         return Ok((
             StatusCode::ACCEPTED,
@@ -668,21 +719,11 @@ async fn handle_ban(
         ));
     }
 
-    drop(inventory); // Release read lock before policy evaluation
-
     // ── Correlation step ───────────────────────────────────────────────
     // If correlation.enabled, find/create a signal group and add the event.
     // Check corroboration — if threshold not met, return 'accepted' without
     // creating a mitigation. If threshold met, proceed to policy evaluation.
     let correlation_config = state.correlation_config.read().await.clone();
-
-    // Resolve the matching playbook early so we can get per-playbook overrides
-    let playbooks = state.playbooks.read().await.clone();
-    let policy = PolicyEngine::new(
-        playbooks.clone(),
-        state.settings.pop.clone(),
-        state.settings.timers.default_ttl_seconds,
-    );
 
     // Find the matching playbook's correlation override
     let vector = event.attack_vector();
@@ -958,7 +999,7 @@ async fn handle_ban(
 
     // ── Policy evaluation ──────────────────────────────────────────────
 
-    let intent = match policy.evaluate(&event, context.as_ref()) {
+    let intent = match candidate_intent {
         Ok(i) => i,
         Err(e) => {
             tracing::warn!(error = %e, "policy evaluation failed");
@@ -974,16 +1015,13 @@ async fn handle_ban(
         }
     };
 
-    // Serialize mitigation creation to prevent TOCTOU race between
-    // find_active_by_scope and insert_mitigation.
-    let _mitigation_guard = state.mitigation_lock.lock().await;
-
     // Check for existing mitigation with same scope
     let scope_hash = intent.match_criteria.compute_scope_hash();
-    if let Ok(Some(mut existing)) = state
+    if let Some(mut existing) = state
         .repo
         .find_active_by_scope(&scope_hash, &state.settings.pop)
         .await
+        .map_err(AppError)?
     {
         // Extend TTL
         existing.extend_ttl(intent.ttl_seconds, event.event_id);
@@ -1015,8 +1053,6 @@ async fn handle_ban(
             }),
         ));
     }
-
-    drop(_mitigation_guard);
 
     let guardrails = Guardrails::with_timers(
         state.settings.guardrails.clone(),
@@ -1544,6 +1580,21 @@ pub async fn create_mitigation(
         reason: req.reason,
     };
 
+    let rule = FlowSpecRule::new(
+        FlowSpecNlri::from(&intent.match_criteria),
+        FlowSpecAction::from((intent.action_type, &intent.action_params)),
+    );
+    if let Err(error) = ensure_no_pending_withdrawal(
+        state.repo.as_ref(),
+        &state.settings.pop,
+        &rule,
+        &intent.match_criteria.compute_scope_hash(),
+    )
+    .await
+    {
+        return Ok(AppError(error).into_response());
+    }
+
     // Validate
     let guardrails = Guardrails::with_timers(
         state.settings.guardrails.clone(),
@@ -1573,8 +1624,6 @@ pub async fn create_mitigation(
     }
 
     // Create and announce
-    drop(_mitigation_guard);
-
     let mut mitigation =
         Mitigation::from_intent(intent, req.victim_ip, crate::domain::AttackVector::Unknown);
 
@@ -1628,7 +1677,8 @@ pub async fn withdraw_mitigation(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let mut mitigation = state
+    let _mitigation_guard = state.mitigation_lock.lock().await;
+    let mitigation = state
         .repo
         .get_mitigation(id)
         .await
@@ -1639,54 +1689,15 @@ pub async fn withdraw_mitigation(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Withdraw BGP
-    if !state.is_dry_run() {
-        let nlri = FlowSpecNlri::from(&mitigation.match_criteria);
-        let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
-        let rule = FlowSpecRule::new(nlri, action);
-        let start = std::time::Instant::now();
-        state
-            .announcer
-            .withdraw(&rule)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-            .with_label_values(&["withdrawn"])
-            .inc();
-        crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
-    }
-
-    let action_type_str = mitigation.action_type.to_string();
-    mitigation.withdraw(Some(format!("{}: {}", operator_id, req.reason)));
-    state
-        .repo
-        .update_mitigation(&mitigation)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = %e, "withdraw_mitigation failed");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    crate::observability::metrics::MITIGATIONS_WITHDRAWN
-        .with_label_values(&[
-            action_type_str.as_str(),
-            mitigation.pop.as_str(),
-            "operator",
-        ])
-        .inc();
-
-    // Broadcast withdrawal via WebSocket
-    let _ = state
-        .ws_broadcast
-        .send(crate::ws::WsMessage::MitigationWithdrawn {
-            mitigation_id: mitigation.mitigation_id.to_string(),
-        });
-
-    state
-        .alerting
-        .read()
-        .await
-        .notify(crate::alerting::Alert::mitigation_withdrawn(&mitigation));
+    let mitigation = withdraw_and_notify(
+        &state,
+        &mitigation,
+        "operator",
+        &operator_id,
+        format!("{}: {}", operator_id, req.reason),
+    )
+    .await
+    .map_err(|error| error.status_code())?;
 
     tracing::info!(
         mitigation_id = %mitigation.mitigation_id,
@@ -1758,7 +1769,8 @@ pub async fn bulk_withdraw_mitigations(
     let mut failed = 0u32;
 
     for id in &req.mitigation_ids {
-        let mut mitigation = match state.repo.get_mitigation(*id).await {
+        let _mitigation_guard = state.mitigation_lock.lock().await;
+        let mitigation = match state.repo.get_mitigation(*id).await {
             Ok(Some(m)) => m,
             Ok(None) => {
                 failed += 1;
@@ -1791,52 +1803,28 @@ pub async fn bulk_withdraw_mitigations(
             continue;
         }
 
-        if !state.is_dry_run() {
-            let nlri = FlowSpecNlri::from(&mitigation.match_criteria);
-            let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
-            let rule = FlowSpecRule::new(nlri, action);
-            let start = std::time::Instant::now();
-            if let Err(e) = state.announcer.withdraw(&rule).await {
-                tracing::error!(error = %e, mitigation_id = %id, "BGP withdrawal failed in bulk withdraw");
-                failed += 1;
-                results.push(BulkWithdrawResult {
-                    mitigation_id: *id,
-                    status: "error".to_string(),
-                    error: Some("speaker withdrawal failed".to_string()),
-                });
-                continue;
-            } else {
-                crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                    .with_label_values(&["withdrawn"])
-                    .inc();
-                crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-                    .observe(start.elapsed().as_secs_f64());
-            }
-        }
-
-        mitigation.withdraw(Some(format!("{}: {}", operator_id, req.reason)));
-        if let Err(e) = state.repo.update_mitigation(&mitigation).await {
-            tracing::error!(error = %e, mitigation_id = %id, "DB update failed in bulk withdraw");
+        if let Err(error) = withdraw_and_notify(
+            &state,
+            &mitigation,
+            "operator",
+            &operator_id,
+            format!("{}: {}", operator_id, req.reason),
+        )
+        .await
+        {
+            tracing::error!(error = %error, mitigation_id = %id, "bulk withdrawal failed");
             failed += 1;
             results.push(BulkWithdrawResult {
                 mitigation_id: *id,
-                status: "error".to_string(),
-                error: Some("db update failed".to_string()),
+                status: "error".into(),
+                error: Some(match error {
+                    PrefixdError::Conflict(message) => message,
+                    PrefixdError::BgpWithdrawalFailed(_) => "speaker withdrawal failed".into(),
+                    _ => "withdrawal failed".into(),
+                }),
             });
             continue;
         }
-
-        let _ = state
-            .ws_broadcast
-            .send(crate::ws::WsMessage::MitigationWithdrawn {
-                mitigation_id: mitigation.mitigation_id.to_string(),
-            });
-
-        state
-            .alerting
-            .read()
-            .await
-            .notify(crate::alerting::Alert::mitigation_withdrawn(&mitigation));
 
         withdrawn += 1;
         results.push(BulkWithdrawResult {

@@ -97,9 +97,9 @@ The script infers the attack vector from FastNetMon's stdin details:
 
 Rules that keep the mapping honest:
 
-- Lines reporting a **zero metric** (`outgoing udp traffic: 0 mbps`) are ignored — FastNetMon lists every protocol it tracks, and a SYN flood otherwise matches the idle `udp` line first.
+- Lines reporting a **zero metric** (`outgoing udp traffic: 0 mbps` or `incoming tcp syn pps: 0 packets per second`) are ignored — FastNetMon lists every protocol it tracks, and idle counters must not select a vector.
 - TCP flag tokens are matched before `udp` for mixed floods.
-- Matches are word-bounded, so `ack` is not detected inside `packets`.
+- Protocol tokens are bounded by non-alphanumeric characters, including underscores: `tcp_ack` matches ACK, while `packets` and `Attack_type: udp_flood` do not.
 
 ## Testing
 

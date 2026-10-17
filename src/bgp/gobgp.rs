@@ -82,7 +82,15 @@ impl GoBgpAnnouncer {
         let mut backoff = INITIAL_BACKOFF;
 
         for attempt in 1..=MAX_RETRIES {
-            match f().await {
+            let result = tokio::time::timeout(GRPC_REQUEST_TIMEOUT, f())
+                .await
+                .unwrap_or_else(|_| {
+                    Err(PrefixdError::BgpSessionError {
+                        peer: "gobgp".to_string(),
+                        error: format!("{operation} RPC deadline exceeded"),
+                    })
+                });
+            match result {
                 Ok(result) => return Ok(result),
                 Err(e) => {
                     last_error = Some(e);
@@ -697,6 +705,30 @@ mod tests {
 
     fn make_announcer() -> GoBgpAnnouncer {
         GoBgpAnnouncer::new("127.0.0.1:50051".to_string())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_with_retry_bounds_pending_rpc_completion() {
+        let announcer = make_announcer();
+        let mut attempts = 0;
+        let start = tokio::time::Instant::now();
+        let result = tokio::time::timeout(
+            Duration::from_secs(95),
+            announcer.with_retry("AddPath", || {
+                attempts += 1;
+                std::future::pending::<Result<()>>()
+            }),
+        )
+        .await
+        .expect("pending RPC completion must be bounded across retries");
+
+        assert!(matches!(
+            result,
+            Err(PrefixdError::BgpSessionError { peer, error })
+                if peer == "gobgp" && error == "AddPath RPC deadline exceeded"
+        ));
+        assert_eq!(attempts, 3);
+        assert_eq!(start.elapsed(), Duration::from_millis(90_300));
     }
 
     // ==========================================================================
