@@ -249,5 +249,5 @@ bun audit
 ```
 
 The dashboard always uses the configured API. Keep response fixtures in tests;
-`NEXT_PUBLIC_MOCK_MODE` is retired. `next lint` was removed upstream; a replacement
-ESLint/type-check gate and browser harness are tracked in LAN-2140.
+`NEXT_PUBLIC_MOCK_MODE` is retired. `next lint` was removed upstream; replacement
+ESLint/type-check checks and a browser harness remain frontend tooling work.
