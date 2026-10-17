@@ -86,6 +86,5 @@ adapter's qualification or change authentication/configuration behavior here.
 
 ## Follow-ups
 
-LAN-1947 covers the adapter; LAN-1948 covers compatibility; LAN-2122 records the
-support policy. Deployment, restart, router and generic-backend gates remain
-separate work.
+The [roadmap](../../ROADMAP.md) separates adapter, API compatibility and support
+policy work from deployment, restart, router and generic-backend qualification.

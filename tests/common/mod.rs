@@ -35,6 +35,9 @@ impl TestContext {
     pub async fn new() -> Self {
         let container = Postgres::default()
             .with_tag("16-alpine")
+            .with_host_config_modifier(|config| {
+                config.cpuset_cpus = std::env::var("PREFIXD_TEST_CPUSET").ok();
+            })
             .start()
             .await
             .expect("Failed to start Postgres container");
@@ -84,6 +87,9 @@ impl TestContext {
     pub async fn with_config_dir(config_dir: &Path) -> Self {
         let container = Postgres::default()
             .with_tag("16-alpine")
+            .with_host_config_modifier(|config| {
+                config.cpuset_cpus = std::env::var("PREFIXD_TEST_CPUSET").ok();
+            })
             .start()
             .await
             .expect("Failed to start Postgres container");
@@ -308,6 +314,9 @@ impl E2ETestContext {
         // Start Postgres container
         let postgres = Postgres::default()
             .with_tag("16-alpine")
+            .with_host_config_modifier(|config| {
+                config.cpuset_cpus = std::env::var("PREFIXD_TEST_CPUSET").ok();
+            })
             .start()
             .await
             .expect("Failed to start Postgres container");
@@ -333,6 +342,9 @@ impl E2ETestContext {
             .with_exposed_port(179.tcp())
             .with_wait_for(WaitFor::seconds(3))
             .with_cmd(["/usr/local/bin/gobgpd", "-p", "--api-hosts=0.0.0.0:50051"])
+            .with_host_config_modifier(|config| {
+                config.cpuset_cpus = std::env::var("PREFIXD_TEST_CPUSET").ok();
+            })
             .start()
             .await
             .expect("Failed to start GoBGP container");
@@ -402,6 +414,9 @@ impl E2ETestContext {
         // Start Postgres container
         let postgres = Postgres::default()
             .with_tag("16-alpine")
+            .with_host_config_modifier(|config| {
+                config.cpuset_cpus = std::env::var("PREFIXD_TEST_CPUSET").ok();
+            })
             .start()
             .await
             .expect("Failed to start Postgres container");
@@ -426,6 +441,9 @@ impl E2ETestContext {
             .with_exposed_port(179.tcp())
             .with_wait_for(WaitFor::seconds(3))
             .with_cmd(["/usr/local/bin/gobgpd", "-p", "--api-hosts=0.0.0.0:50051"])
+            .with_host_config_modifier(|config| {
+                config.cpuset_cpus = std::env::var("PREFIXD_TEST_CPUSET").ok();
+            })
             .start()
             .await
             .expect("Failed to start GoBGP container");

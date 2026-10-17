@@ -206,6 +206,16 @@ async fn test_e2e_withdrawal_removes_from_rib() {
         "Rule should be removed from RIB after withdrawal"
     );
 
+    ctx.announcer
+        .withdraw(
+            active_before
+                .iter()
+                .find(|rule| rule.nlri.dst_prefix == "203.0.113.11/32")
+                .unwrap(),
+        )
+        .await
+        .expect("retrying deletion of an absent rule must succeed");
+
     // Verify mitigation status in database
     let mitigation = ctx
         .repo

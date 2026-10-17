@@ -29,6 +29,7 @@ impl prefixd::bgp::FlowSpecAnnouncer for RecoveringWithdrawal {
     }
     async fn withdraw(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
         if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            self.inner.withdraw(rule).await?;
             return Err(prefixd::error::PrefixdError::BgpWithdrawalFailed(
                 "temporary".into(),
             ));
@@ -44,11 +45,12 @@ impl prefixd::bgp::FlowSpecAnnouncer for RecoveringWithdrawal {
 }
 
 #[tokio::test]
-async fn test_failed_bulk_and_detector_withdrawals_preserve_active_state_for_retry() {
+async fn test_ambiguous_withdrawals_retry_without_reannouncement_or_consuming_new_event() {
     use prefixd::domain::MitigationStatus;
+    use prefixd::scheduler::ReconciliationLoop;
     use std::sync::atomic::Ordering::SeqCst;
 
-    for bulk in [true, false] {
+    for path_kind in ["bulk", "detector", "single", "expiry"] {
         let repo = Arc::new(MockRepository::new());
         let speaker = Arc::new(RecoveringWithdrawal {
             inner: MockAnnouncer::new(),
@@ -66,8 +68,8 @@ async fn test_failed_bulk_and_detector_withdrawals_preserve_active_state_for_ret
         )
         .unwrap();
         let mut updates = state.ws_broadcast.subscribe();
-        let app = create_test_router(state);
-        let mut event = serde_json::json!({
+        let app = create_test_router(state.clone());
+        let event = serde_json::json!({
             "event_id": "retry-test", "timestamp": chrono::Utc::now(), "source": "test",
             "victim_ip": "203.0.113.10", "vector": "udp_flood", "pps": 50000,
             "top_dst_ports": [53], "confidence": 0.9,
@@ -91,18 +93,125 @@ async fn test_failed_bulk_and_detector_withdrawals_preserve_active_state_for_ret
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let id: uuid::Uuid = json["mitigation_id"].as_str().unwrap().parse().unwrap();
         while updates.try_recv().is_ok() {}
-        event["action"] = "unban".into();
-        let (path, payload) = if bulk {
-            (
-                "/v1/mitigations/withdraw",
-                serde_json::json!({"mitigation_ids": [id], "reason": "retry test"}),
+        if path_kind == "expiry" {
+            let mut mitigation = repo.get_mitigation(id).await.unwrap().unwrap();
+            mitigation.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+            repo.update_mitigation(&mitigation).await.unwrap();
+            prefixd::domain::request_withdrawal(
+                repo.as_ref(),
+                &mitigation,
+                true,
+                "system",
+                "scheduler",
+                "TTL expired".into(),
             )
-        } else {
-            ("/v1/events", event)
+            .await
+            .unwrap();
+        }
+        let mut unban = event.clone();
+        unban["action"] = "unban".into();
+        let (path, payload) = match path_kind {
+            "bulk" => (
+                "/v1/mitigations/withdraw".into(),
+                serde_json::json!({"mitigation_ids": [id], "operator_id": "forged", "reason": "retry test"}),
+            ),
+            "single" | "expiry" => (
+                format!("/v1/mitigations/{id}/withdraw"),
+                serde_json::json!({"operator_id": "forged", "reason": "retry test"}),
+            ),
+            _ => ("/v1/events".into(), unban),
         };
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path.clone())
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        if path_kind == "bulk" {
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["failed"], 1);
+        } else {
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        assert_eq!(
+            repo.get_mitigation(id).await.unwrap().unwrap().status,
+            MitigationStatus::Active
+        );
+        assert_eq!(speaker.inner.announced_count().await, 0);
+        assert!(updates.try_recv().is_err());
+        let pending = repo.pending_withdrawals(None).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].actor,
+            if path_kind == "detector" {
+                "test"
+            } else if path_kind == "expiry" {
+                "scheduler"
+            } else {
+                "anonymous"
+            }
+        );
 
-        for failing in [true, false] {
-            speaker.failing.store(failing, SeqCst);
+        // A controller tick occurs before any caller retries the withdrawal.
+        let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+            .with_app_state(state.clone())
+            .with_ws_broadcast(state.ws_broadcast.clone());
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(speaker.inner.announced_count().await, 0);
+        assert!(updates.try_recv().is_err());
+        let mut retry_event = event.clone();
+        retry_event["event_id"] = "new-attack-during-delete".into();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(retry_event.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(
+            repo.find_ban_event_by_external_id("test", "new-attack-during-delete")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/mitigations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "victim_ip": "203.0.113.10", "protocol": "udp", "dst_ports": [53],
+                            "action": "discard", "ttl_seconds": 60, "reason": "manual retry"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+
+        speaker.failing.store(false, SeqCst);
+        if path_kind == "expiry" {
             let response = app
                 .clone()
                 .oneshot(
@@ -115,38 +224,503 @@ async fn test_failed_bulk_and_detector_withdrawals_preserve_active_state_for_ret
                 )
                 .await
                 .unwrap();
-            if bulk {
-                assert_eq!(response.status(), StatusCode::OK);
-                let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
-                    .await
-                    .unwrap();
-                let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                assert_eq!(json["failed"], if failing { 1 } else { 0 });
+            assert_eq!(response.status(), StatusCode::OK);
+        } else {
+            reconciler.reconcile().await.unwrap();
+        }
+        assert_eq!(
+            repo.get_mitigation(id).await.unwrap().unwrap().status,
+            if path_kind == "expiry" {
+                MitigationStatus::Expired
             } else {
-                assert_eq!(
-                    response.status(),
-                    if failing {
-                        StatusCode::INTERNAL_SERVER_ERROR
-                    } else {
-                        StatusCode::ACCEPTED
-                    }
-                );
+                MitigationStatus::Withdrawn
             }
-            let mitigation = repo.get_mitigation(id).await.unwrap().unwrap();
-            assert_eq!(
-                mitigation.status,
-                if failing {
-                    MitigationStatus::Active
-                } else {
-                    MitigationStatus::Withdrawn
-                }
+        );
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+        let notification = updates.try_recv().unwrap();
+        if path_kind == "expiry" {
+            assert!(
+                matches!(notification, prefixd::ws::WsMessage::MitigationExpired { mitigation_id } if mitigation_id == id.to_string())
             );
-            assert_eq!(speaker.inner.announced_count().await, usize::from(failing));
-            if failing {
-                assert!(updates.try_recv().is_err());
-            }
+        } else {
+            assert!(
+                matches!(notification, prefixd::ws::WsMessage::MitigationWithdrawn { mitigation_id } if mitigation_id == id.to_string())
+            );
+        }
+        let audit = repo
+            .list_audit(&prefixd::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let audit: Vec<_> = audit
+            .iter()
+            .filter(|entry| {
+                entry.action
+                    == if path_kind == "expiry" {
+                        "expire"
+                    } else {
+                        "withdraw"
+                    }
+            })
+            .collect();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(
+            audit[0].actor_id.as_deref(),
+            Some(pending[0].actor.as_str())
+        );
+        assert_eq!(audit[0].details["reason"], pending[0].reason);
+        reconciler.reconcile().await.unwrap();
+        assert!(updates.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn test_repair_yields_to_operator_and_rechecks_stale_candidate() {
+    use prefixd::{
+        bgp::{FlowSpecAnnouncer, PeerStatus},
+        domain::{
+            ActionParams, ActionType, FlowSpecRule, MatchCriteria, Mitigation, MitigationIntent,
+        },
+        error::Result,
+    };
+    struct GatedRepair {
+        inner: MockAnnouncer,
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        repairs: std::sync::Mutex<Vec<String>>,
+    }
+    #[async_trait::async_trait]
+    impl FlowSpecAnnouncer for GatedRepair {
+        async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.repairs
+                .lock()
+                .unwrap()
+                .push(rule.nlri.dst_prefix.clone());
+            self.started.notify_one();
+            self.release.notified().await;
+            self.inner.announce(rule).await
+        }
+        async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.inner.withdraw(rule).await
+        }
+        async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
+            self.inner.list_active().await
+        }
+        async fn session_status(&self) -> Result<Vec<PeerStatus>> {
+            Ok(vec![])
         }
     }
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(GatedRepair {
+        inner: MockAnnouncer::new(),
+        started: tokio::sync::Notify::new(),
+        release: tokio::sync::Notify::new(),
+        repairs: std::sync::Mutex::new(vec![]),
+    });
+    let mut targets = vec![];
+    for suffix in [10, 11, 12] {
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: "test1".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: format!("203.0.113.{suffix}/32"),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams { rate_bps: None },
+                ttl_seconds: 600,
+                reason: "test".into(),
+            },
+            format!("203.0.113.{suffix}"),
+            AttackVector::UdpFlood,
+        );
+        mitigation.activate();
+        repo.insert_mitigation(&mitigation).await.unwrap();
+        targets.push(mitigation);
+    }
+    let mut settings = test_settings();
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let app = create_test_router(state.clone());
+    let reconciler =
+        prefixd::scheduler::ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+            .with_app_state(state);
+    let task = tokio::spawn(async move { reconciler.reconcile().await });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        speaker.started.notified(),
+    )
+    .await
+    .unwrap();
+    let mut withdrawal = Box::pin(
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v1/mitigations/{}/withdraw",
+                    targets[1].mitigation_id
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"reason":"operator intervenes"}"#))
+                .unwrap(),
+        ),
+    );
+    // Poll once while the first repair owns the mutex, deterministically queueing the operator.
+    assert!(futures_util::poll!(&mut withdrawal).is_pending());
+    speaker.release.notify_one();
+    let response = tokio::time::timeout(std::time::Duration::from_secs(2), withdrawal)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        speaker.started.notified(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        *speaker.repairs.lock().unwrap(),
+        ["203.0.113.12/32", "203.0.113.10/32"]
+    );
+    speaker.release.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        repo.get_mitigation(targets[1].mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        prefixd::domain::MitigationStatus::Withdrawn
+    );
+}
+
+#[tokio::test]
+async fn test_authenticated_single_and_bulk_withdrawals_record_session_actor() {
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    use prefixd::domain::{
+        ActionParams, ActionType, MatchCriteria, Mitigation, MitigationIntent, OperatorRole,
+        mitigation_rule,
+    };
+    let repo = Arc::new(MockRepository::new());
+    let salt = SaltString::encode_b64(b"withdrawal-audit-test").unwrap();
+    let hash = Argon2::default()
+        .hash_password(b"audit-test-password", &salt)
+        .unwrap()
+        .to_string();
+    repo.create_operator("withdraw-auditor", &hash, OperatorRole::Operator, None)
+        .await
+        .unwrap();
+    let speaker = Arc::new(MockAnnouncer::new());
+    let mut targets = vec![];
+    for suffix in [10, 11] {
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: "test1".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: format!("203.0.113.{suffix}/32"),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams { rate_bps: None },
+                ttl_seconds: 600,
+                reason: "test".into(),
+            },
+            format!("203.0.113.{suffix}"),
+            AttackVector::UdpFlood,
+        );
+        mitigation.activate();
+        repo.insert_mitigation(&mitigation).await.unwrap();
+        prefixd::bgp::FlowSpecAnnouncer::announce(speaker.as_ref(), &mitigation_rule(&mitigation))
+            .await
+            .unwrap();
+        targets.push(mitigation);
+    }
+    let mut settings = test_settings();
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    settings.http.auth.mode = AuthMode::Credentials;
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        speaker,
+        ".".into(),
+    )
+    .unwrap();
+    let app = create_test_router(state);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"username":"withdraw-auditor","password":"audit-test-password"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let first_path = format!("/v1/mitigations/{}/withdraw", targets[0].mitigation_id);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(&first_path)
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"reason":"no session"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    for (path, payload) in [
+        (
+            first_path,
+            serde_json::json!({"operator_id":"forged-admin", "reason":"single reason"}),
+        ),
+        (
+            "/v1/mitigations/withdraw".into(),
+            serde_json::json!({"mitigation_ids":[targets[1].mitigation_id], "operator_id":"forged-admin", "reason":"bulk reason"}),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("cookie", &cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let audit = repo
+        .list_audit(&prefixd::db::ListParams {
+            limit: 100,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let audit: Vec<_> = audit
+        .iter()
+        .filter(|entry| entry.action == "withdraw")
+        .collect();
+    assert_eq!(audit.len(), 2);
+    for (target, reason) in targets.iter().zip(["single reason", "bulk reason"]) {
+        assert_eq!(
+            repo.get_mitigation(target.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            prefixd::domain::MitigationStatus::Withdrawn
+        );
+        let entry = audit
+            .iter()
+            .find(|entry| {
+                entry.target_id.as_deref() == Some(target.mitigation_id.to_string().as_str())
+            })
+            .unwrap();
+        assert!(matches!(
+            entry.actor_type,
+            prefixd::observability::ActorType::Operator
+        ));
+        assert_eq!(entry.actor_id.as_deref(), Some("withdraw-auditor"));
+        assert_eq!(
+            entry.details["reason"],
+            format!("withdraw-auditor: {reason}")
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_foreign_pop_cannot_delete_local_rule_or_receive_local_repair() {
+    use prefixd::{
+        bgp::FlowSpecAnnouncer,
+        domain::{
+            ActionParams, ActionType, AttackEvent, AttackEventInput, MatchCriteria, Mitigation,
+            MitigationIntent, MitigationStatus, mitigation_rule,
+        },
+        scheduler::ReconciliationLoop,
+    };
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(MockAnnouncer::new());
+    let event_json = serde_json::json!({"event_id":"foreign-pop", "timestamp":chrono::Utc::now(), "source":"test", "victim_ip":"203.0.113.10", "vector":"udp_flood", "pps":50000, "top_dst_ports":[53]});
+    let event = AttackEvent::from_input(
+        serde_json::from_value::<AttackEventInput>(event_json.clone()).unwrap(),
+    );
+    repo.insert_event(&event).await.unwrap();
+    let mut local = Mitigation::from_intent(
+        MitigationIntent {
+            event_id: uuid::Uuid::new_v4(),
+            customer_id: None,
+            service_id: None,
+            pop: "test1".into(),
+            match_criteria: MatchCriteria {
+                dst_prefix: "203.0.113.10/32".into(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+            },
+            action_type: ActionType::Discard,
+            action_params: ActionParams { rate_bps: None },
+            ttl_seconds: 600,
+            reason: "local".into(),
+        },
+        "203.0.113.10".into(),
+        AttackVector::UdpFlood,
+    );
+    local.activate();
+    repo.insert_mitigation(&local).await.unwrap();
+    speaker.announce(&mitigation_rule(&local)).await.unwrap();
+    let mut foreign = local.clone();
+    foreign.mitigation_id = uuid::Uuid::new_v4();
+    foreign.pop = "other-pop".into();
+    foreign.triggering_event_id = event.event_id;
+    foreign.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+    repo.insert_mitigation(&foreign).await.unwrap();
+    let mut missing_foreign = foreign.clone();
+    missing_foreign.mitigation_id = uuid::Uuid::new_v4();
+    missing_foreign.match_criteria.dst_prefix = "203.0.113.99/32".into();
+    missing_foreign.scope_hash = missing_foreign.match_criteria.compute_scope_hash();
+    missing_foreign.expires_at = local.expires_at;
+    repo.insert_mitigation(&missing_foreign).await.unwrap();
+    let mut settings = test_settings();
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let app = create_test_router(state.clone());
+    let mut unban = event_json;
+    unban["action"] = "unban".into();
+    for (path, payload, bulk) in [
+        (
+            format!("/v1/mitigations/{}/withdraw", foreign.mitigation_id),
+            serde_json::json!({"reason":"wrong controller"}),
+            false,
+        ),
+        (
+            "/v1/mitigations/withdraw".into(),
+            serde_json::json!({"mitigation_ids":[foreign.mitigation_id], "reason":"wrong controller"}),
+            true,
+        ),
+        ("/v1/events".into(), unban, false),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if bulk {
+                StatusCode::OK
+            } else {
+                StatusCode::CONFLICT
+            }
+        );
+        if bulk {
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let response: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response["failed"], 1);
+            assert_eq!(
+                response["results"][0]["error"],
+                "mitigation belongs to another POP"
+            );
+        }
+        assert_eq!(speaker.announced_count().await, 1);
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+        assert_eq!(
+            repo.get_mitigation(foreign.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Active
+        );
+    }
+    let pending_foreign = prefixd::domain::request_withdrawal(
+        repo.as_ref(),
+        &foreign,
+        false,
+        "operator",
+        "remote-operator",
+        "remote cleanup".into(),
+    )
+    .await
+    .unwrap();
+    ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+        .with_app_state(state)
+        .reconcile()
+        .await
+        .unwrap();
+    assert_eq!(speaker.announced_count().await, 1);
+    let pending = repo.pending_withdrawals(None).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].operation_id, pending_foreign.operation_id);
+    assert_eq!(
+        repo.get_mitigation(foreign.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MitigationStatus::Active
+    );
 }
 
 fn test_settings() -> Settings {

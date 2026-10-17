@@ -82,16 +82,35 @@ drop a separate daemon's router sessions or automatically expire its rules.
 Monitor controller availability and restore reconciliation after failure. A
 controller lease or coupled lifecycle needs its own design and failure tests.
 
+## Withdrawal recovery
+
+Detector unban, operator single/bulk withdrawal and TTL expiry persist immutable
+deletion intent before RPC. An error keeps that intent pending, suppresses repair
+of its rule and retries cleanup on the same target. State, original-actor audit
+and operation completion commit atomically after confirmed deletion. Conflicting
+owners and foreign POPs cannot authorize deletion; stale local requests are
+rejected before sending a new RPC.
+
+Independent housekeeping and peer observations continue after failed mutations.
+Each scheduler mutation rechecks the current row and pending intent under the
+shared lifecycle mutex; the mutex is released before the next rule. Both gRPC adapters
+bound complete mutation responses, including body and trailers, to 30 seconds
+per attempt, with at most three attempts.
+
+This is a fixed-target, single-controller contract. Drain pending requests before
+changing targets or downgrading; see [the upgrade guide](upgrading.md#pending-withdrawals-and-rollback).
+Application status and local speaker intent do not prove router enforcement.
+
 ## Delivery order
 
-| Stage | Work and gate | Linear |
-|-------|---------------|--------|
-| 1 | Keep GoBGP supported; selectable rustbgpd adapter, compatible config, authenticated RPC and codec tests | LAN-2122, LAN-1947 |
-| 2 | Retry failed expiry withdrawals; real daemon TTL/restart recovery and transport/deployment wiring | LAN-2288, LAN-2125, LAN-2126, LAN-2127 |
-| 3 | Router interop, migration and rollback evidence; only then change deployment defaults | LAN-2128, LAN-2129, LAN-2130, LAN-2131 |
-| 4 | Split required writing from optional reading/peer observation; persist confirmed announcement state and pending cleanup | LAN-2132, LAN-2133 |
-| 5 | Expose capabilities in health/CLI/dashboard/metrics; retain legacy public fields during migration | LAN-2134, LAN-1948 |
-| 6 | HTTP shim, a second transport proof, shared conformance and per-backend CI | LAN-2135, LAN-2136, LAN-2137, LAN-2138, LAN-2139 |
+| Stage | Work and gate |
+|-------|---------------|
+| 1 | Keep GoBGP supported; selectable rustbgpd adapter, compatible config, authenticated RPC and codec tests |
+| 2 | Retry failed expiry withdrawals; real daemon TTL/restart recovery and transport/deployment wiring |
+| 3 | Router interop, migration and rollback evidence; only then change deployment defaults |
+| 4 | Split required writing from optional reading/peer observation; persist confirmed announcement state and pending cleanup |
+| 5 | Expose capabilities in health/CLI/dashboard/metrics; retain legacy public fields during migration |
+| 6 | HTTP shim, a second transport proof, shared conformance and per-backend CI |
 
 The capability/ledger work can proceed before the default switch, but a
 write-only backend cannot ship before its reconciliation path is verified.

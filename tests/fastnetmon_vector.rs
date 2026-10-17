@@ -112,3 +112,43 @@ fn all_zero_metrics_yield_unknown() {
                    Incoming tcp syn: 0 mbps";
     assert_eq!(detected_vector(details), "unknown");
 }
+
+#[test]
+fn udp_flood_wins_over_idle_syn_packet_rate() {
+    let details = "Incoming tcp syn pps: 0 packets per second\n\
+                   Incoming udp traffic: 900 mbps";
+    assert_eq!(detected_vector(details), "udp_flood");
+}
+
+#[test]
+fn all_zero_syn_packet_rates_yield_unknown() {
+    for rate in ["0", "0.0", "00.00"] {
+        let details = format!("Incoming tcp syn pps: {rate} packets per second");
+        assert_eq!(detected_vector(&details), "unknown", "rate: {rate}");
+    }
+}
+
+#[test]
+fn underscore_attack_type_does_not_match_ack() {
+    assert_eq!(detected_vector("Attack_type: udp_flood"), "udp_flood");
+}
+
+#[test]
+fn nonzero_packet_rates_keep_protocol_signal() {
+    for rate in ["10", "0.1", "100.0"] {
+        let details = format!("Incoming tcp syn pps: {rate} packets per second");
+        assert_eq!(detected_vector(&details), "syn_flood", "rate: {rate}");
+    }
+}
+
+#[test]
+fn protocol_tokens_do_not_match_inside_words() {
+    for details in [
+        "asyn_flood",
+        "attack_type: idle",
+        "aicmp_flood",
+        "audp_flood",
+    ] {
+        assert_eq!(detected_vector(details), "unknown", "details: {details}");
+    }
+}
