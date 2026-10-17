@@ -1201,6 +1201,114 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
             ))
             .unwrap()
     };
+    // Duplicate admission must not replace a speaker rule before the unique DB index rejects it.
+    let mut expanded = mitigation.clone();
+    expanded.mitigation_id = uuid::Uuid::new_v4();
+    expanded.victim_ip = "2001:0DB8:0:0:0:0:0:1".into();
+    expanded.match_criteria.dst_prefix = format!("{}/128", expanded.victim_ip);
+    expanded.scope_hash = expanded.match_criteria.compute_scope_hash();
+    repo.insert_mitigation(&expanded).await.unwrap();
+    speaker
+        .inner
+        .announce(&mitigation_rule(&expanded))
+        .await
+        .unwrap();
+    for (original, requested_ip) in [(&mitigation, "203.0.113.10"), (&expanded, "2001:db8::1")] {
+        let before = repo
+            .get_mitigation(original.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let payload = serde_json::json!({"victim_ip":requested_ip, "protocol":"udp", "dst_ports":[53],
+            "action":"police", "rate_bps":800, "ttl_seconds":60, "reason":"duplicate must preserve discard"});
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/mitigations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(speaker.adds.load(SeqCst), 0);
+        assert_eq!(speaker.deletes.load(SeqCst), 0);
+        let after = repo
+            .get_mitigation(original.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.expires_at, before.expires_at);
+        assert_eq!(after.updated_at, before.updated_at);
+        assert_eq!(after.scope_hash, before.scope_hash);
+        assert_eq!(after.action_type, ActionType::Discard);
+        let routes = speaker.inner.list_active().await.unwrap();
+        assert_eq!(routes.len(), 2);
+        assert!(
+            routes
+                .iter()
+                .all(|rule| rule.actions[0].action_type == ActionType::Discard)
+        );
+    }
+    // Remove only this alias fixture so later assertions still describe one pending deletion.
+    speaker
+        .inner
+        .withdraw(&mitigation_rule(&expanded))
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM mitigations WHERE mitigation_id = $1")
+        .bind(expanded.mitigation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A failed authoritative owner inventory must reject admission before any speaker RPC.
+    sqlx::query("ALTER TABLE mitigations RENAME TO hidden_mitigations")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let manual = serde_json::json!({"victim_ip":"203.0.113.11", "protocol":"udp", "dst_ports":[53], "action":"discard", "ttl_seconds":60, "reason":"preflight fault"});
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mitigations")
+                .header("content-type", "application/json")
+                .body(Body::from(manual.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let event = serde_json::json!({"event_id":"preflight-failure", "timestamp":chrono::Utc::now(), "source":"test", "victim_ip":"203.0.113.11", "vector":"udp_flood", "pps":50000, "top_dst_ports":[53]});
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(speaker.adds.load(SeqCst), 0);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+    assert!(
+        repo.find_ban_event_by_external_id("test", "preflight-failure")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    sqlx::query("ALTER TABLE hidden_mitigations RENAME TO mitigations")
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::raw_sql("CREATE FUNCTION reject_withdrawal() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected storage failure'; END $$; CREATE TRIGGER reject_request BEFORE INSERT ON withdrawal_requests FOR EACH ROW EXECUTE FUNCTION reject_withdrawal();").execute(&pool).await.unwrap();
     assert_eq!(
         app.clone().oneshot(withdraw()).await.unwrap().status(),
@@ -1220,6 +1328,7 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
     assert_eq!(speaker.deletes.load(SeqCst), 1);
     assert_eq!(speaker.inner.announced_count().await, 0);
     let original = repo.pending_withdrawals(None).await.unwrap().pop().unwrap();
+    assert!(original.speaker_delete_required);
     assert_eq!(original.actor, "anonymous");
     assert_eq!(original.reason, "anonymous: original reason");
 
@@ -1262,6 +1371,11 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
         .execute(&pool)
         .await
         .unwrap();
+    // Simulate an existing table from before originating mode was recorded.
+    sqlx::query("ALTER TABLE withdrawal_requests DROP COLUMN speaker_delete_required")
+        .execute(&pool)
+        .await
+        .unwrap();
     drop(reconciler);
     drop(app);
     drop(state);
@@ -1271,6 +1385,39 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
     // Rebuild the repository and controller with a new pool; no in-memory request is retained.
     let restarted_pool = init_postgres_pool(&connection).await.unwrap();
     let restarted_repo = Arc::new(Repository::new(restarted_pool.clone()));
+    let persisted = restarted_repo.pending_withdrawals(None).await.unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert!(persisted[0].speaker_delete_required);
+    let (tx, mut updates) = tokio::sync::broadcast::channel(4);
+    let dry_run = ReconciliationLoop::new(restarted_repo.clone(), speaker.clone(), 30, true)
+        .with_ws_broadcast(tx);
+    let deletes_before = speaker.deletes.load(SeqCst);
+    assert!(dry_run.reconcile().await.is_err());
+    assert_eq!(speaker.deletes.load(SeqCst), deletes_before);
+    assert!(updates.try_recv().is_err());
+    assert!(
+        restarted_repo
+            .get_mitigation(mitigation.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+    assert_eq!(
+        restarted_repo
+            .pending_withdrawals(None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let audits: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'withdraw'")
+            .fetch_one(&restarted_pool)
+            .await
+            .unwrap();
+    assert_eq!(audits, 0);
+
     let state = AppState::new(
         settings,
         common::test_inventory(),
@@ -1327,6 +1474,7 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
         "operator",
         "alice",
         "stale".into(),
+        true,
     )
     .await
     .unwrap();
@@ -1345,5 +1493,141 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
             .unwrap()
             .unwrap()
             .is_active()
+    );
+    let mut simulated = mitigation.clone();
+    simulated.mitigation_id = uuid::Uuid::new_v4();
+    simulated.match_criteria.dst_prefix = "203.0.113.11/32".into();
+    simulated.scope_hash = simulated.match_criteria.compute_scope_hash();
+    restarted_repo.insert_mitigation(&simulated).await.unwrap();
+    let simulated = restarted_repo
+        .get_mitigation(simulated.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = request_withdrawal(
+        restarted_repo.as_ref(),
+        &simulated,
+        false,
+        "operator",
+        "alice",
+        "simulation".into(),
+        false,
+    )
+    .await
+    .unwrap();
+    let reconstructed = Repository::new(restarted_pool.clone());
+    let persisted = reconstructed
+        .pending_withdrawals(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|pending| pending.operation_id == request.operation_id)
+        .unwrap();
+    assert!(!persisted.speaker_delete_required);
+    let deletes_before = speaker.deletes.load(SeqCst);
+    prefixd::domain::execute_withdrawal(&reconstructed, speaker.as_ref(), true, &persisted)
+        .await
+        .unwrap();
+    assert_eq!(speaker.deletes.load(SeqCst), deletes_before);
+}
+
+#[tokio::test]
+async fn test_legacy_canonical_owners_finish_ttl_cleanup_after_last_live_owner() {
+    use prefixd::{
+        domain::{
+            ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+            mitigation_rule,
+        },
+        scheduler::ReconciliationLoop,
+    };
+    let context = TestContext::new().await;
+    let mut first = Mitigation::from_intent(
+        MitigationIntent {
+            event_id: uuid::Uuid::new_v4(),
+            customer_id: None,
+            service_id: None,
+            pop: "test-pop".into(),
+            match_criteria: MatchCriteria {
+                dst_prefix: "2001:db8::1/128".into(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+            },
+            action_type: ActionType::Discard,
+            action_params: ActionParams { rate_bps: None },
+            ttl_seconds: 60,
+            reason: "legacy".into(),
+        },
+        "2001:db8::1".into(),
+        AttackVector::UdpFlood,
+    );
+    first.activate();
+    first.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+    first.scope_hash = "historical compressed owner".into();
+    let mut second = first.clone();
+    second.mitigation_id = uuid::Uuid::new_v4();
+    second.match_criteria.dst_prefix = "2001:0DB8:0:0:0:0:0:1/128".into();
+    second.scope_hash = "historical expanded owner".into();
+    second.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+    for owner in [&first, &second] {
+        context.repo.insert_mitigation(owner).await.unwrap();
+    }
+    context
+        .state
+        .announcer
+        .announce(&mitigation_rule(&first))
+        .await
+        .unwrap();
+    let reconciler = ReconciliationLoop::new(
+        context.repo.clone(),
+        context.state.announcer.clone(),
+        30,
+        false,
+    )
+    .with_app_state(context.state.clone());
+    assert!(reconciler.reconcile().await.is_err());
+    assert_eq!(
+        context.state.announcer.list_active().await.unwrap().len(),
+        1
+    );
+    assert!(
+        context
+            .repo
+            .get_mitigation(first.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+    second.expires_at = first.expires_at;
+    context.repo.update_mitigation(&second).await.unwrap();
+    reconciler.reconcile().await.unwrap();
+    for owner in [&first, &second] {
+        assert_eq!(
+            context
+                .repo
+                .get_mitigation(owner.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Expired
+        );
+    }
+    assert!(
+        context
+            .state
+            .announcer
+            .list_active()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        context
+            .repo
+            .pending_withdrawals(None)
+            .await
+            .unwrap()
+            .is_empty()
     );
 }

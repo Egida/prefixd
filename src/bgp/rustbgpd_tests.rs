@@ -158,17 +158,31 @@ impl pb::neighbor_service_server::NeighborService for Fake {
         request: Request<pb::ListNeighborsRequest>,
     ) -> std::result::Result<Response<pb::ListNeighborsResponse>, Status> {
         auth(&request)?;
-        Ok(Response::new(pb::ListNeighborsResponse {
-            neighbors: vec![pb::NeighborState {
-                config: Some(pb::NeighborConfig {
-                    address: "192.0.2.1".into(),
-                    ..Default::default()
-                }),
-                state: 6,
-                stale: self.mode.load(SeqCst) == 7,
+        let mut neighbors = vec![pb::NeighborState {
+            config: Some(pb::NeighborConfig {
+                address: "192.0.2.1".into(),
+                description: "shared edge".into(),
                 ..Default::default()
-            }],
-        }))
+            }),
+            state: 6,
+            stale: self.mode.load(SeqCst) == 7,
+            ..Default::default()
+        }];
+        if self.mode.load(SeqCst) == 12 {
+            neighbors.insert(
+                0,
+                pb::NeighborState {
+                    config: Some(pb::NeighborConfig {
+                        address: "192.0.2.2".into(),
+                        description: "shared edge".into(),
+                        ..Default::default()
+                    }),
+                    state: 1,
+                    ..Default::default()
+                },
+            );
+        }
+        Ok(Response::new(pb::ListNeighborsResponse { neighbors }))
     }
 }
 
@@ -246,6 +260,29 @@ async fn authenticated_controller_rpc_contract() {
         Some(8_000)
     );
     assert_eq!(speaker.session_status().await.unwrap()[0].name, "192.0.2.1");
+    fake.mode.store(12, SeqCst);
+    let peers = speaker.session_status().await.unwrap();
+    // Match the scheduler's peer-name label without sharing global test metrics.
+    let sessions = prometheus::GaugeVec::new(
+        prometheus::Opts::new("test_bgp_session_up", "Session state"),
+        &["peer"],
+    )
+    .unwrap();
+    for peer in peers {
+        assert_eq!(peer.name, peer.address);
+        sessions
+            .with_label_values(&[&peer.name])
+            .set(if peer.state.is_established() {
+                1.0
+            } else {
+                0.0
+            });
+    }
+    assert_eq!(sessions.with_label_values(&["192.0.2.2"]).get(), 0.0);
+    assert_eq!(sessions.with_label_values(&["192.0.2.1"]).get(), 1.0);
+    use prometheus::core::Collector;
+    assert_eq!(sessions.collect()[0].get_metric().len(), 2);
+    fake.mode.store(0, SeqCst);
     for (mode, expected_attempts) in [(1, 3), (2, 1), (3, 1), (10, 3)] {
         fake.mode.store(mode, SeqCst);
         fake.attempts.store(0, SeqCst);

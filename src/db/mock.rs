@@ -20,6 +20,10 @@ use crate::observability::AuditEntry;
 
 pub struct MockRepository {
     events: Mutex<Vec<AttackEvent>>,
+    #[cfg(test)]
+    mitigation_reads: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pending_reads: std::sync::atomic::AtomicUsize,
     mitigations: Mutex<Vec<Mitigation>>,
     withdrawals: Mutex<Vec<WithdrawalRequest>>,
     safelist: Mutex<Vec<SafelistEntry>>,
@@ -45,9 +49,22 @@ type MockGroupEventLink = (
 );
 
 impl MockRepository {
+    #[cfg(test)]
+    pub fn lifecycle_read_counts(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.mitigation_reads.load(Relaxed),
+            self.pending_reads.load(Relaxed),
+        )
+    }
+
     pub fn new() -> Self {
         Self {
             events: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            mitigation_reads: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            pending_reads: std::sync::atomic::AtomicUsize::new(0),
             mitigations: Mutex::new(Vec::new()),
             withdrawals: Mutex::new(Vec::new()),
             safelist: Mutex::new(Vec::new()),
@@ -164,6 +181,9 @@ impl RepositoryTrait for MockRepository {
     }
 
     async fn pending_withdrawals(&self, pop: Option<&str>) -> Result<Vec<WithdrawalRequest>> {
+        #[cfg(test)]
+        self.pending_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(self
             .withdrawals
             .lock()
@@ -218,6 +238,9 @@ impl RepositoryTrait for MockRepository {
     }
 
     async fn get_mitigation(&self, id: Uuid) -> Result<Option<Mitigation>> {
+        #[cfg(test)]
+        self.mitigation_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations.iter().find(|m| m.mitigation_id == id).cloned())
     }

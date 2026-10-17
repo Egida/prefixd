@@ -128,11 +128,23 @@ and operation completion commit atomically after confirmed deletion. Conflicting
 owners and foreign POPs cannot authorize deletion; stale local requests are
 rejected before sending a new RPC.
 
+Canonical ownership includes legacy prefix spellings. New manual duplicates
+return 409 before speaker mutation; detector events reuse one existing owner.
+Ambiguous multiple owners are rejected. An expired legacy sibling cannot delete
+a live owner's rule; after the last owner expires, cleanup retires all rows.
+Pending enforced-mode cleanup remains pending in dry-run and resumes when
+enforcement returns; dry-run never supplies a deletion acknowledgement.
+
 Independent housekeeping and peer observations continue after failed mutations.
 Each scheduler mutation rechecks the current row and pending intent under the
 shared lifecycle mutex; the mutex is released before the next rule. Both gRPC adapters
 bound complete mutation responses, including body and trailers, to 30 seconds
 per attempt, with at most three attempts.
+
+Active mitigation gauges count local database status, including expired or
+pending rows awaiting confirmed cleanup; they are not proof of enforcement.
+rustbgpd session observations use peer addresses as unique names, so neighbors
+sharing a description retain separate metric series.
 
 This is a fixed-target, single-controller contract. Drain pending requests before
 changing targets or downgrading; see [the upgrade guide](upgrading.md#pending-withdrawals-and-rollback).
