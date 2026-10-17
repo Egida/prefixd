@@ -79,6 +79,9 @@ prefixd-test = "operator"
         .unwrap();
         drop(sockets);
         let container = GenericImage::new(name, tag)
+            .with_host_config_modifier(|host| {
+                host.cpuset_cpus = std::env::var("PREFIXD_TEST_CPUSET").ok();
+            })
             .with_network("host")
             .with_user(format!("{}:{}", metadata.uid(), metadata.gid()))
             .with_mount(

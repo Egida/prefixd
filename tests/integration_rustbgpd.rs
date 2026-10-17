@@ -141,12 +141,12 @@ impl FlowSpecAnnouncer for PollingSpeaker {
     }
     async fn list_active(&self) -> prefixd::error::Result<Vec<FlowSpecRule>> {
         let _gate = self.inventory_gate.read().await;
-        let result = self.inner.list_active().await;
-        self.observed.notify_one();
-        result
+        self.inner.list_active().await
     }
     async fn session_status(&self) -> prefixd::error::Result<Vec<prefixd::bgp::PeerStatus>> {
-        self.inner.session_status().await
+        let result = self.inner.session_status().await;
+        self.observed.notify_one();
+        result
     }
 }
 

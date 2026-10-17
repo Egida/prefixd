@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::correlation::engine::{SignalGroup, SignalGroupEvent, SignalGroupFilter};
-use crate::domain::{AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole};
+use crate::domain::{
+    AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole, WithdrawalRequest,
+};
 use crate::error::Result;
 use crate::observability::AuditEntry;
 
@@ -100,6 +102,12 @@ pub trait RepositoryTrait: Send + Sync {
     async fn count_active_by_pop(&self, pop: &str) -> Result<u32>;
     async fn count_active_global(&self) -> Result<u32>;
     async fn find_expired_mitigations(&self) -> Result<Vec<Mitigation>>;
+    /// Complete owner inventory, including pending rows, without a timestamp cursor.
+    async fn active_mitigations_for_pop(&self, pop: &str) -> Result<Vec<Mitigation>>;
+    async fn begin_withdrawal(&self, request: &WithdrawalRequest) -> Result<WithdrawalRequest>;
+    async fn pending_withdrawals(&self, pop: Option<&str>) -> Result<Vec<WithdrawalRequest>>;
+    /// Atomically complete this exact operation and its unchanged mitigation revision.
+    async fn finish_withdrawal(&self, request: &WithdrawalRequest) -> Result<Option<Mitigation>>;
 
     // Safelist
     async fn insert_safelist(

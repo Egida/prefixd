@@ -7,6 +7,9 @@ pub enum PrefixdError {
     #[error("invalid request: {0}")]
     InvalidRequest(String),
 
+    #[error("conflict: {0}")]
+    Conflict(String),
+
     #[error("rate limited, retry after {retry_after_seconds}s")]
     RateLimited { retry_after_seconds: u32 },
 
@@ -120,7 +123,7 @@ impl PrefixdError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::NotFound(_) | Self::MitigationNotFound(_) => StatusCode::NOT_FOUND,
             Self::ShuttingDown => StatusCode::SERVICE_UNAVAILABLE,
-            Self::DuplicateEvent { .. } => StatusCode::CONFLICT,
+            Self::DuplicateEvent { .. } | Self::Conflict(_) => StatusCode::CONFLICT,
             Self::GuardrailViolation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::IpNotOwned(_) | Self::InvalidIpAddress(_) | Self::InvalidPrefix(_) => {
                 StatusCode::BAD_REQUEST
