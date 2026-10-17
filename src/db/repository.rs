@@ -559,6 +559,10 @@ impl RepositoryTrait for Repository {
     }
 
     async fn find_expired_mitigations(&self) -> Result<Vec<Mitigation>> {
+        self.expired_mitigation_inventory(None).await
+    }
+
+    async fn expired_mitigation_inventory(&self, pop: Option<&str>) -> Result<Vec<Mitigation>> {
         let now = Utc::now();
         let rows = sqlx::query_as::<_, MitigationRow>(
             r#"
@@ -569,22 +573,14 @@ impl RepositoryTrait for Repository {
                    acknowledged_at, acknowledged_by, signal_group_id
             FROM mitigations
             WHERE status IN ('active', 'escalated') AND expires_at < $1
+              AND ($2::text IS NULL OR pop = $2)
             "#,
         )
         .bind(now)
+        .bind(pop)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| match Mitigation::from_row(row) {
-                Ok(m) => Some(m),
-                Err(e) => {
-                    ROW_PARSE_ERRORS.with_label_values(&["mitigations"]).inc();
-                    tracing::error!(error = %e, "skipping corrupted mitigation row");
-                    None
-                }
-            })
-            .collect())
+        rows.into_iter().map(Mitigation::from_row).collect()
     }
 
     async fn insert_safelist(

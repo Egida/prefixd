@@ -163,6 +163,9 @@ Reconciliation reads the complete desired owner inventory for its POP. Malformed
 persisted rows fail the pass before repairs begin. Pending creation rows are
 excluded from repairs and status-active counts; expired and pending-withdrawal
 rows remain counted until their terminal transition but cannot be re-announced.
+Expiry enumeration also filters POP before decoding and fails on malformed
+eligible owned rows. Existing durable withdrawals are still attempted when expiry
+enumeration fails; every withdrawal retains its independent ownership validation.
 
 The scheduler currently compares NLRI identity. Repairing action-only drift
 needs separate coverage and implementation. Successful injection does not

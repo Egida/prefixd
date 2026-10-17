@@ -2027,6 +2027,7 @@ struct InventorySpeaker {
     announcements: std::sync::Mutex<Vec<String>>,
     withdrawals: std::sync::Mutex<Vec<String>>,
     reject_withdrawals: bool,
+    session_reads: std::sync::atomic::AtomicUsize,
 }
 
 impl InventorySpeaker {
@@ -2036,6 +2037,7 @@ impl InventorySpeaker {
             announcements: std::sync::Mutex::new(Vec::new()),
             withdrawals: std::sync::Mutex::new(Vec::new()),
             reject_withdrawals,
+            session_reads: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -2077,6 +2079,8 @@ impl prefixd::bgp::FlowSpecReader for InventorySpeaker {
 #[async_trait::async_trait]
 impl prefixd::bgp::PeerObserver for InventorySpeaker {
     async fn session_status(&self) -> prefixd::error::Result<Vec<prefixd::bgp::PeerStatus>> {
+        self.session_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner.session_status().await
     }
 }
@@ -2455,4 +2459,340 @@ async fn test_reconciliation_inventory_is_strict_and_isolates_foreign_corruption
         speaker.announcements.lock().unwrap().is_empty(),
         "malformed intent must prevent partial repairs"
     );
+}
+
+#[tokio::test]
+async fn test_expiry_inventory_rejects_corrupt_owned_rows() {
+    let context = TestContext::new().await;
+    let now = chrono::Utc::now();
+    let mut valid =
+        inventory_mitigation("192.0.2.40/32", "test-pop", now, MitigationStatus::Active);
+    valid.expires_at = now - chrono::Duration::seconds(10);
+    let mut corrupt = inventory_mitigation(
+        "192.0.2.41/32",
+        "test-pop",
+        now,
+        MitigationStatus::Escalated,
+    );
+    corrupt.expires_at = valid.expires_at;
+    for mitigation in [&valid, &corrupt] {
+        context.repo.insert_mitigation(mitigation).await.unwrap();
+    }
+    sqlx::query("UPDATE mitigations SET match_json = '{' WHERE mitigation_id = $1")
+        .bind(corrupt.mitigation_id)
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    let version: String = sqlx::query_scalar("SELECT version()")
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    let expired_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM mitigations WHERE pop = 'test-pop' AND status IN ('active', 'escalated') AND expires_at < NOW()",
+    )
+    .fetch_one(&context.pool)
+    .await
+    .unwrap();
+    eprintln!("PostgreSQL: {version}; owned expired rows: {expired_rows}; corrupt owned rows: 1");
+    assert_eq!(expired_rows, 2);
+    let result = context.repo.find_expired_mitigations().await;
+    assert!(
+        result.is_err(),
+        "strict expiry must reject the entire inventory, but returned {} of {expired_rows} owned rows",
+        result.as_ref().map_or(0, Vec::len)
+    );
+    assert!(
+        context
+            .repo
+            .expired_mitigation_inventory(Some("test-pop"))
+            .await
+            .is_err()
+    );
+    let speaker = std::sync::Arc::new(InventorySpeaker::new(false));
+    let state = prefixd::AppState::new(
+        common::test_settings(),
+        common::test_inventory(),
+        common::test_playbooks(),
+        context.repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    assert!(
+        prefixd::scheduler::ReconciliationLoop::new(
+            context.repo.clone(),
+            speaker.clone(),
+            30,
+            false
+        )
+        .with_app_state(state)
+        .reconcile()
+        .await
+        .is_err()
+    );
+    assert!(speaker.withdrawals.lock().unwrap().is_empty());
+    assert!(speaker.announcements.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_expiry_inventory_scopes_before_decoding_and_expires_owned_rows() {
+    use prefixd::{
+        AppState,
+        db::{MockRepository, RepositoryTrait},
+        domain::mitigation_rule,
+        scheduler::ReconciliationLoop,
+    };
+    use std::{collections::BTreeSet, sync::Arc};
+    let context = TestContext::new().await;
+    let now = chrono::Utc::now();
+    let mut owned =
+        inventory_mitigation("192.0.2.50/32", "test-pop", now, MitigationStatus::Active);
+    owned.expires_at = now - chrono::Duration::seconds(10);
+    let mut escalated = inventory_mitigation(
+        "192.0.2.51/32",
+        "test-pop",
+        now,
+        MitigationStatus::Escalated,
+    );
+    escalated.expires_at = owned.expires_at;
+    let mut foreign =
+        inventory_mitigation("192.0.2.52/32", "other-pop", now, MitigationStatus::Active);
+    foreign.expires_at = owned.expires_at;
+    let mut pending =
+        inventory_mitigation("192.0.2.53/32", "test-pop", now, MitigationStatus::Pending);
+    pending.expires_at = owned.expires_at;
+    let future = inventory_mitigation("192.0.2.54/32", "test-pop", now, MitigationStatus::Active);
+    let mut terminal =
+        inventory_mitigation("192.0.2.55/32", "test-pop", now, MitigationStatus::Expired);
+    terminal.expires_at = owned.expires_at;
+    let expected = BTreeSet::from([owned.mitigation_id, escalated.mitigation_id]);
+    let mut all_expected = expected.clone();
+    all_expected.insert(foreign.mitigation_id);
+    let mock: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+    for repo in [&context.repo, &mock] {
+        for mitigation in [&owned, &escalated, &foreign, &pending, &future, &terminal] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        for (pop, expected) in [(Some("test-pop"), &expected), (None, &all_expected)] {
+            let actual: BTreeSet<_> = repo
+                .expired_mitigation_inventory(pop)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|mitigation| mitigation.mitigation_id)
+                .collect();
+            assert_eq!(&actual, expected);
+        }
+        assert_eq!(repo.find_expired_mitigations().await.unwrap().len(), 3);
+    }
+    sqlx::query("UPDATE mitigations SET match_json = '{' WHERE mitigation_id = $1")
+        .bind(foreign.mitigation_id)
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        context
+            .repo
+            .expired_mitigation_inventory(Some("test-pop"))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    for pop in [Some("other-pop"), None] {
+        assert!(
+            context
+                .repo
+                .expired_mitigation_inventory(pop)
+                .await
+                .is_err()
+        );
+    }
+    let speaker = Arc::new(InventorySpeaker::new(false));
+    for mitigation in [&owned, &escalated, &foreign, &future] {
+        speaker
+            .inner
+            .announce(&mitigation_rule(mitigation))
+            .await
+            .unwrap();
+    }
+    let state = AppState::new(
+        common::test_settings(),
+        common::test_inventory(),
+        common::test_playbooks(),
+        context.repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let reconciler = ReconciliationLoop::new(context.repo.clone(), speaker.clone(), 30, false)
+        .with_app_state(state);
+    reconciler.reconcile().await.unwrap();
+    let withdrawals = speaker.withdrawals.lock().unwrap().clone();
+    assert_eq!(withdrawals.len(), 2);
+    assert_eq!(
+        withdrawals.into_iter().collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            mitigation_rule(&owned).nlri_hash(),
+            mitigation_rule(&escalated).nlri_hash()
+        ])
+    );
+    for mitigation in [&owned, &escalated] {
+        assert_eq!(
+            context
+                .repo
+                .get_mitigation(mitigation.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Expired
+        );
+    }
+    let foreign_status: String =
+        sqlx::query_scalar("SELECT status FROM mitigations WHERE mitigation_id = $1")
+            .bind(foreign.mitigation_id)
+            .fetch_one(&context.pool)
+            .await
+            .unwrap();
+    assert_eq!(foreign_status, "active");
+    assert_eq!(
+        context
+            .repo
+            .get_mitigation(pending.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MitigationStatus::Pending
+    );
+    assert_eq!(
+        speaker
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .map(|rule| rule.nlri_hash())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([
+            mitigation_rule(&foreign).nlri_hash(),
+            mitigation_rule(&future).nlri_hash()
+        ])
+    );
+    reconciler.reconcile().await.unwrap();
+    assert_eq!(speaker.withdrawals.lock().unwrap().len(), 2);
+    assert!(speaker.announcements.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_expiry_failure_keeps_pending_cleanup_and_peer_refresh() {
+    use prefixd::{
+        domain::{mitigation_rule, request_withdrawal},
+        scheduler::ReconciliationLoop,
+    };
+    use std::sync::{Arc, atomic::Ordering::Relaxed};
+    let context = TestContext::new().await;
+    let now = chrono::Utc::now();
+    let pending = inventory_mitigation("192.0.2.60/32", "test-pop", now, MitigationStatus::Active);
+    let mut corrupt = inventory_mitigation(
+        "192.0.2.61/32",
+        "other-pop",
+        now,
+        MitigationStatus::Escalated,
+    );
+    corrupt.expires_at = now - chrono::Duration::seconds(10);
+    for mitigation in [&pending, &corrupt] {
+        context.repo.insert_mitigation(mitigation).await.unwrap();
+    }
+    let pending = context
+        .repo
+        .get_mitigation(pending.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = request_withdrawal(
+        context.repo.as_ref(),
+        &pending,
+        false,
+        "operator",
+        "expiry-fixture",
+        "pending before expiry enumeration".into(),
+        true,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE mitigations SET match_json = '{' WHERE mitigation_id = $1")
+        .bind(corrupt.mitigation_id)
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    assert!(
+        context
+            .repo
+            .expired_mitigation_inventory(None)
+            .await
+            .is_err()
+    );
+    let speaker = Arc::new(InventorySpeaker::new(false));
+    for mitigation in [&pending, &corrupt] {
+        speaker
+            .inner
+            .announce(&mitigation_rule(mitigation))
+            .await
+            .unwrap();
+    }
+    // Standalone enumeration spans POPs; the pending operation validates only its owner POP.
+    let reconciler = ReconciliationLoop::new(context.repo.clone(), speaker.clone(), 30, false);
+    let error = reconciler.reconcile().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(&corrupt.mitigation_id.to_string())
+    );
+    assert_eq!(
+        context
+            .repo
+            .get_mitigation(pending.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MitigationStatus::Withdrawn
+    );
+    let completed: bool = sqlx::query_scalar(
+        "SELECT completed_at IS NOT NULL FROM withdrawal_requests WHERE operation_id = $1",
+    )
+    .bind(request.operation_id)
+    .fetch_one(&context.pool)
+    .await
+    .unwrap();
+    assert!(completed);
+    assert!(
+        context
+            .repo
+            .pending_withdrawals(None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        *speaker.withdrawals.lock().unwrap(),
+        vec![mitigation_rule(&pending).nlri_hash()]
+    );
+    assert_eq!(
+        speaker
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .map(|rule| rule.nlri_hash())
+            .collect::<Vec<_>>(),
+        vec![mitigation_rule(&corrupt).nlri_hash()]
+    );
+    assert!(speaker.announcements.lock().unwrap().is_empty());
+    assert_eq!(speaker.session_reads.load(Relaxed), 1);
+    assert!(reconciler.reconcile().await.is_err());
+    assert_eq!(speaker.withdrawals.lock().unwrap().len(), 1);
+    assert!(speaker.announcements.lock().unwrap().is_empty());
+    assert_eq!(speaker.session_reads.load(Relaxed), 2);
 }

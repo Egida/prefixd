@@ -406,6 +406,10 @@ impl RepositoryTrait for MockRepository {
     }
 
     async fn find_expired_mitigations(&self) -> Result<Vec<Mitigation>> {
+        self.expired_mitigation_inventory(None).await
+    }
+
+    async fn expired_mitigation_inventory(&self, pop: Option<&str>) -> Result<Vec<Mitigation>> {
         let now = Utc::now();
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
@@ -415,6 +419,7 @@ impl RepositoryTrait for MockRepository {
                     m.status,
                     MitigationStatus::Active | MitigationStatus::Escalated
                 ) && m.expires_at < now
+                    && pop.is_none_or(|pop| m.pop == pop)
             })
             .cloned()
             .collect())

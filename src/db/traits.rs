@@ -102,6 +102,13 @@ pub trait RepositoryTrait: Send + Sync {
     async fn count_active_by_pop(&self, pop: &str) -> Result<u32>;
     async fn count_active_global(&self) -> Result<u32>;
     async fn find_expired_mitigations(&self) -> Result<Vec<Mitigation>>;
+    /// Strict complete expiry inventory; `None` requests all POPs for standalone reconciliation.
+    /// Legacy enumeration cannot promise strict decoding or SQL-level POP isolation.
+    async fn expired_mitigation_inventory(&self, _pop: Option<&str>) -> Result<Vec<Mitigation>> {
+        Err(crate::error::PrefixdError::Internal(
+            "strict expiry inventory is unsupported by this repository".into(),
+        ))
+    }
     /// Complete owner inventory, including pending rows, without a timestamp cursor.
     async fn active_mitigations_for_pop(&self, pop: &str) -> Result<Vec<Mitigation>>;
     /// Strict complete owner inventory; `None` requests all POPs for standalone reconciliation.

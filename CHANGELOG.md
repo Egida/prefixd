@@ -34,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Isolate expiry inventory to the controller's POP before decoding and fail on
+  corrupt owned rows instead of silently skipping them. Durable withdrawal
+  retries and independent reconciliation stages continue after enumeration fails.
+
 - Require complete dual-family GoBGP local read-back. Received paths are excluded;
   malformed or unsupported local rules and stream failures fail observation.
   Bound full inventory and peer streams to 30 seconds, and reject lossy action
