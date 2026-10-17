@@ -154,7 +154,7 @@ impl ReconciliationLoop {
             .map(|request| (request.mitigation_id, Some(request)))
             .collect();
         let mut failure = None;
-        match self.repo.find_expired_mitigations().await {
+        match self.repo.expired_mitigation_inventory(pop).await {
             Ok(expired) => {
                 for mitigation in expired {
                     if pop.is_none_or(|pop| mitigation.pop == pop)
