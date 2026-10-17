@@ -164,7 +164,7 @@ Target: Validated with real routers, stable API, production-proven. Operators tr
 
 ### Dependency Security Cadence
 
-- [ ] Monthly GoBGP baseline bump policy (track upstream releases, especially parser hardening like v3.35.0)
+- [ ] Review and deliberately upgrade pinned releases for every maintained BGP backend, including GoBGP and rustbgpd, alongside Rust/frontend dependencies
 - [x] CVE gate in CI (cargo audit + bun audit gate Docker publishing; fail build on known vulnerabilities)
 - [x] SBOM generation (CycloneDX JSON, published as release artifact on version tags)
 - [x] FlowSpec NLRI parser fuzz/regression tests (proptest in CI + cargo-fuzz for offline coverage)
@@ -233,38 +233,77 @@ Target: Quality-of-life for operators during active incidents. These are the fea
 
 ---
 
-## Native BGP Speaker (rustbgpd)
+## Pluggable BGP Speakers (rustbgpd preferred)
 
-Replace the GoBGP container dependency with [rustbgpd](https://github.com/lance0/rustbgpd) crates embedded directly into the prefixd binary. Eliminates the separate process, gRPC client overhead, proto compilation, and container orchestration. prefixd becomes a single binary that speaks BGP natively.
+Use [rustbgpd](https://github.com/lance0/rustbgpd) through its controller gRPC
+API, keeping GoBGP as a supported alternative. Peer lifecycle stays in the
+speaker daemon. [ADR 025](docs/adr/025-pluggable-speaker-backends.md) records the
+support decision. It defines the
+capability boundary, evidence limits, and delivery order.
 
-### Phase 1: Embedded Announcer
+### Phase 1: Selectable rustbgpd Adapter
 
-- [ ] Add `rustbgpd-wire`, `rustbgpd-fsm`, `rustbgpd-transport`, `rustbgpd-rib` as workspace dependencies
-- [ ] Implement `RustBgpdAnnouncer` behind the existing `FlowSpecAnnouncer` trait (announce, withdraw, list_active, session_status)
-- [ ] Peer lifecycle managed by prefixd config (ASN, neighbor address, AFI-SAFI, timers)
-- [ ] Feature-flag the announcer backend (`--features gobgp` vs `--features native-bgp`, default native)
+- [ ] Vendor the controller proto behind `bgp-rustbgpd`
+- [ ] Implement and validate `RustBgpdAnnouncer` for announce, withdraw, retained local-rule read-back, and peer status
+- [ ] Add compatible `sidecar`, `gobgp`, `rustbgpd`, and `mock` selection; preserve existing defaults until qualification
+- [ ] Retry failed TTL withdrawals before marking mitigations expired
+- [ ] Complete UDS/client-certificate mTLS and rustbgpd deployment wiring
 
-### Phase 2: Reconciliation + RIB Direct Access
+### Phase 2: Qualification and Default Migration
 
-- [ ] Reconciliation loop reads the embedded RIB directly instead of querying GoBGP via gRPC
-- [ ] Expose BGP session state in health detail endpoint from the embedded FSM
-- [ ] Map existing `gobgp.conf` semantics to rustbgpd peer config (migration path for existing deployments)
+- [ ] Verify real-daemon TTL withdrawal and restart re-injection
+- [ ] Re-run FRR and Juniper interop against rustbgpd; qualify Arista/Cisco independently
+- [ ] Re-run bounded chaos/load checks and attribute evidence to the tested backend
+- [ ] Publish migration/rollback instructions and an explicit version pin/upgrade policy
+- [ ] Switch default deployment to rustbgpd after these gates pass; retain GoBGP's adapter, proto, configuration, and CI
 
-### Phase 3: Remove GoBGP
+### Phase 3: Other Daemons
 
-- [ ] Remove `proto/` directory and `build.rs` proto compilation
-- [ ] Remove tonic/prost GoBGP client dependencies
-- [ ] Remove `gobgp` service from `docker-compose.yml`
-- [ ] Update all lab topologies (containerlab configs peer directly with prefixd)
-- [ ] Update deployment docs, vendor configs, and troubleshooting guides
+- [ ] Split required writing from optional RIB reading and peer observation; declare capabilities honestly
+- [ ] Persist announcement confirmations and retryable cleanup in a durable ledger before write-only adapters
+- [ ] Expose backend and capabilities through compatible health, CLI, dashboard, metrics and Grafana surfaces
+- [ ] Define a generic HTTP shim; qualify ExaBGP or another API as an independent transport proof
+- [ ] Require shared conformance, per-backend CI, maintainer ownership, and documented qualification
 
-### Phase 4: Validation
+Controller TTL enforcement requires running reconciliation. A separate speaker
+can keep advertising after prefixd stops; crash cleanup needs its own explicit
+lease or lifecycle design. Successful RPCs and committed advertisements do not
+prove that a router installed or enforced a rule.
 
-- [ ] Re-run Juniper cJunosEvolved interop (announce, rate-limit, withdraw, TTL expiry)
-- [ ] Re-run FRR containerlab interop
-- [ ] Arista EOS validation (if hardware available)
-- [ ] Chaos and load test suites pass against embedded speaker
-- [ ] Migration guide for existing GoBGP deployments
+---
+
+## Framework Migration: loco-rs (ADR 024)
+
+Adopt [loco-rs](https://loco.rs) as the target framework and migrate **in stages** — never a big-bang rewrite. The MSRV bump is accepted; the parity decisions (auth, WebSocket, metrics, config hot reload, `prefixdctl`, scheduler) are recorded in [ADR 024](docs/adr/024-loco-staged-migration.md).
+
+### Phase 0: Prerequisites
+
+- [ ] Raise `rust-version` to the verified MSRV of the chosen loco release in `Cargo.toml`, Dockerfile, CONTRIBUTING and CI docs
+- [ ] Pin an exact `loco-rs` version and write down the upgrade cadence
+
+### Phase 1: loco shell (zero behaviour change)
+
+- [ ] loco app boot via `Hooks`, `AppContext`, `cargo loco` CLI, `config/{env}.yaml`
+- [ ] Mount the existing `axum::Router` through `after_routes`; the full test suite stays green
+
+### Phase 2: Data layer, resource by resource
+
+- [ ] SeaORM entities and its migrations per resource, keeping `Repository` as the transitional seam
+- [ ] Replace `MockRepository` with loco's test fixtures where they actually fit
+
+### Phase 3: Handlers → controllers
+
+- [ ] Convert per resource, preserving utoipa annotations on the new signatures
+
+### Phase 4: Batteries
+
+- [ ] Move alert delivery onto loco's Postgres-backed job queue (retry + dead-letter)
+- [ ] Adopt background workers/tasks where they replace hand-rolled `tokio::spawn` loops
+
+### Phase 5: Cleanup
+
+- [ ] Retire the transitional seams; re-decide OpenAPI tooling; fold bespoke middleware into loco's stack where it is a real simplification
+
 
 ---
 
