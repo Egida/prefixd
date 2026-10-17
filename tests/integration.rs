@@ -104,6 +104,7 @@ async fn test_ambiguous_withdrawals_retry_without_reannouncement_or_consuming_ne
                 "system",
                 "scheduler",
                 "TTL expired".into(),
+                true,
             )
             .await
             .unwrap();
@@ -701,6 +702,7 @@ async fn test_foreign_pop_cannot_delete_local_rule_or_receive_local_repair() {
         "operator",
         "remote-operator",
         "remote cleanup".into(),
+        true,
     )
     .await
     .unwrap();
@@ -720,6 +722,132 @@ async fn test_foreign_pop_cannot_delete_local_rule_or_receive_local_repair() {
             .unwrap()
             .status,
         MitigationStatus::Active
+    );
+}
+
+#[tokio::test]
+async fn test_canonical_owner_preflight_preserves_existing_rule_and_reuses_detector_owner() {
+    use prefixd::{
+        bgp::FlowSpecAnnouncer,
+        domain::{
+            ActionParams, ActionType, MatchCriteria, Mitigation, MitigationIntent, mitigation_rule,
+        },
+    };
+    let repo = Arc::new(MockRepository::new());
+    let speaker = Arc::new(MockAnnouncer::new());
+    let mut existing = Mitigation::from_intent(
+        MitigationIntent {
+            event_id: uuid::Uuid::new_v4(),
+            customer_id: None,
+            service_id: None,
+            pop: "test1".into(),
+            match_criteria: MatchCriteria {
+                dst_prefix: "203.0.113.10/32".into(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+            },
+            action_type: ActionType::Discard,
+            action_params: ActionParams { rate_bps: None },
+            ttl_seconds: 30,
+            reason: "original".into(),
+        },
+        "203.0.113.10".into(),
+        AttackVector::UdpFlood,
+    );
+    existing.activate();
+    existing.scope_hash = "historical raw scope hash".into();
+    repo.insert_mitigation(&existing).await.unwrap();
+    speaker.announce(&mitigation_rule(&existing)).await.unwrap();
+    let mut settings = test_settings();
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let app = create_test_router(state);
+    let response = app.clone().oneshot(Request::builder().method("POST").uri("/v1/mitigations")
+        .header("content-type", "application/json").body(Body::from(serde_json::json!({
+            "victim_ip":"203.0.113.10", "protocol":"udp", "dst_ports":[53], "action":"police", "rate_bps":800,
+            "ttl_seconds":600, "reason":"duplicate should not replace"
+        }).to_string())).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        repo.get_mitigation(existing.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .expires_at,
+        existing.expires_at
+    );
+    let event = serde_json::json!({"event_id":"reuse-canonical", "timestamp":chrono::Utc::now(), "source":"test", "victim_ip":"203.0.113.10", "vector":"udp_flood", "pps":50000, "top_dst_ports":[53], "confidence":0.9});
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(response["status"], "extended");
+    assert_eq!(
+        response["mitigation_id"],
+        existing.mitigation_id.to_string()
+    );
+    let extended = repo
+        .get_mitigation(existing.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(extended.expires_at > existing.expires_at);
+    assert_eq!(extended.scope_hash, existing.scope_hash);
+    assert_eq!(extended.action_type, ActionType::Discard);
+    assert_eq!(
+        speaker.list_active().await.unwrap()[0].actions[0].action_type,
+        ActionType::Discard
+    );
+    let mut duplicate = extended.clone();
+    duplicate.mitigation_id = uuid::Uuid::new_v4();
+    duplicate.scope_hash = "second historical owner".into();
+    duplicate.action_type = ActionType::Police;
+    duplicate.action_params.rate_bps = Some(800);
+    repo.insert_mitigation(&duplicate).await.unwrap();
+    let mut event = event;
+    event["event_id"] = "ambiguous-canonical".into();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(
+        repo.find_ban_event_by_external_id("test", "ambiguous-canonical")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        speaker.list_active().await.unwrap()[0].actions[0].action_type,
+        ActionType::Discard
     );
 }
 

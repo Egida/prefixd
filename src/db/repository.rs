@@ -194,8 +194,8 @@ impl RepositoryTrait for Repository {
         sqlx::query(
             r#"INSERT INTO withdrawal_requests (
                 operation_id, mitigation_id, pop, nlri_hash, rule_json, mitigation_updated_at,
-                terminal_status, actor_type, actor, reason, requested_at
-            ) SELECT $1, mitigation_id, pop, $4, $5, updated_at, $7, $8, $9, $10, $11
+                terminal_status, actor_type, actor, reason, requested_at, speaker_delete_required
+            ) SELECT $1, mitigation_id, pop, $4, $5, updated_at, $7, $8, $9, $10, $11, $12
               FROM mitigations WHERE mitigation_id = $2 AND pop = $3 AND updated_at = $6
                 AND status IN ('pending', 'active', 'escalated')
               ON CONFLICT (mitigation_id) DO NOTHING"#,
@@ -211,6 +211,7 @@ impl RepositoryTrait for Repository {
         .bind(&request.actor)
         .bind(&request.reason)
         .bind(request.requested_at)
+        .bind(request.speaker_delete_required)
         .execute(&self.pool)
         .await?;
         sqlx::query_as::<_, WithdrawalRequest>(
