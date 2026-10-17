@@ -9,9 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Refresh the October audit baseline: `rustls` 0.23.46 and `quinn-proto` 0.11.18 address newly reported lockfile advisories; Next.js 16.3.8, Undici 7.29.1, sharp and source-map-js updates address current frontend audit findings. Existing narrow audit exceptions remain explicit.
-- **Rust dependency advisories cleared.** `h2` 0.4.13 → 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames) and `rustls` 0.23.40 → 0.23.45 (RUSTSEC-2026-0285, TLS 1.3 handshake messages accepted across encryption level boundaries); `chacha20` 0.10.0 → 0.10.2 replaces a yanked release. The mTLS setup no longer depends on the unmaintained `rustls-pemfile` (RUSTSEC-2025-0134) — certificate, CA, and key loading now use `rustls-pki-types` — so its CI ignore was removed. `cargo audit` reports only two advisories, both with no upstream fix and neither reachable: `rsa` (present in `Cargo.lock` via sqlx's never-compiled mysql driver) and `rand` custom-logger unsoundness (transitive, no custom logger installed).
-- **Frontend dependency advisories cleared.** `next` 16.3.0 → 16.3.6 (two critical: unauthenticated RCE on Windows-hosted servers, and AVIF image-optimization RCE), `js-yaml` 4.3.1 → 4.3.2, `vitest` 4.1.10 → 4.1.11, `nanoid` 3.3.17 → 3.3.19; `sharp` and `baseline-browser-mapping` come along with the `next` bump. `bun audit` reports no vulnerabilities.
+- Refresh the October audit baseline: `rustls` 0.23.46, `quinn-proto` 0.11.18, `h2` 0.4.19 and non-yanked `chacha20` 0.10.2 address current lockfile findings. Patch both `rand` branches to 0.8.6/0.9.3 and remove the now-obsolete RUSTSEC-2026-0097 exception. The only remaining vulnerability exception is `rsa` (RUSTSEC-2023-0071), present through sqlx's optional, uncompiled MySQL driver with no patched release. The unmaintained YAML dependency warning remains visible and tracked separately.
+- Replace unmaintained `rustls-pemfile` with `rustls-pki-types` for certificate, CA and private-key loading; remove its audit exception while preserving mandatory mTLS client verification.
+- Refresh Next.js to 16.3.8, Undici to 7.29.1, and affected frontend transitive dependencies including sharp, source-map-js, js-yaml, Vitest and nanoid. `bun audit` reports no vulnerabilities.
 
 ### Added
 
