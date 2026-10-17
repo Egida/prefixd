@@ -2,7 +2,9 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use super::{FlowSpecAnnouncer, PeerStatus, SessionState};
+use super::{
+    FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter, PeerObserver, PeerStatus, SessionState,
+};
 use crate::domain::FlowSpecRule;
 use crate::error::Result;
 
@@ -37,8 +39,20 @@ impl MockAnnouncer {
     }
 }
 
-#[async_trait]
 impl FlowSpecAnnouncer for MockAnnouncer {
+    fn backend(&self) -> &'static str {
+        "mock"
+    }
+    fn reader(&self) -> Option<&dyn FlowSpecReader> {
+        Some(self)
+    }
+    fn peer_observer(&self) -> Option<&dyn PeerObserver> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl FlowSpecWriter for MockAnnouncer {
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
         let mut rules = self.rules.write().await;
         let hash = rule.nlri_hash();
@@ -50,7 +64,6 @@ impl FlowSpecAnnouncer for MockAnnouncer {
         tracing::debug!(nlri_hash = %hash, "mock: announced flowspec rule");
         Ok(())
     }
-
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
         let mut rules = self.rules.write().await;
         let hash = rule.nlri_hash();
@@ -62,11 +75,15 @@ impl FlowSpecAnnouncer for MockAnnouncer {
         }
         Ok(())
     }
-
+}
+#[async_trait]
+impl FlowSpecReader for MockAnnouncer {
     async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
         Ok(self.rules.read().await.clone())
     }
-
+}
+#[async_trait]
+impl PeerObserver for MockAnnouncer {
     async fn session_status(&self) -> Result<Vec<PeerStatus>> {
         Ok(self.peers.clone())
     }

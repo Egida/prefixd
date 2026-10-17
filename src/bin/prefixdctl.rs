@@ -184,6 +184,27 @@ struct HealthResponse {
     active_mitigations: u32,
     database: String,
     gobgp: ComponentHealth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    speaker: Option<SpeakerHealth>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct SpeakerHealth {
+    backend: String,
+    capabilities: prefixd::bgp::SpeakerCapabilities,
+}
+
+impl HealthResponse {
+    fn require_peer_observation(&self) -> Result<(), String> {
+        match self.gobgp.status.as_str() {
+            "connected" => Ok(()),
+            "unsupported" => Err("BGP peer observation is unsupported by this speaker".into()),
+            _ => Err(format!(
+                "BGP peer observation failed: {}",
+                self.gobgp.error.as_deref().unwrap_or(&self.gobgp.status)
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -385,6 +406,12 @@ async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String>
         OutputFormat::Table => {
             println!("Status: {}", health.status);
             println!("Active Mitigations: {}", health.active_mitigations);
+            if let Some(speaker) = &health.speaker {
+                println!("Speaker: {}", speaker.backend);
+                if !speaker.capabilities.rule_reader {
+                    println!("Rule observation: unsupported by this speaker");
+                }
+            }
             println!();
             println!("Components:");
             let db_indicator = if health.database == "connected" {
@@ -393,22 +420,27 @@ async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String>
                 "○"
             };
             println!("  {} Database: {}", db_indicator, health.database);
-            let gobgp_indicator = if health.gobgp.status == "connected" {
+            let peer_indicator = if health.gobgp.status == "connected" {
                 "●"
             } else {
                 "○"
             };
             if let Some(ref err) = health.gobgp.error {
                 println!(
-                    "  {} GoBGP: {} ({})",
-                    gobgp_indicator, health.gobgp.status, err
+                    "  {} Peer observation: {} ({})",
+                    peer_indicator, health.gobgp.status, err
                 );
             } else {
-                println!("  {} GoBGP: {}", gobgp_indicator, health.gobgp.status);
+                println!(
+                    "  {} Peer observation: {}",
+                    peer_indicator, health.gobgp.status
+                );
             }
             println!();
             println!("BGP Sessions:");
-            if health.bgp_sessions.is_empty() {
+            if let Err(error) = health.require_peer_observation() {
+                println!("  {error}");
+            } else if health.bgp_sessions.is_empty() {
                 println!("  (none configured)");
             } else {
                 for (peer, state) in &health.bgp_sessions {
@@ -594,6 +626,7 @@ async fn cmd_safelist(
 
 async fn cmd_peers(client: &Client, format: OutputFormat) -> Result<(), String> {
     let health: HealthResponse = client.get("/v1/health/detail").await?;
+    health.require_peer_observation()?;
 
     match format {
         OutputFormat::Json => {
@@ -914,4 +947,51 @@ async fn cmd_migrations(format: OutputFormat) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_commands_distinguish_observation_results_and_accept_older_health() {
+        for (status, supported) in [
+            ("connected", true),
+            ("unsupported", false),
+            ("error", false),
+        ] {
+            let health: HealthResponse = serde_json::from_value(serde_json::json!({
+                "status": "healthy", "bgp_sessions": {}, "active_mitigations": 0,
+                "database": "connected", "gobgp": { "status": status }
+            }))
+            .unwrap();
+            assert!(health.speaker.is_none());
+            assert_eq!(health.require_peer_observation().is_ok(), supported);
+            if status == "unsupported" {
+                assert!(
+                    health
+                        .require_peer_observation()
+                        .unwrap_err()
+                        .contains("unsupported")
+                );
+            }
+            // Successful JSON output remains the original peer-name/state map.
+            assert_eq!(
+                serde_json::to_value(&health.bgp_sessions).unwrap(),
+                serde_json::json!({})
+            );
+        }
+        let health: HealthResponse = serde_json::from_value(serde_json::json!({
+            "status": "degraded", "bgp_sessions": {}, "active_mitigations": 0,
+            "database": "connected", "gobgp": { "status": "error", "error": "RPC unavailable" },
+            "speaker": { "backend": "rustbgpd", "capabilities": { "rule_reader": true, "peer_observer": true } }
+        })).unwrap();
+        assert_eq!(health.speaker.as_ref().unwrap().backend, "rustbgpd");
+        assert!(
+            health
+                .require_peer_observation()
+                .unwrap_err()
+                .contains("RPC unavailable")
+        );
+    }
 }

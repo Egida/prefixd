@@ -7,6 +7,7 @@ use prefixd::{
     domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule},
 };
 
+use prefixd::bgp::{FlowSpecReader, FlowSpecWriter, PeerObserver};
 fn rule() -> FlowSpecRule {
     FlowSpecRule::new(
         FlowSpecNlri {
@@ -131,18 +132,36 @@ struct PollingSpeaker {
     observed: tokio::sync::Notify,
 }
 
-#[async_trait::async_trait]
 impl FlowSpecAnnouncer for PollingSpeaker {
+    fn backend(&self) -> &'static str {
+        "rustbgpd"
+    }
+    fn reader(&self) -> Option<&dyn FlowSpecReader> {
+        Some(self)
+    }
+    fn peer_observer(&self) -> Option<&dyn PeerObserver> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl FlowSpecWriter for PollingSpeaker {
     async fn announce(&self, rule: &FlowSpecRule) -> prefixd::error::Result<()> {
         self.inner.announce(rule).await
     }
     async fn withdraw(&self, rule: &FlowSpecRule) -> prefixd::error::Result<()> {
         self.inner.withdraw(rule).await
     }
+}
+#[async_trait::async_trait]
+impl FlowSpecReader for PollingSpeaker {
     async fn list_active(&self) -> prefixd::error::Result<Vec<FlowSpecRule>> {
         let _gate = self.inventory_gate.read().await;
         self.inner.list_active().await
     }
+}
+#[async_trait::async_trait]
+impl PeerObserver for PollingSpeaker {
     async fn session_status(&self) -> prefixd::error::Result<Vec<prefixd::bgp::PeerStatus>> {
         let result = self.inner.session_status().await;
         self.observed.notify_one();

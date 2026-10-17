@@ -111,7 +111,14 @@ export interface HealthResponse {
     error?: string
   }
   auth_mode: string
-  // Computed from gobgp.status for UI convenience
+  speaker?: {
+    backend: string
+    capabilities: {
+      rule_reader: boolean
+      peer_observer: boolean
+    }
+  }
+  // True only after successful observation of at least one peer, all established.
   bgp_session_up: boolean
 }
 
@@ -176,7 +183,7 @@ export async function getHealthDetail(): Promise<HealthResponse> {
   const sessions = Object.values(data.bgp_sessions ?? {})
   return {
     ...data,
-    bgp_session_up: sessions.length > 0 && sessions.every((s) => s === "established"),
+    bgp_session_up: data.gobgp.status === "connected" && sessions.length > 0 && sessions.every((s) => s === "established"),
   }
 }
 

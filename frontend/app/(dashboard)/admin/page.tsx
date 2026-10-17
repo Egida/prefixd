@@ -371,7 +371,14 @@ export default function AdminPage() {
                     <CardTitle className="text-foreground text-sm">BGP Peers</CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-3">
-                    {Object.keys(health.bgp_sessions).length > 0 ? (
+                    {health.speaker?.capabilities.rule_reader === false && (
+                      <p className="text-sm text-muted-foreground">Rule observation is unsupported by this speaker</p>
+                    )}
+                    {health.gobgp.status === "unsupported" ? (
+                      <p className="text-sm text-muted-foreground">BGP peer observation is unsupported by this speaker</p>
+                    ) : health.gobgp.status !== "connected" ? (
+                      <p className="text-sm text-destructive" role="alert">BGP peer observation failed{health.gobgp.error ? `: ${health.gobgp.error}` : ""}</p>
+                    ) : Object.keys(health.bgp_sessions).length > 0 ? (
                       <div className="space-y-2">
                         {Object.entries(health.bgp_sessions).map(([peer, state]) => (
                           <div key={peer} className="flex items-center justify-between">
@@ -385,9 +392,6 @@ export default function AdminPage() {
                     ) : (
                       <p className="text-sm text-muted-foreground">No BGP peers configured</p>
                     )}
-                    <p className="text-xs text-muted-foreground text-pretty">
-                      FlowSpec announcements are {health.bgp_session_up ? "active" : "paused"}
-                    </p>
                   </CardContent>
                 </Card>
               ) : null}

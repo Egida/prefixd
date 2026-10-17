@@ -7,7 +7,7 @@
 //!   cargo test --test integration_gobgp -- --ignored --test-threads=1
 //! Set PREFIXD_GOBGP_TEST_ENDPOINT for an isolated non-default listener.
 
-use prefixd::bgp::{FlowSpecAnnouncer, GoBgpAnnouncer};
+use prefixd::bgp::{FlowSpecReader, FlowSpecWriter, GoBgpAnnouncer, PeerObserver};
 use prefixd::domain::{ActionType, FlowSpecAction, FlowSpecNlri, FlowSpecRule};
 use std::time::Duration;
 

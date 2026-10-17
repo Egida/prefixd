@@ -10,7 +10,14 @@ export function BgpSessionStatus() {
   const { data: pops } = usePops()
   const reducedMotion = useReducedMotion()
 
-  const isUp = health?.bgp_session_up ?? false
+  const status = error ? "ERROR"
+    : !health ? "LOADING"
+    : health.gobgp.status === "unsupported" ? "UNSUPPORTED"
+    : health.gobgp.status !== "connected" ? "ERROR"
+    : Object.keys(health.bgp_sessions).length === 0 ? "NO PEERS"
+    : health.bgp_session_up ? "UP" : "DOWN"
+  const isUp = status === "UP"
+  const isError = status === "ERROR" || status === "DOWN"
   const shouldAnimate = isUp && !reducedMotion
 
   return (
@@ -25,11 +32,11 @@ export function BgpSessionStatus() {
               transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
             />
           ) : (
-            <span className={cn("size-1.5", isUp ? "bg-primary" : "bg-destructive")} />
+            <span className={cn("size-1.5", isUp ? "bg-primary" : isError ? "bg-destructive" : "bg-muted-foreground")} />
           )}
           <span className="font-mono text-xs text-foreground">BGP</span>
-          <span className={cn("text-[10px] font-mono uppercase", isUp ? "text-primary" : "text-destructive")}>
-            {isUp ? "UP" : error ? "ERROR" : "DOWN"}
+          <span className={cn("text-[10px] font-mono uppercase", isUp ? "text-primary" : isError ? "text-destructive" : "text-muted-foreground")}>
+            {status}
           </span>
         </div>
 

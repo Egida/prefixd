@@ -1,4 +1,7 @@
-use super::{FlowSpecAnnouncer, PeerStatus, SessionState, rustbgpd_pb as pb};
+use super::{
+    FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter, PeerObserver, PeerStatus, SessionState,
+    rustbgpd_pb as pb,
+};
 use crate::{
     config::RustBgpdConfig,
     domain::{ActionType, FlowSpecAction, FlowSpecNlri, FlowSpecRule},
@@ -274,8 +277,20 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
     Ok(rule)
 }
 
-#[async_trait]
 impl FlowSpecAnnouncer for RustBgpdAnnouncer {
+    fn backend(&self) -> &'static str {
+        "rustbgpd"
+    }
+    fn reader(&self) -> Option<&dyn FlowSpecReader> {
+        Some(self)
+    }
+    fn peer_observer(&self) -> Option<&dyn PeerObserver> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl FlowSpecWriter for RustBgpdAnnouncer {
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
         let payload = encode(rule)?;
         let response = self
@@ -329,6 +344,9 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
             _ => Err(invalid("unsupported rustbgpd deletion outcome")),
         }
     }
+}
+#[async_trait]
+impl FlowSpecReader for RustBgpdAnnouncer {
     async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
         let mut rules = vec![];
         for family in [3, 4] {
@@ -358,6 +376,9 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
         }
         Ok(rules)
     }
+}
+#[async_trait]
+impl PeerObserver for RustBgpdAnnouncer {
     async fn session_status(&self) -> Result<Vec<PeerStatus>> {
         let response = self
             .rpc("ListNeighbors", || async {

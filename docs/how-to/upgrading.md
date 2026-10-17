@@ -7,6 +7,22 @@
 - **Mitigations survive restarts.** Active mitigations are stored in PostgreSQL and re-announced by the reconciliation loop after startup.
 - **Always back up the database** before upgrading.
 
+## Speaker capability metadata
+
+Health detail now includes additive `speaker.backend` and
+`speaker.capabilities.{rule_reader,peer_observer}` metadata. Keep accepting the
+legacy `gobgp` and `bgp_sessions` fields; the component name does not select the
+backend. Treat `gobgp.status: unsupported` as unavailable optional observation,
+`error` as a failed supported read, and `connected` with an empty peer map as a
+successful read with no peers. Updated CLI/dashboard clients accept responses
+from older daemons that omit `speaker`.
+
+All selectable adapters still support both observations, and defaults are
+unchanged. External Rust implementations must implement `FlowSpecWriter` and
+`FlowSpecAnnouncer`, then opt into `FlowSpecReader` and `PeerObserver` through the
+facade accessors where supported. Import those traits for concrete adapter calls.
+A production write-only backend remains gated on a durable announcement ledger.
+
 ## Pending withdrawals and rollback
 
 Migration 013 adds durable withdrawal requests. A failed or uncertain deletion

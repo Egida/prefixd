@@ -1,3 +1,4 @@
+use prefixd::bgp::{FlowSpecReader, FlowSpecWriter, PeerObserver};
 mod common;
 
 use axum::body::Body;
@@ -563,7 +564,7 @@ async fn test_timeseries_non_hour_bucket_alignment() {
 #[tokio::test]
 async fn test_ttl_expiry() {
     use chrono::{Duration, Utc};
-    use prefixd::bgp::{FlowSpecAnnouncer, MockAnnouncer};
+    use prefixd::bgp::MockAnnouncer;
     use prefixd::domain::{
         ActionParams, ActionType, AttackVector, FlowSpecAction, FlowSpecNlri, FlowSpecRule,
         MatchCriteria, Mitigation, MitigationStatus,
@@ -1166,8 +1167,20 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
         deletes: AtomicUsize,
         adds: AtomicUsize,
     }
-    #[async_trait::async_trait]
     impl FlowSpecAnnouncer for Speaker {
+        fn backend(&self) -> &'static str {
+            "mock"
+        }
+        fn reader(&self) -> Option<&dyn FlowSpecReader> {
+            Some(self)
+        }
+        fn peer_observer(&self) -> Option<&dyn PeerObserver> {
+            Some(self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for Speaker {
         async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
             self.adds.fetch_add(1, SeqCst);
             self.inner.announce(rule).await
@@ -1182,9 +1195,15 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
             }
             Ok(())
         }
+    }
+    #[async_trait::async_trait]
+    impl FlowSpecReader for Speaker {
         async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
             self.inner.list_active().await
         }
+    }
+    #[async_trait::async_trait]
+    impl PeerObserver for Speaker {
         async fn session_status(&self) -> Result<Vec<PeerStatus>> {
             Ok(vec![])
         }
@@ -1635,7 +1654,15 @@ async fn test_legacy_canonical_owners_finish_ttl_cleanup_after_last_live_owner()
     .with_app_state(context.state.clone());
     assert!(reconciler.reconcile().await.is_err());
     assert_eq!(
-        context.state.announcer.list_active().await.unwrap().len(),
+        context
+            .state
+            .announcer
+            .reader()
+            .unwrap()
+            .list_active()
+            .await
+            .unwrap()
+            .len(),
         1
     );
     assert!(
@@ -1666,6 +1693,8 @@ async fn test_legacy_canonical_owners_finish_ttl_cleanup_after_last_live_owner()
         context
             .state
             .announcer
+            .reader()
+            .unwrap()
             .list_active()
             .await
             .unwrap()
@@ -2011,13 +2040,24 @@ impl InventorySpeaker {
     }
 }
 
-#[async_trait::async_trait]
 impl prefixd::bgp::FlowSpecAnnouncer for InventorySpeaker {
+    fn backend(&self) -> &'static str {
+        "mock"
+    }
+    fn reader(&self) -> Option<&dyn prefixd::bgp::FlowSpecReader> {
+        Some(self)
+    }
+    fn peer_observer(&self) -> Option<&dyn prefixd::bgp::PeerObserver> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl prefixd::bgp::FlowSpecWriter for InventorySpeaker {
     async fn announce(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
         self.announcements.lock().unwrap().push(rule.nlri_hash());
         self.inner.announce(rule).await
     }
-
     async fn withdraw(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
         self.withdrawals.lock().unwrap().push(rule.nlri_hash());
         if self.reject_withdrawals {
@@ -2027,11 +2067,15 @@ impl prefixd::bgp::FlowSpecAnnouncer for InventorySpeaker {
         }
         self.inner.withdraw(rule).await
     }
-
+}
+#[async_trait::async_trait]
+impl prefixd::bgp::FlowSpecReader for InventorySpeaker {
     async fn list_active(&self) -> prefixd::error::Result<Vec<prefixd::domain::FlowSpecRule>> {
         self.inner.list_active().await
     }
-
+}
+#[async_trait::async_trait]
+impl prefixd::bgp::PeerObserver for InventorySpeaker {
     async fn session_status(&self) -> prefixd::error::Result<Vec<prefixd::bgp::PeerStatus>> {
         self.inner.session_status().await
     }
@@ -2076,7 +2120,6 @@ async fn test_reconciliation_recovers_every_tied_timestamp_once() {
     use chrono::Timelike;
     use prefixd::{
         AppState,
-        bgp::FlowSpecAnnouncer,
         domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule, mitigation_rule},
         scheduler::ReconciliationLoop,
     };

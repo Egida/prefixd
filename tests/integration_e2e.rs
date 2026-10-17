@@ -21,7 +21,7 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use common::E2ETestContext;
-use prefixd::bgp::FlowSpecAnnouncer;
+use prefixd::bgp::{FlowSpecReader, FlowSpecWriter};
 use prefixd::domain::MitigationStatus;
 
 /// Test: POST event → mitigation created → FlowSpec appears in GoBGP RIB

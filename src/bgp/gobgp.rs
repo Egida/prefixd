@@ -14,7 +14,9 @@ use super::apipb::{
     TrafficRateExtended, go_bgp_service_client::GoBgpServiceClient,
 };
 use super::apipb::{attribute, extended_community, flow_spec_rule, nlri};
-use super::{FlowSpecAnnouncer, PeerStatus, SessionState};
+use super::{
+    FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter, PeerObserver, PeerStatus, SessionState,
+};
 use crate::domain::{ActionType, FlowSpecAction, FlowSpecNlri, FlowSpecRule, IpVersion};
 use crate::error::{PrefixdError, Result};
 
@@ -374,8 +376,20 @@ impl GoBgpAnnouncer {
     }
 }
 
-#[async_trait]
 impl FlowSpecAnnouncer for GoBgpAnnouncer {
+    fn backend(&self) -> &'static str {
+        "gobgp"
+    }
+    fn reader(&self) -> Option<&dyn FlowSpecReader> {
+        Some(self)
+    }
+    fn peer_observer(&self) -> Option<&dyn PeerObserver> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl FlowSpecWriter for GoBgpAnnouncer {
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
         let path = self.build_flowspec_path(rule)?;
         let nlri_hash = rule.nlri_hash();
@@ -410,7 +424,6 @@ impl FlowSpecAnnouncer for GoBgpAnnouncer {
 
         Ok(())
     }
-
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
         let path = self.build_flowspec_path(rule)?;
         let is_v6 = rule.nlri.ip_version() == IpVersion::V6;
@@ -453,7 +466,9 @@ impl FlowSpecAnnouncer for GoBgpAnnouncer {
 
         Ok(())
     }
-
+}
+#[async_trait]
+impl FlowSpecReader for GoBgpAnnouncer {
     async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
         self.observe("ListPath", async {
             let mut rules = self.list_active_for_afi(AFI_IP).await?;
@@ -462,7 +477,9 @@ impl FlowSpecAnnouncer for GoBgpAnnouncer {
         })
         .await
     }
-
+}
+#[async_trait]
+impl PeerObserver for GoBgpAnnouncer {
     async fn session_status(&self) -> Result<Vec<PeerStatus>> {
         self.observe("ListPeer", async {
             let mut client = self.get_client().await?;
