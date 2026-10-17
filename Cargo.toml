@@ -22,6 +22,7 @@ tower-sessions = "0.14"
 tower-sessions-sqlx-store = { version = "0.15", features = ["postgres"] }
 argon2 = "0.5"
 password-hash = "0.5"
+inquire = { version = "0.9", default-features = false, features = ["crossterm"] }
 
 # WebSocket
 futures-util = "0.3"

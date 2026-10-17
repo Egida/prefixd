@@ -85,8 +85,10 @@ procedures below for authentication, peers, TLS and production deployment.
 
 Operators are users who can log into the dashboard. These CLI commands connect
 directly to PostgreSQL and require `DATABASE_URL`; Compose already sets it in the
-prefixd container. Omit `--password` to use the prompt, or supply an explicit
-value when appropriate for your environment:
+prefixd container. Omit `--password` for a hidden terminal prompt (use
+`docker compose exec` with its default TTY allocation). Without a controlling
+terminal, supply an explicit value; it can appear in shell history and process
+arguments:
 
 ```bash
 # Create admin (full access)
