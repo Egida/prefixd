@@ -11,7 +11,7 @@ Typical use cases:
 - Per-customer NetFlow aggregate volumes.
 - SNMP traps that don't carry a victim `/32`.
 
-See [ADR 021](../adr/021-corroborating-signals.md) for the full design.
+See [ADR 021](../../adr/021-corroborating-signals.md) for the full design.
 
 ---
 
@@ -200,7 +200,7 @@ A few residual operator notes:
 
 ## See also
 
-- [ADR 021 — Corroborating Signals](../adr/021-corroborating-signals.md)
-- [ADR 018 — Multi-Signal Correlation Engine](../adr/018-multi-signal-correlation-engine.md)
-- `docs/api.md#corroborator-signal` — full API reference.
-- `docs/configuration.md` — `sources`/`mode`/`match_dimensions` schema.
+- [ADR 021 — Corroborating Signals](../../adr/021-corroborating-signals.md)
+- [ADR 018 — Multi-Signal Correlation Engine](../../adr/018-multi-signal-correlation-engine.md)
+- `docs/reference/api.md#corroborator-signal` — full API reference.
+- `docs/reference/configuration.md` — `sources`/`mode`/`match_dimensions` schema.

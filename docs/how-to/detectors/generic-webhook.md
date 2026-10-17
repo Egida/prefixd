@@ -147,7 +147,7 @@ Check the dashboard → Correlation → Signals tab. Events should appear with `
 
 ## Schema reference
 
-See [configuration.md § Generic Webhook Adapters](../configuration.md#generic-webhook-adapters) for the complete field reference.
+See [configuration.md § Generic Webhook Adapters](../../reference/configuration.md#generic-webhook-adapters) for the complete field reference.
 
 ## JSONPath cheat sheet
 

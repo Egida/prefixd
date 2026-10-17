@@ -31,7 +31,7 @@ default_weight: 1.0
 # POST /v1/signals/webhook/{name} and maps an arbitrary JSON payload into an
 # AttackEvent via JSONPath expressions.
 #
-# See docs/configuration.md for the full schema and field reference.
+# See docs/reference/configuration.md for the full schema and field reference.
 #
 # Example (disabled by default):
 # webhook_adapters:

@@ -58,7 +58,7 @@ If prefixd crashes or becomes unavailable:
 - **Application TTL enforcement pauses** until reconciliation resumes
 
 FlowSpec injection carries no controller expiry lease. Controller-crash cleanup
-needs an explicit lease or coupled lifecycle; see [ADR 003](adr/003-fail-open-ttl.md).
+needs an explicit lease or coupled lifecycle; see [ADR 003](../adr/003-fail-open-ttl.md).
 
 ### 3. /32 Only (IPv4)
 

@@ -6,7 +6,7 @@ prefixd requires:
 
 - **prefixd** daemon
 - **GoBGP v4.x** sidecar for BGP FlowSpec (current default), or the experimental
-  rustbgpd adapter described in [speaker backends](speaker-backends.md)
+  rustbgpd adapter described in [speaker backends](../reference/speaker-backends.md)
 - **PostgreSQL 14+**
 - **Routers** with FlowSpec support
 
@@ -28,7 +28,7 @@ prefixd requires:
 
 The shipped Compose stack still uses GoBGP. To evaluate rustbgpd, build prefixd
 with `cargo build --features bgp-rustbgpd`, configure `bgp.mode: rustbgpd` as in
-the [configuration reference](configuration.md#bgp), and run rustbgpd separately.
+the [configuration reference](../reference/configuration.md#bgp), and run rustbgpd separately.
 Do not point test workloads at a production speaker.
 
 On the rustbgpd side, a local TCP listener uses a private token file and a
@@ -56,7 +56,7 @@ lease. Restore reconciliation or explicitly withdraw rules after controller
 failure; monitor controller availability independently from BGP session health.
 
 For isolated released-container lifecycle, TTL and restart validation, run
-`scripts/test-rustbgpd.sh`; the [backend runbook](speaker-backends.md#released-controller-qualification)
+`scripts/test-rustbgpd.sh`; the [backend runbook](../reference/speaker-backends.md#released-controller-qualification)
 records the version floor, immutable pins, recovery behavior and alert queries.
 This suite is independent of the production Compose and router gates.
 
@@ -76,65 +76,27 @@ browser harness remain frontend tooling work.
 
 ## Quick Start
 
-### Docker Compose (Recommended)
-
-```bash
-# Clone
-git clone https://github.com/lance0/prefixd.git
-cd prefixd
-
-# Configure
-cp configs/prefixd.yaml.example configs/prefixd.yaml
-# Edit configs/prefixd.yaml, inventory.yaml, playbooks.yaml
-
-# Generate API token
-export PREFIXD_API_TOKEN=$(openssl rand -hex 32)
-echo "PREFIXD_API_TOKEN=$PREFIXD_API_TOKEN" >> .env
-
-# Start
-docker compose up -d
-
-# Create admin operator (for dashboard login)
-docker compose exec prefixd prefixdctl operators create \
-  --username admin --role admin --password
-
-# Verify
-curl http://localhost/v1/health
-open http://localhost
-```
-
-### Services
-
-| Service | Port | Description |
-|---------|------|-------------|
-| nginx | 80 | Reverse proxy (single entrypoint) |
-| grafana | 3001 | Monitoring dashboards |
-| prometheus | 9091 | Metrics storage |
-| gobgp | 179 | BGP (to routers) |
-| gobgp | 50051 | gRPC (internal) |
-| postgres | 5432 | Database |
-
-> **Note:** The dashboard and API are not exposed directly. All HTTP and WebSocket traffic goes through nginx on port 80.
-
-> **Config editing in Docker:** The default `docker-compose.yml` mounts `./configs:/etc/prefixd` (writable) so the dashboard config editors (playbooks, alerting, correlation) work out of the box. Writes use atomic temp-file + fsync + rename with `.bak` backups, and all PUT endpoints are admin-only with validation. For hardened deployments, add `:ro` to the mount and edit configs on the host, then reload via `POST /v1/config/reload`.
-
----
+Start with the [local-stack walkthrough](../tutorials/quickstart.md), then use the
+procedures below for authentication, peers, TLS and production deployment.
 
 ## Authentication Setup
 
 ### Create Operators
 
-Operators are users who can log into the dashboard:
+Operators are users who can log into the dashboard. These CLI commands connect
+directly to PostgreSQL and require `DATABASE_URL`; Compose already sets it in the
+prefixd container. Omit `--password` to use the prompt, or supply an explicit
+value when appropriate for your environment:
 
 ```bash
 # Create admin (full access)
-prefixdctl operators create --username admin --role admin --password
+prefixdctl operators create --username admin --role admin
 
 # Create operator (read + withdraw)
-prefixdctl operators create --username oncall --role operator --password
+prefixdctl operators create --username oncall --role operator
 
 # Create viewer (read-only)
-prefixdctl operators create --username readonly --role viewer --password
+prefixdctl operators create --username readonly --role viewer
 
 # List operators
 prefixdctl operators list
@@ -277,7 +239,7 @@ The adapter classifies the attack vector from the traffic breakdown (UDP/SYN/ICM
 
 ### Multi-Signal Correlation
 
-When [correlation](configuration.md#correlation) is enabled, events from multiple adapters targeting the same (victim_ip, vector) within a time window are grouped into a signal group. Set `min_sources: 2` to require corroboration before triggering mitigation:
+When [correlation](../reference/configuration.md#correlation) is enabled, events from multiple adapters targeting the same (victim_ip, vector) within a time window are grouped into a signal group. Set `min_sources: 2` to require corroboration before triggering mitigation:
 
 ```yaml
 # configs/correlation.yaml
@@ -291,7 +253,7 @@ sources:
     weight: 0.8
 ```
 
-See [ADR 018](adr/018-multi-signal-correlation-engine.md) and [ADR 019](adr/019-signal-adapter-architecture.md) for design rationale.
+See [ADR 018](../adr/018-multi-signal-correlation-engine.md) and [ADR 019](../adr/019-signal-adapter-architecture.md) for design rationale.
 
 ---
 
@@ -897,7 +859,7 @@ curl -v http://localhost/v1/health 2>&1 | grep x-request-id
 
 ## Lab Environment
 
-For testing FlowSpec without production routers, see the [lab/](../lab/) directory:
+For testing FlowSpec without production routers, see the [lab/](../../lab/) directory:
 
 | Lab | Router | Requirements | Status |
 |-----|--------|--------------|--------|
@@ -947,4 +909,4 @@ docker restart prefixd-gobgp
 docker exec prefixd-gobgp gobgp neighbor
 ```
 
-See [lab/README.md](../lab/README.md) for full instructions.
+See [lab/README.md](../../lab/README.md) for full instructions.

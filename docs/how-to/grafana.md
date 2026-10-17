@@ -141,4 +141,4 @@ Dashboards use a `${datasource}` variable for flexibility. To modify:
 
 ## Metrics Reference
 
-See [FEATURES.md](../FEATURES.md#prometheus-metrics) for the full list of available metrics.
+See [FEATURES.md](../../FEATURES.md#prometheus-metrics) for the full list of available metrics.

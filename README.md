@@ -183,15 +183,15 @@ webhook_adapters:
       bps: "$.traffic.bps"
 ```
 
-POST your JSON to `/v1/signals/webhook/{name}`. See [Generic Webhook Adapter](docs/detectors/generic-webhook.md).
+POST your JSON to `/v1/signals/webhook/{name}`. See [Generic Webhook Adapter](docs/how-to/detectors/generic-webhook.md).
 
-With [multi-signal correlation](docs/configuration.md#correlation) enabled, events from multiple detectors targeting the same IP are grouped and corroborated before triggering mitigation.
+With [multi-signal correlation](docs/reference/configuration.md#correlation) enabled, events from multiple detectors targeting the same IP are grouped and corroborated before triggering mitigation.
 
-See [FastNetMon Integration](docs/detectors/fastnetmon.md) for a complete setup guide.
+See [FastNetMon Integration](docs/how-to/detectors/fastnetmon.md) for a complete setup guide.
 
 ### 4. Peer with your routers
 
-Configure GoBGP neighbors in `configs/gobgp.conf` and set up FlowSpec import policies on your routers. See [Router Setup](docs/deployment.md#router-configuration).
+Configure GoBGP neighbors in `configs/gobgp.conf` and set up FlowSpec import policies on your routers. See [Router Setup](docs/how-to/deployment.md#router-configuration).
 
 ---
 
@@ -227,7 +227,7 @@ Configure GoBGP neighbors in `configs/gobgp.conf` and set up FlowSpec import pol
 **TTL enforcement:** The running controller withdraws expired mitigations.
 If prefixd stops while its separate BGP speaker stays up, rules can persist
 until reconciliation resumes or an operator withdraws them. See
-[speaker backends](docs/speaker-backends.md) for the rustbgpd rollout and failure
+[speaker backends](docs/reference/speaker-backends.md) for the rustbgpd rollout and failure
 semantics.
 
 ---
@@ -236,13 +236,15 @@ semantics.
 
 | Topic | Link |
 |-------|------|
-| Full deployment guide | [docs/deployment.md](docs/deployment.md) |
-| Configuration reference | [docs/configuration.md](docs/configuration.md) |
-| API reference | [docs/api.md](docs/api.md) |
-| CLI reference | [docs/cli.md](docs/cli.md) |
-| Router setup | [docs/deployment.md#router-configuration](docs/deployment.md#router-configuration) |
-| Grafana dashboards | [docs/grafana.md](docs/grafana.md) |
-| Architecture | [docs/architecture.md](docs/architecture.md) |
+| Documentation index | [docs/README.md](docs/README.md) |
+| Local-stack tutorial | [Quickstart](docs/tutorials/quickstart.md) |
+| Full deployment guide | [docs/how-to/deployment.md](docs/how-to/deployment.md) |
+| Configuration reference | [docs/reference/configuration.md](docs/reference/configuration.md) |
+| API reference | [docs/reference/api.md](docs/reference/api.md) |
+| CLI reference | [docs/reference/cli.md](docs/reference/cli.md) |
+| Router setup | [docs/how-to/deployment.md#router-configuration](docs/how-to/deployment.md#router-configuration) |
+| Grafana dashboards | [docs/how-to/grafana.md](docs/how-to/grafana.md) |
+| Architecture | [docs/explanation/architecture.md](docs/explanation/architecture.md) |
 
 ---
 
@@ -269,9 +271,9 @@ FlowSpec (RFC 5575, RFC 8955) is supported by:
 
 ## Upgrading
 
-Database migrations run automatically on startup. See **[docs/upgrading.md](docs/upgrading.md)** for version-specific notes.
+Database migrations run automatically on startup. See **[docs/how-to/upgrading.md](docs/how-to/upgrading.md)** for version-specific notes.
 
-> **v0.12.0 breaking change:** Offset-based pagination (`?offset=N`) has been removed from all list endpoints. Use cursor-based pagination instead (`?cursor=<opaque>&limit=N`). If you have scripts or integrations using `--offset` or `?offset=`, they must be updated. See [ADR 016](docs/adr/016-cursor-pagination.md) for rationale and [upgrading.md](docs/upgrading.md) for migration examples.
+> **v0.12.0 breaking change:** Offset-based pagination (`?offset=N`) has been removed from all list endpoints. Use cursor-based pagination instead (`?cursor=<opaque>&limit=N`). If you have scripts or integrations using `--offset` or `?offset=`, they must be updated. See [ADR 016](docs/adr/016-cursor-pagination.md) for rationale and [upgrading.md](docs/how-to/upgrading.md) for migration examples.
 
 ---
 

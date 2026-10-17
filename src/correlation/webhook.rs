@@ -12,7 +12,7 @@
 //! - `vector_map`: optional detector-vector string normalization
 //! - `confidence_scale`: optional divisor for extracted confidence
 //!
-//! See `docs/configuration.md` for the full schema and examples.
+//! See `docs/reference/configuration.md` for the full schema and examples.
 
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, KeyInit, Mac};

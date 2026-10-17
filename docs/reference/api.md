@@ -576,7 +576,7 @@ GET /v1/signal-groups/{id}
 Authorization: Bearer <token>
 ```
 
-Returns group metadata and all contributing events with source, confidence, and source weight. When `correlation.confidence_decay_half_life_seconds` (or the playbook override) is non-zero, `derived_confidence` is computed with exponential time decay applied — older events contribute proportionally less weight. See [ADR 022](adr/022-confidence-decay.md). The `corroboration_met` flag is sticky: once set to `true` it never reverts to `false`, even if decay drives `derived_confidence` back under the threshold.
+Returns group metadata and all contributing events with source, confidence, and source weight. When `correlation.confidence_decay_half_life_seconds` (or the playbook override) is non-zero, `derived_confidence` is computed with exponential time decay applied — older events contribute proportionally less weight. See [ADR 022](../adr/022-confidence-decay.md). The `corroboration_met` flag is sticky: once set to `true` it never reverts to `false`, even if decay drives `derived_confidence` back under the threshold.
 
 **Response:**
 
@@ -623,7 +623,7 @@ Returns group metadata and all contributing events with source, confidence, and 
 
 ## Signal Adapters
 
-Signal adapter endpoints accept webhooks from external detection and telemetry systems, translate their payloads into `AttackEventInput`, and feed them into the standard event ingestion pipeline (including correlation, guardrails, and policy evaluation). See [ADR 019](adr/019-signal-adapter-architecture.md).
+Signal adapter endpoints accept webhooks from external detection and telemetry systems, translate their payloads into `AttackEventInput`, and feed them into the standard event ingestion pipeline (including correlation, guardrails, and policy evaluation). See [ADR 019](../adr/019-signal-adapter-architecture.md).
 
 ### Alertmanager Webhook
 
@@ -863,7 +863,7 @@ notify_script_format = json
 notify_script_path = /usr/bin/curl -s -X POST http://prefixd.example.com/v1/signals/fastnetmon -H 'Content-Type: application/json' -H 'Authorization: Bearer <token>' -d @-
 ```
 
-See `docs/detectors/fastnetmon.md` for a complete integration guide.
+See `docs/how-to/detectors/fastnetmon.md` for a complete integration guide.
 
 ### Generic Webhook Adapter
 
@@ -929,7 +929,7 @@ webhook_adapters:
     source_id_prefix: "radware-"
 ```
 
-See `docs/configuration.md` for the complete schema.
+See `docs/reference/configuration.md` for the complete schema.
 
 ### Corroborator Signal
 
@@ -937,7 +937,7 @@ Ingest a **corroborating signal** from a source configured with
 `mode: corroborating` in `correlation.yaml`. Corroborators don't carry a
 `victim_ip`; instead they match open signal groups on lighter dimensions
 (`customer_id`, `pop`, `service_id`, `interface`) declared in the
-source's `match_dimensions`. See [ADR 021](adr/021-corroborating-signals.md).
+source's `match_dimensions`. See [ADR 021](../adr/021-corroborating-signals.md).
 
 ```http
 POST /v1/signals/corroborator
@@ -1398,7 +1398,7 @@ Full operational health. Requires authentication.
 | `healthy` | All systems operational |
 | `degraded` | Partial functionality (DB or GoBGP issues) |
 
-> **Migration note (v0.8.2 → v0.8.3):** The public `GET /v1/health` endpoint no longer returns BGP sessions, database status, or operational details. Monitoring systems and scripts that parse these fields must switch to `GET /v1/health/detail` with authentication. See [ADR 015](adr/015-health-endpoint-split.md).
+> **Migration note (v0.8.2 → v0.8.3):** The public `GET /v1/health` endpoint no longer returns BGP sessions, database status, or operational details. Monitoring systems and scripts that parse these fields must switch to `GET /v1/health/detail` with authentication. See [ADR 015](../adr/015-health-endpoint-split.md).
 
 ### Stats
 
@@ -1474,7 +1474,7 @@ GET /v1/config/settings
 Authorization: Bearer <token>
 ```
 
-Returns the running daemon configuration with sensitive fields redacted (allowlist approach). See [ADR 014](adr/014-allowlist-config-redaction.md).
+Returns the running daemon configuration with sensitive fields redacted (allowlist approach). See [ADR 014](../adr/014-allowlist-config-redaction.md).
 
 **Response:**
 
@@ -1927,7 +1927,7 @@ prefixd_mitigations_active{customer="acme",pop="iad1"} 5
 prefixd_http_requests_total{method="POST",route="/v1/events",status_class="2xx"} 1543
 ```
 
-See [FEATURES.md](../FEATURES.md#prometheus-metrics) for full metric list.
+See [FEATURES.md](../../FEATURES.md#prometheus-metrics) for full metric list.
 
 ---
 

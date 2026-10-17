@@ -48,7 +48,7 @@ pub struct CorrelationConfig {
     pub confidence_decay_half_life_seconds: u32,
 
     /// Generic webhook adapters, each exposed at `POST /v1/signals/webhook/{name}`.
-    /// See `docs/configuration.md` for the schema.
+    /// See `docs/reference/configuration.md` for the schema.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub webhook_adapters: Vec<super::webhook::WebhookAdapter>,
 }

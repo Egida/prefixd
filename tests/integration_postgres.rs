@@ -1859,7 +1859,7 @@ async fn test_documented_retention_preserves_live_intent_and_referenced_history(
     );
     transaction.rollback().await.unwrap();
 
-    let guide = include_str!("../docs/troubleshooting.md");
+    let guide = include_str!("../docs/how-to/troubleshooting.md");
     let (_, retention) = guide
         .split_once("<!-- database-retention-prune -->")
         .unwrap();

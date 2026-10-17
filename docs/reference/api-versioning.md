@@ -36,7 +36,7 @@ When an endpoint or feature is scheduled for removal:
 
 1. **Announce** — The deprecation is noted in the CHANGELOG and release notes at least **2 minor releases** before removal.
 2. **Header** — Deprecated endpoints include a `Sunset` response header with the planned removal date ([RFC 8594](https://www.rfc-editor.org/rfc/rfc8594)).
-3. **Docs** — The endpoint is marked as deprecated in `docs/api.md` and the OpenAPI spec.
+3. **Docs** — The endpoint is marked as deprecated in `docs/reference/api.md` and the OpenAPI spec.
 4. **Remove** — The endpoint is removed in the next major version.
 
 Example `Sunset` header:
