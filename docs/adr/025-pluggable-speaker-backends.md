@@ -4,9 +4,9 @@
 
 Accepted. Backend rollout remains gated on the validation below.
 
-Updates [ADR 001](001-gobgp-sidecar.md) and [ADR 007](007-trait-based-bgp-abstraction.md).
-ADR numbers 023 and 024 are reserved by the open architecture PR #150; its
-proposal to delete GoBGP is superseded by this decision.
+Extends [ADR 023](023-rustbgpd-over-grpc.md) and updates
+[ADR 001](001-gobgp-sidecar.md) and [ADR 007](007-trait-based-bgp-abstraction.md).
+The transport decision does not require deleting the GoBGP integration.
 
 ## Date
 
@@ -51,9 +51,9 @@ for that class of backend.
 
 prefixd maintainers own the bundled rustbgpd and GoBGP adapters, their tests,
 and security fixes. A community adapter needs a named maintainer and passing
-conformance coverage before being described as supported. The
-[backend matrix](../speaker-backends.md) distinguishes implementation from
-qualification; vendor receipts apply only to the backend actually tested.
+conformance coverage before being described as supported. Implementation and qualification are separate: GoBGP is the existing backend,
+rustbgpd is the preferred integration target, and generic/community adapters
+require their own evidence. Vendor receipts apply only to the backend tested.
 
 ## Validation and rollout
 

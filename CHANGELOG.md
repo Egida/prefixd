@@ -7,29 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Refresh the October audit baseline: `rustls` 0.23.46 and `quinn-proto` 0.11.18 address newly reported lockfile advisories; Next.js 16.3.8, Undici 7.29.1, sharp and source-map-js updates address current frontend audit findings. Existing narrow audit exceptions remain explicit.
+- **Rust dependency advisories cleared.** `h2` 0.4.13 → 0.4.19 (RUSTSEC-2026-0258, unbounded empty DATA frames) and `rustls` 0.23.40 → 0.23.45 (RUSTSEC-2026-0285, TLS 1.3 handshake messages accepted across encryption level boundaries); `chacha20` 0.10.0 → 0.10.2 replaces a yanked release. The mTLS setup no longer depends on the unmaintained `rustls-pemfile` (RUSTSEC-2025-0134) — certificate, CA, and key loading now use `rustls-pki-types` — so its CI ignore was removed. `cargo audit` reports only two advisories, both with no upstream fix and neither reachable: `rsa` (present in `Cargo.lock` via sqlx's never-compiled mysql driver) and `rand` custom-logger unsoundness (transitive, no custom logger installed).
+- **Frontend dependency advisories cleared.** `next` 16.3.0 → 16.3.6 (two critical: unauthenticated RCE on Windows-hosted servers, and AVIF image-optimization RCE), `js-yaml` 4.3.1 → 4.3.2, `vitest` 4.1.10 → 4.1.11, `nanoid` 3.3.17 → 3.3.19; `sharp` and `baseline-browser-mapping` come along with the `next` bump. `bun audit` reports no vulnerabilities.
+
 ### Added
 
 - Experimental rustbgpd speaker adapter behind `bgp-rustbgpd`, with explicit
   backend selection, authenticated gRPC, local-rule read-back, and IPv4/IPv6
   discard/policing support. Existing GoBGP and mock configurations remain valid.
 
-### Documentation
-
-- Record the rustbgpd-first, pluggable-speaker rollout while retaining GoBGP.
-  Correct the controller-crash claim: a separate BGP daemon can keep advertising
-  while prefixd is down; TTL enforcement requires running reconciliation.
-
 ### Fixed
 
+- **Safelist removal from the dashboard returned 404.** The Next.js API proxy joins percent-decoded route segments, so `DELETE /v1/safelist/8.9.8.9%2F32` reached the backend as `/v1/safelist/8.9.8.9/32` and missed the single-segment route. The proxy now re-encodes each segment, and the route accepts a literal slash form (`{*prefix}`) for proxies that decode `%2F`.
+- **Dashboard had no sign-out (and no role-based permissions).** `/v1/auth/login` and `/v1/auth/me` return a flat operator (`operator_id`), but the client read `data.operator`, leaving `operator` as `undefined`. The user menu (and therefore sign-out) never rendered, and role checks denied admin actions to authenticated admins. Auth responses are now mapped to the client `Operator` shape and `isAuthenticated` is a strict boolean.
+- **FastNetMon SYN floods labelled `udp_flood`.** Vector detection matched the first protocol word anywhere in the attack details, so an idle line such as `outgoing udp traffic: 0 mbps` won over `syn_flood`. Zero-metric lines are ignored, TCP flag vectors are matched before `udp`, and matches are word-bounded (`ack` no longer matches inside `packets`).
+- **Copy buttons failed silently on plain-HTTP deployments.** `navigator.clipboard` only exists in secure contexts, so the incident report, FlowSpec rule, and webhook endpoint copy actions threw and reported nothing when the dashboard was served over HTTP. The copy helper now falls back to a hidden textarea, checks `clipboard-write` permission, and surfaces a "Copy failed — clipboard unavailable" toast instead of claiming success. Chrome ignores clipboard writes entirely for plain-HTTP origins (other than `localhost`), so production dashboards need HTTPS for clipboard actions — documented in `docs/deployment.md`.
+- Build both Docker images on pull requests without registry login or publishing; main/tag pushes retain publishing.
+- Update `async-trait` to 0.1.92 for strict Clippy on Rust 1.99 and select the Rustls provider before TLS startup.
 - Keep expired mitigations eligible for withdrawal retry when the speaker call
   fails. Successful expiry state and notifications now require a confirmed
   withdrawal; other expired mitigations are still processed during a failure.
 - Detector unban and bulk withdrawal now report speaker failures and preserve
   active state instead of reporting successful removal. Operators can retry.
-- Update `async-trait` to 0.1.92 to fix strict Clippy failures on Rust 1.99
-  without suppressing diagnostics.
 - Canonicalize prefix spelling when computing FlowSpec rule identity so
   equivalent IPv6 addresses do not trigger repeated reconciliation injections.
+
+### Documentation
+
+- Record the rustbgpd-first, pluggable-speaker rollout while retaining GoBGP.
+  Correct the controller-crash claim: a separate BGP daemon can keep advertising
+  while prefixd is down; TTL enforcement requires running reconciliation.
 
 ## [0.19.1] - 2026-08-06
 

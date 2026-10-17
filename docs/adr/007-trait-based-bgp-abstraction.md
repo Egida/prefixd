@@ -19,21 +19,19 @@ Define a `FlowSpecAnnouncer` trait that abstracts BGP operations:
 ```rust
 #[async_trait]
 pub trait FlowSpecAnnouncer: Send + Sync {
-    async fn announce(&self, rule: &FlowSpecRule) -> Result<(), PrefixdError>;
-    async fn withdraw(&self, rule: &FlowSpecRule) -> Result<(), PrefixdError>;
-    async fn list_active(&self) -> Result<Vec<FlowSpecRule>, PrefixdError>;
-    async fn session_status(&self) -> Result<Vec<PeerStatus>, PrefixdError>;
+    async fn announce(&self, rule: &FlowSpecRule) -> Result<()>;
+    async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()>;
+    async fn list_active(&self) -> Result<Vec<FlowSpecRule>>;
+    async fn session_status(&self) -> Result<Vec<PeerStatus>>;
 }
 ```
 
-Implementations:
-- `GoBgpAnnouncer` -- real gRPC client for production
-- `MockAnnouncer` -- in-memory store for tests, records all calls
-- `RustBgpdAnnouncer` -- experimental gRPC adapter behind `bgp-rustbgpd`
+(The trait is defined in `src/bgp/announcer.rs`; `Result` is `crate::error::Result`.)
 
-[ADR 025](025-pluggable-speaker-backends.md) keeps GoBGP supported while rustbgpd
-is qualified. Optional reader/peer capabilities and write-only adapters require
-separate reconciliation and ledger work.
+Implementations:
+- `GoBgpAnnouncer` — GoBGP gRPC client (the shipped backend, ADR 001)
+- `RustBgpdAnnouncer` — experimental gRPC adapter behind `bgp-rustbgpd` ([ADR 023](023-rustbgpd-over-grpc.md))
+- `MockAnnouncer` — in-memory store for tests, records all calls
 
 ## Consequences
 

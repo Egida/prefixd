@@ -40,7 +40,7 @@ The safety chain:
 **Positive:**
 - Active reconciliation withdraws mitigations whose TTL has elapsed
 - Speaker and controller failures have separate recovery requirements
-- Reconciliation loop catches and withdraws any rules that should have expired
+- Running reconciliation attempts TTL withdrawals; failed cleanup needs explicit recovery and tests
 
 **Negative:**
 - Long-running mitigations need periodic extension (detectors must re-send events)
