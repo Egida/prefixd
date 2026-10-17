@@ -427,10 +427,51 @@ ORDER BY pg_total_relation_size(relid) DESC;
 ```
 
 **Clean old data:**
+
+This keeps active mitigations, pending withdrawals, recent history and audit logs.
+Old terminal mitigations referenced by the announcement ledger remain for review.
+Events referenced by retained mitigations or signal groups remain available for
+correlation, detector unbans and incident history.
+
+<!-- database-retention-prune -->
 ```sql
-DELETE FROM events WHERE created_at < NOW() - INTERVAL '7 days';
-DELETE FROM mitigations WHERE status IN ('expired', 'withdrawn')
-  AND updated_at < NOW() - INTERVAL '7 days';
+BEGIN;
+DELETE FROM withdrawal_requests AS request
+USING mitigations AS mitigation
+WHERE request.mitigation_id = mitigation.mitigation_id
+  AND request.completed_at < NOW() - INTERVAL '7 days'
+  AND mitigation.status IN ('expired', 'withdrawn')
+  AND mitigation.updated_at < NOW() - INTERVAL '7 days';
+
+DELETE FROM mitigations AS mitigation
+WHERE mitigation.status IN ('expired', 'withdrawn')
+  AND mitigation.updated_at < NOW() - INTERVAL '7 days'
+  AND NOT EXISTS (
+    SELECT 1 FROM withdrawal_requests AS request
+    WHERE request.mitigation_id = mitigation.mitigation_id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM flowspec_announcements AS announcement
+    WHERE announcement.mitigation_id = mitigation.mitigation_id
+  );
+
+DELETE FROM events AS event
+WHERE event.ingested_at < NOW() - INTERVAL '7 days'
+  AND NOT EXISTS (
+    SELECT 1 FROM mitigations AS mitigation
+    WHERE mitigation.triggering_event_id = event.event_id
+       OR mitigation.last_event_id = event.event_id
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM signal_group_events AS membership
+    WHERE membership.event_id = event.event_id
+  );
+COMMIT;
+```
+
+Run vacuum separately after the transaction has committed:
+
+```sql
 VACUUM ANALYZE;
 ```
 
