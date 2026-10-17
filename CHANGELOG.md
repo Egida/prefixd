@@ -37,9 +37,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Grafana reconciliation runs and configuration reloads now group and label
   the actual `status` series.
 
+- Persist withdrawal intent before speaker RPCs so ambiguous replies and database
+  failures cannot restore a requested deletion. Retry across controller restarts,
+  preserve the original actor/reason in an atomic audit transaction, and reject
+  foreign-POP, shared-owner and stale-operation deletions. New mutations conflicting
+  with pending cleanup return 409. Drain cleanup before changing speaker targets
+  or downgrading to a binary that ignores the queue.
+- Continue independent reconciliation housekeeping and peer observations after
+  mutation failures; release the lifecycle lock between scheduler rules.
+- Bound complete GoBGP and rustbgpd mutation responses, including stalled bodies
+  and trailers, to 30 seconds per attempt with at most three attempts.
+
+- Prevent handled failed GET requests from also producing unhandled browser rejections during cache cleanup.
 - **Safelist removal from the dashboard returned 404.** The Next.js API proxy joins percent-decoded route segments, so `DELETE /v1/safelist/8.9.8.9%2F32` reached the backend as `/v1/safelist/8.9.8.9/32` and missed the single-segment route. The proxy now re-encodes each segment, and the route accepts a literal slash form (`{*prefix}`) for proxies that decode `%2F`.
 - **Dashboard had no sign-out (and no role-based permissions).** `/v1/auth/login` and `/v1/auth/me` return a flat operator (`operator_id`), but the client read `data.operator`, leaving `operator` as `undefined`. The user menu (and therefore sign-out) never rendered, and role checks denied admin actions to authenticated admins. Auth responses are now mapped to the client `Operator` shape and `isAuthenticated` is a strict boolean.
-- **FastNetMon SYN floods labelled `udp_flood`.** Vector detection matched the first protocol word anywhere in the attack details, so an idle line such as `outgoing udp traffic: 0 mbps` won over `syn_flood`. Zero-metric lines are ignored, TCP flag vectors are matched before `udp`, and matches are word-bounded (`ack` no longer matches inside `packets`).
+- **FastNetMon SYN floods labelled `udp_flood`.** Vector detection matched the first protocol word anywhere in the attack details, so an idle line such as `outgoing udp traffic: 0 mbps` won over `syn_flood`. Zero-metric lines, including `0 packets per second`, are ignored; TCP flag vectors are matched before `udp`; and protocol token boundaries keep `ack` out of `packets` and `Attack_type`.
 - **Copy buttons failed silently on plain-HTTP deployments.** `navigator.clipboard` only exists in secure contexts, so the incident report, FlowSpec rule, and webhook endpoint copy actions threw and reported nothing when the dashboard was served over HTTP. The copy helper now falls back to a hidden textarea, checks `clipboard-write` permission, and surfaces a "Copy failed — clipboard unavailable" toast instead of claiming success. Chrome ignores clipboard writes entirely for plain-HTTP origins (other than `localhost`), so production dashboards need HTTPS for clipboard actions — documented in `docs/how-to/deployment.md`.
 - Run pull-request CI for stacked topic branches as well as `main`, so dependency-ordered PRs receive their own checks.
 - Build both Docker images on pull requests without registry login or publishing; main/tag pushes retain publishing.

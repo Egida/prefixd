@@ -149,20 +149,18 @@ RAW_LOWER=$(printf '%s' "$RAW_DETAILS" | tr '[:upper:]' '[:lower:]')
 # attack signal, so drop them before matching -- otherwise a SYN flood whose
 # details also mention udp at 0 mbps was mislabelled as udp_flood. Details
 # without a metric (e.g. "attack type: syn_flood") always survive.
-ZERO_METRIC_RE='(^|[^0-9.])0+(\.0+)?[[:space:]]*(mbps|kbps|gbps|bps|pps|kpps|mpps|fps|flows)'
+ZERO_METRIC_RE='(^|[^0-9.])0+(\.0+)?[[:space:]]*(mbps|kbps|gbps|bps|pps|kpps|mpps|fps|flows|packets[[:space:]]+per[[:space:]]+second)([^[:alnum:]_]|$)'
 RAW_SIGNAL=$(printf '%s\n' "$RAW_LOWER" | grep -vE "$ZERO_METRIC_RE" || true)
 
-# \b keeps "ack" out of "packets"; the *_ and "tcp_*" alternatives keep
-# "syn_flood"/"tcp_syn" matching. TCP flag vectors are tested before udp for
-# mixed floods.
-VECTOR="unknown"
-if grep -qE '\bsyn\b|syn_|tcp[ _-]syn' <<< "$RAW_SIGNAL"; then
+# Token boundaries keep "ack" out of "packets" and "attack_type" while
+# preserving "syn_flood"/"tcp_syn". TCP flag vectors precede udp for mixed floods.
+if grep -qE '(^|[^[:alnum:]])syn([^[:alnum:]]|$)' <<< "$RAW_SIGNAL"; then
     VECTOR="syn_flood"
-elif grep -qE '\back\b|ack_|tcp[ _-]ack' <<< "$RAW_SIGNAL"; then
+elif grep -qE '(^|[^[:alnum:]])ack([^[:alnum:]]|$)' <<< "$RAW_SIGNAL"; then
     VECTOR="ack_flood"
-elif grep -qE '\bicmp\b|icmp_' <<< "$RAW_SIGNAL"; then
+elif grep -qE '(^|[^[:alnum:]])icmp([^[:alnum:]]|$)' <<< "$RAW_SIGNAL"; then
     VECTOR="icmp_flood"
-elif grep -qE '\budp\b|udp_' <<< "$RAW_SIGNAL"; then
+elif grep -qE '(^|[^[:alnum:]])udp([^[:alnum:]]|$)' <<< "$RAW_SIGNAL"; then
     VECTOR="udp_flood"
 fi
 

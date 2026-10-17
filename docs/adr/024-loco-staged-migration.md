@@ -24,9 +24,9 @@ framework dependency or runtime migration.
 
 prefixd is assembled from libraries rather than a framework: axum 0.8 with a hand-written route table, sqlx with compile-time checked SQL behind a `Repository` trait plus a `MockRepository` for tests, `axum-login` + `tower-sessions` for session auth with roles, utoipa for OpenAPI, bespoke middleware for request IDs, metrics and rate limiting, a custom WebSocket route, and a `prefixd-cli`-style companion binary (`prefixdctl`).
 
-[loco-rs](https://loco.rs) is a Rails-inspired framework that orchestrates the same crates prefixd already uses — axum is its HTTP layer, SeaORM 2.0 (on sqlx) its ORM — and adds project structure, generators, tasks, background workers, a job queue, mailers and test fixtures. Version 1.2.0 (2026-09-24) is the current release.
+[loco-rs](https://loco.rs) is a Rails-inspired framework that orchestrates the same crates prefixd already uses — axum is its HTTP layer, SeaORM 2.0 (on sqlx) its ORM — and adds project structure, generators, tasks, background workers, a job queue, mailers and test fixtures. The September evaluation used version 1.2.0 (2026-09-24).
 
-A 2026-09-28 evaluation (captured in Linear LAN-1946) found the following, which shapes *how* the migration is done rather than whether:
+A 2026-09-28 evaluation found the following, which shapes *how* the migration is done rather than whether:
 
 - loco requires **Rust 1.94** (SeaORM 2.0's MSRV) against prefixd's declared 1.85, and **SeaORM 2.0 / sqlx 0.9** against prefixd's sqlx 0.8.
 - loco ships **no session/role auth** (JWT + API key only), **no WebSocket/SSE layer**, **no Prometheus metrics**, **no rate limiter**, and **no core OpenAPI** (the official `loco-openapi` still targets `loco-rs ^0.16`). Configuration is loaded once at boot, so playbook/alerting/correlation hot reload is a prefixd concern.
@@ -81,7 +81,7 @@ Parity decisions to keep while migrating (each is a deliberate "no" to a loco de
 
 ## References
 
-- Evaluation: Linear LAN-1946 (workstream estimates, capability conflicts, loco 1.2.0 profile)
+- September 2026 evaluation: workstream estimates and the loco 1.2.0 capability profile above
 - [loco.rs](https://loco.rs) — framework documentation, upgrade guides
 - [ADR 008](008-session-auth-plus-bearer.md) — hybrid session + bearer auth that Phase 1 must preserve
 - [ADR 009](009-postgresql-over-sqlite.md) — PostgreSQL-only storage; its "no ORM abstraction layer" clause is superseded by Phase 2

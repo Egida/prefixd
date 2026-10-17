@@ -1141,3 +1141,258 @@ async fn test_signal_group_different_vectors_separate() {
     let count = ctx.repo.count_open_groups().await.unwrap();
     assert_eq!(count, 2);
 }
+
+#[tokio::test]
+async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
+    use prefixd::{
+        AppState,
+        bgp::{FlowSpecAnnouncer, MockAnnouncer, PeerStatus},
+        db::{Repository, RepositoryTrait, init_postgres_pool},
+        domain::{
+            ActionParams, ActionType, AttackVector, FlowSpecRule, MatchCriteria, Mitigation,
+            MitigationIntent, mitigation_rule, request_withdrawal,
+        },
+        error::{PrefixdError, Result},
+        scheduler::ReconciliationLoop,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering::SeqCst},
+    };
+
+    struct Speaker {
+        inner: MockAnnouncer,
+        mode: AtomicUsize,
+        deletes: AtomicUsize,
+        adds: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl FlowSpecAnnouncer for Speaker {
+        async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.adds.fetch_add(1, SeqCst);
+            self.inner.announce(rule).await
+        }
+        async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.deletes.fetch_add(1, SeqCst);
+            self.inner.withdraw(rule).await?;
+            if self.mode.load(SeqCst) == 1 {
+                return Err(PrefixdError::BgpWithdrawalFailed(
+                    "reply lost after delete".into(),
+                ));
+            }
+            Ok(())
+        }
+        async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
+            self.inner.list_active().await
+        }
+        async fn session_status(&self) -> Result<Vec<PeerStatus>> {
+            Ok(vec![])
+        }
+    }
+    let context = TestContext::new().await;
+    let pool = context.pool.clone();
+    let connection = context.state.settings.storage.connection_string.clone();
+    let repo = Arc::new(Repository::new(pool.clone()));
+    let speaker = Arc::new(Speaker {
+        inner: MockAnnouncer::new(),
+        mode: AtomicUsize::new(0),
+        deletes: AtomicUsize::new(0),
+        adds: AtomicUsize::new(0),
+    });
+    let mut mitigation = Mitigation::from_intent(
+        MitigationIntent {
+            event_id: uuid::Uuid::new_v4(),
+            customer_id: None,
+            service_id: None,
+            pop: "test-pop".into(),
+            match_criteria: MatchCriteria {
+                dst_prefix: "203.0.113.10/32".into(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+            },
+            action_type: ActionType::Discard,
+            action_params: ActionParams { rate_bps: None },
+            ttl_seconds: 600,
+            reason: "test".into(),
+        },
+        "203.0.113.10".into(),
+        AttackVector::UdpFlood,
+    );
+    mitigation.activate();
+    repo.insert_mitigation(&mitigation).await.unwrap();
+    speaker
+        .inner
+        .announce(&mitigation_rule(&mitigation))
+        .await
+        .unwrap();
+    let mut settings = common::test_settings();
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    let state = AppState::new(
+        settings.clone(),
+        common::test_inventory(),
+        common::test_playbooks(),
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let app = prefixd::api::create_test_router(state.clone());
+    let withdraw = || {
+        Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/v1/mitigations/{}/withdraw",
+                mitigation.mitigation_id
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"operator_id":"forged","reason":"original reason"}"#,
+            ))
+            .unwrap()
+    };
+    sqlx::raw_sql("CREATE FUNCTION reject_withdrawal() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected storage failure'; END $$; CREATE TRIGGER reject_request BEFORE INSERT ON withdrawal_requests FOR EACH ROW EXECUTE FUNCTION reject_withdrawal();").execute(&pool).await.unwrap();
+    assert_eq!(
+        app.clone().oneshot(withdraw()).await.unwrap().status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+    assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+    sqlx::query("DROP TRIGGER reject_request ON withdrawal_requests")
+        .execute(&pool)
+        .await
+        .unwrap();
+    speaker.mode.store(1, SeqCst);
+    assert_eq!(
+        app.clone().oneshot(withdraw()).await.unwrap().status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(speaker.deletes.load(SeqCst), 1);
+    assert_eq!(speaker.inner.announced_count().await, 0);
+    let original = repo.pending_withdrawals(None).await.unwrap().pop().unwrap();
+    assert_eq!(original.actor, "anonymous");
+    assert_eq!(original.reason, "anonymous: original reason");
+
+    sqlx::query("CREATE TRIGGER reject_completion BEFORE UPDATE ON withdrawal_requests FOR EACH ROW EXECUTE FUNCTION reject_withdrawal()").execute(&pool).await.unwrap();
+    speaker.mode.store(0, SeqCst);
+    let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+        .with_app_state(state.clone());
+    assert!(reconciler.reconcile().await.is_err());
+    assert_eq!(
+        repo.get_mitigation(mitigation.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MitigationStatus::Active
+    );
+    assert_eq!(repo.pending_withdrawals(None).await.unwrap().len(), 1);
+    let audits: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'withdraw'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(audits, 0);
+    assert_eq!(speaker.adds.load(SeqCst), 0);
+
+    // An unavailable authoritative ledger must fail closed before either cleanup or repair.
+    sqlx::query("ALTER TABLE withdrawal_requests RENAME TO hidden_withdrawal_requests")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deletes = speaker.deletes.load(SeqCst);
+    assert!(reconciler.reconcile().await.is_err());
+    assert_eq!(speaker.deletes.load(SeqCst), deletes);
+    assert_eq!(speaker.adds.load(SeqCst), 0);
+    sqlx::query("ALTER TABLE hidden_withdrawal_requests RENAME TO withdrawal_requests")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TRIGGER reject_completion ON withdrawal_requests")
+        .execute(&pool)
+        .await
+        .unwrap();
+    drop(reconciler);
+    drop(app);
+    drop(state);
+    drop(repo);
+    pool.close().await;
+
+    // Rebuild the repository and controller with a new pool; no in-memory request is retained.
+    let restarted_pool = init_postgres_pool(&connection).await.unwrap();
+    let restarted_repo = Arc::new(Repository::new(restarted_pool.clone()));
+    let state = AppState::new(
+        settings,
+        common::test_inventory(),
+        common::test_playbooks(),
+        restarted_repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let reconciler = ReconciliationLoop::new(restarted_repo.clone(), speaker.clone(), 30, false)
+        .with_app_state(state);
+    reconciler.reconcile().await.unwrap();
+    let withdrawn = restarted_repo
+        .get_mitigation(mitigation.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(withdrawn.status, MitigationStatus::Withdrawn);
+    assert_eq!(withdrawn.reason, original.reason);
+    assert!(
+        restarted_repo
+            .pending_withdrawals(None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let (actor, details): (String, String) =
+        sqlx::query_as("SELECT actor_id, details_json FROM audit_log WHERE action = 'withdraw'")
+            .fetch_one(&restarted_pool)
+            .await
+            .unwrap();
+    assert_eq!(actor, "anonymous");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&details).unwrap()["operation_id"],
+        original.operation_id.to_string()
+    );
+    let deletes = speaker.deletes.load(SeqCst);
+    reconciler.reconcile().await.unwrap();
+    assert_eq!(speaker.deletes.load(SeqCst), deletes);
+
+    // A later lifecycle revision cannot be finalized by an old operation.
+    mitigation.mitigation_id = uuid::Uuid::new_v4();
+    mitigation.activate();
+    restarted_repo.insert_mitigation(&mitigation).await.unwrap();
+    let current = restarted_repo
+        .get_mitigation(mitigation.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let stale = request_withdrawal(
+        restarted_repo.as_ref(),
+        &current,
+        false,
+        "operator",
+        "alice",
+        "stale".into(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE mitigations SET updated_at = updated_at + INTERVAL '1 second' WHERE mitigation_id = $1").bind(mitigation.mitigation_id).execute(&restarted_pool).await.unwrap();
+    assert!(
+        restarted_repo
+            .finish_withdrawal(&stale)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        restarted_repo
+            .get_mitigation(mitigation.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+}
