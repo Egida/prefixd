@@ -244,26 +244,26 @@ capability boundary, evidence limits, and delivery order.
 ### Phase 1: Selectable rustbgpd Adapter
 
 - [x] Vendor the controller proto behind `bgp-rustbgpd`
-- [ ] Implement and validate `RustBgpdAnnouncer` for announce, withdraw, retained local-rule read-back, and peer status (LAN-1947)
+- [ ] Implement and validate `RustBgpdAnnouncer` for announce, withdraw, retained local-rule read-back, and peer status
 - [ ] Add compatible `sidecar`, `gobgp`, `rustbgpd`, and `mock` selection; preserve existing defaults until qualification
-- [ ] Retry failed TTL withdrawals before marking mitigations expired (LAN-2288)
-- [ ] Complete UDS/client-certificate mTLS and rustbgpd deployment wiring (LAN-2125)
+- [ ] Retry failed TTL withdrawals before marking mitigations expired
+- [ ] Complete UDS/client-certificate mTLS and rustbgpd deployment wiring
 
 ### Phase 2: Qualification and Default Migration
 
-- [x] Verify local-controller TTL withdrawal and same-channel restart re-injection against digest-pinned rustbgpd v0.76.0/v0.77.0 (LAN-2126, LAN-2127); router/deployment qualification remains separate
-- [ ] Re-run FRR and Juniper interop against rustbgpd; qualify Arista/Cisco independently (LAN-2128, LAN-2144)
-- [ ] Re-run bounded chaos/load checks and attribute evidence to the tested backend (LAN-2129)
-- [ ] Publish migration/rollback instructions and an explicit version pin/upgrade policy (LAN-2130, LAN-2131)
+- [x] Verify local-controller TTL withdrawal and same-channel restart re-injection against digest-pinned rustbgpd v0.76.0/v0.77.0; router/deployment qualification remains separate
+- [ ] Re-run FRR and Juniper interop against rustbgpd; qualify Arista/Cisco independently
+- [ ] Re-run bounded chaos/load checks and attribute evidence to the tested backend
+- [ ] Publish migration/rollback instructions and an explicit version pin/upgrade policy
 - [ ] Switch default deployment to rustbgpd after these gates pass; retain GoBGP's adapter, proto, configuration, and CI
 
 ### Phase 3: Other Daemons
 
-- [ ] Split required writing from optional RIB reading and peer observation; declare capabilities honestly (LAN-2132)
-- [ ] Persist announcement confirmations and retryable cleanup in a durable ledger before write-only adapters (LAN-2133)
-- [ ] Expose backend and capabilities through compatible health, CLI, dashboard, metrics and Grafana surfaces (LAN-2134, LAN-1948)
-- [ ] Define a generic HTTP shim; qualify ExaBGP or another API as an independent transport proof (LAN-2135, LAN-2137)
-- [ ] Require shared conformance, per-backend CI, maintainer ownership, and documented qualification (LAN-2136, LAN-2138, LAN-2139)
+- [ ] Split required writing from optional RIB reading and peer observation; declare capabilities honestly
+- [ ] Persist announcement confirmations and retryable cleanup in a durable ledger before write-only adapters
+- [ ] Expose backend and capabilities through compatible health, CLI, dashboard, metrics and Grafana surfaces
+- [ ] Define a generic HTTP shim; qualify ExaBGP or another API as an independent transport proof
+- [ ] Require shared conformance, per-backend CI, maintainer ownership, and documented qualification
 
 Controller TTL enforcement requires running reconciliation. A separate speaker
 can keep advertising after prefixd stops; crash cleanup needs its own explicit

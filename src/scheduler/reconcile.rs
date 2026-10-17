@@ -6,7 +6,10 @@ use crate::alerting::AlertingService;
 use crate::bgp::FlowSpecAnnouncer;
 use crate::correlation::{CorrelationEngine, SignalGroupStatus};
 use crate::db::RepositoryTrait;
-use crate::domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule, MitigationStatus};
+use crate::domain::{
+    FlowSpecAction, FlowSpecNlri, FlowSpecRule, MitigationStatus, execute_withdrawal,
+    request_withdrawal,
+};
 use crate::state::AppState;
 use crate::ws::WsMessage;
 use tokio::sync::RwLock;
@@ -122,86 +125,138 @@ impl ReconciliationLoop {
 
     /// Run one reconciliation cycle (for testing)
     pub async fn reconcile(&self) -> anyhow::Result<()> {
-        // 1. Expire mitigations past TTL
-        self.expire_mitigations().await?;
-
-        // 2. Expire signal groups past window
-        self.expire_signal_groups().await?;
-
-        // 2b. Sweep expired corroborating signals from the floating cache (ADR 021)
-        self.sweep_corroborator_cache().await?;
-
-        // 2c. Refresh decayed confidence on open signal groups (ADR 022).
-        // No-op when confidence decay is disabled or wiring isn't present.
-        self.refresh_decayed_confidence().await?;
-
-        // 3. Sync desired vs actual state
-        self.sync_announcements().await?;
-
-        // 4. Update BGP session metrics
+        let mut failure = None;
+        // Each stage is independent; a speaker failure must not stop expiry or health updates.
+        for (stage, result) in [
+            ("withdrawals", self.expire_mitigations().await),
+            ("signal groups", self.expire_signal_groups().await),
+            ("corroborator cache", self.sweep_corroborator_cache().await),
+            ("confidence", self.refresh_decayed_confidence().await),
+            ("announcements", self.sync_announcements().await),
+        ] {
+            if let Err(error) = result {
+                tracing::warn!(stage, error = %error, "reconciliation stage failed");
+                failure = Some(error);
+            }
+        }
         self.update_bgp_session_metrics().await;
-
-        Ok(())
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     async fn expire_mitigations(&self) -> anyhow::Result<()> {
-        let expired = self.repo.find_expired_mitigations().await?;
-        let mut withdrawal_error = None;
-
-        for mut mitigation in expired {
-            tracing::info!(
-                mitigation_id = %mitigation.mitigation_id,
-                victim_ip = %mitigation.victim_ip,
-                "expiring mitigation"
-            );
-
-            // Withdraw BGP announcement
-            if !self.dry_run {
-                let rule = self.build_flowspec_rule(&mitigation);
-                let start = std::time::Instant::now();
-                if let Err(e) = self.announcer.withdraw(&rule).await {
-                    tracing::warn!(
-                        mitigation_id = %mitigation.mitigation_id,
-                        error = %e,
-                        "failed to withdraw expired mitigation"
-                    );
-                    withdrawal_error = Some(e);
-                    continue;
-                } else {
-                    crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                        .with_label_values(&["withdrawn"])
-                        .inc();
-                    crate::observability::metrics::ANNOUNCEMENTS_LATENCY
-                        .observe(start.elapsed().as_secs_f64());
+        let pop = self.state.as_ref().map(|state| state.settings.pop.as_str());
+        let pending = self.repo.pending_withdrawals(pop).await?;
+        let mut candidates: Vec<_> = pending
+            .into_iter()
+            .map(|request| (request.mitigation_id, Some(request)))
+            .collect();
+        let mut failure = None;
+        match self.repo.find_expired_mitigations().await {
+            Ok(expired) => {
+                for mitigation in expired {
+                    if pop.is_none_or(|pop| mitigation.pop == pop)
+                        && !candidates
+                            .iter()
+                            .any(|(id, _)| *id == mitigation.mitigation_id)
+                    {
+                        candidates.push((mitigation.mitigation_id, None));
+                    }
                 }
             }
-
-            // Update status
-            let action_type_str = mitigation.action_type.to_string();
-            let pop = mitigation.pop.clone();
-            mitigation.expire();
-            self.repo.update_mitigation(&mitigation).await?;
-
-            crate::observability::metrics::MITIGATIONS_EXPIRED
-                .with_label_values(&[&action_type_str, &pop])
-                .inc();
-
-            // Broadcast expiry via WebSocket
-            if let Some(ref tx) = self.ws_broadcast {
-                let _ = tx.send(WsMessage::MitigationExpired {
+            Err(error) => failure = Some(error.into()),
+        }
+        for (id, request) in candidates {
+            let _guard = match &self.state {
+                Some(state) => Some(state.mitigation_lock.lock().await),
+                None => None,
+            };
+            let current = match self.repo.get_mitigation(id).await {
+                Ok(Some(mitigation))
+                    if mitigation.is_active() && pop.is_none_or(|pop| mitigation.pop == pop) =>
+                {
+                    mitigation
+                }
+                Ok(_) => continue,
+                Err(error) => {
+                    failure = Some(error.into());
+                    continue;
+                }
+            };
+            let request = match request {
+                Some(request) => request,
+                None if current.expires_at > chrono::Utc::now() => continue,
+                None => match request_withdrawal(
+                    self.repo.as_ref(),
+                    &current,
+                    true,
+                    "system",
+                    "scheduler",
+                    "TTL expired".into(),
+                )
+                .await
+                {
+                    Ok(request) => request,
+                    Err(error) => {
+                        failure = Some(error.into());
+                        continue;
+                    }
+                },
+            };
+            let mitigation = match execute_withdrawal(
+                self.repo.as_ref(),
+                self.announcer.as_ref(),
+                self.dry_run,
+                &request,
+            )
+            .await
+            {
+                Ok(mitigation) => mitigation,
+                Err(error) => {
+                    tracing::warn!(mitigation_id = %request.mitigation_id, error = %error, "withdrawal remains pending");
+                    failure = Some(error.into());
+                    continue;
+                }
+            };
+            let message = if request.is_expiry() {
+                crate::observability::metrics::MITIGATIONS_EXPIRED
+                    .with_label_values(&[&mitigation.action_type.to_string(), &mitigation.pop])
+                    .inc();
+                WsMessage::MitigationExpired {
                     mitigation_id: mitigation.mitigation_id.to_string(),
-                });
+                }
+            } else {
+                crate::observability::metrics::MITIGATIONS_WITHDRAWN
+                    .with_label_values(&[
+                        mitigation.action_type.to_string().as_str(),
+                        mitigation.pop.as_str(),
+                        if request.actor_type == "detector" {
+                            "detector_unban"
+                        } else {
+                            "operator"
+                        },
+                    ])
+                    .inc();
+                WsMessage::MitigationWithdrawn {
+                    mitigation_id: mitigation.mitigation_id.to_string(),
+                }
+            };
+            if let Some(tx) = &self.ws_broadcast {
+                let _ = tx.send(message);
             }
-
-            if let Some(ref alerting_lock) = self.alerting {
-                let alerting = alerting_lock.read().await.clone();
-                alerting.notify(crate::alerting::Alert::mitigation_expired(&mitigation));
+            if let Some(alerting) = &self.alerting {
+                let alert = if request.is_expiry() {
+                    crate::alerting::Alert::mitigation_expired(&mitigation)
+                } else {
+                    crate::alerting::Alert::mitigation_withdrawn(&mitigation)
+                };
+                alerting.read().await.notify(alert);
             }
         }
-
-        // Retain active state for retry and skip sync so an uncertain delete is not re-announced.
-        match withdrawal_error {
-            Some(error) => Err(error.into()),
+        match failure {
+            Some(error) => Err(error),
             None => Ok(()),
         }
     }
@@ -351,6 +406,13 @@ impl ReconciliationLoop {
     }
 
     async fn sync_announcements(&self) -> anyhow::Result<()> {
+        // An unreadable withdrawal ledger cannot safely authorize a repair.
+        let pop = self.state.as_ref().map(|state| state.settings.pop.as_str());
+        let pending = self.repo.pending_withdrawals(pop).await?;
+        let pending_keys: std::collections::HashSet<_> = pending
+            .iter()
+            .map(|request| request.nlri_hash.as_str())
+            .collect();
         // Page through all active mitigations using cursor pagination
         let mut active = Vec::new();
         let page_size: u32 = 500;
@@ -381,6 +443,13 @@ impl ReconciliationLoop {
             }
         }
 
+        let now = chrono::Utc::now();
+        active.retain(|mitigation| {
+            mitigation.expires_at > now
+                && pop.is_none_or(|pop| mitigation.pop == pop)
+                && !pending_keys.contains(self.build_flowspec_rule(mitigation).nlri_hash().as_str())
+        });
+
         crate::observability::metrics::RECONCILIATION_ACTIVE_COUNT
             .with_label_values(&["local"])
             .set(active.len() as f64);
@@ -406,10 +475,35 @@ impl ReconciliationLoop {
         let announced_hashes: std::collections::HashSet<_> =
             announced.iter().map(|r| r.nlri_hash()).collect();
 
+        // Re-announce missing rules
         let mut repair_error = None;
-        // Sequential RPCs keep recovery from creating a concurrent injection burst.
-        for mitigation in &active {
-            let rule = self.build_flowspec_rule(mitigation);
+        for candidate in &active {
+            let _guard = match &self.state {
+                Some(state) => Some(state.mitigation_lock.lock().await),
+                None => None,
+            };
+            let mitigation = match self.repo.get_mitigation(candidate.mitigation_id).await {
+                Ok(Some(mitigation))
+                    if mitigation.is_active()
+                        && mitigation.expires_at > chrono::Utc::now()
+                        && pop.is_none_or(|pop| mitigation.pop == pop) =>
+                {
+                    mitigation
+                }
+                Ok(_) => continue,
+                Err(error) => {
+                    repair_error = Some(error);
+                    continue;
+                }
+            };
+            let current_pending = self.repo.pending_withdrawals(pop).await?;
+            let rule = self.build_flowspec_rule(&mitigation);
+            if current_pending.iter().any(|request| {
+                request.mitigation_id == mitigation.mitigation_id
+                    || request.nlri_hash == rule.nlri_hash()
+            }) {
+                continue;
+            }
             let hash = rule.nlri_hash();
 
             if !announced_hashes.contains(&hash) {
@@ -507,6 +601,9 @@ mod tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
+    // Keep exact counter assertions isolated from the other repair-producing test.
+    static REPAIR_METRICS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     struct FailingWithdrawal {
         inner: MockAnnouncer,
         mode: AtomicUsize,
@@ -576,6 +673,7 @@ mod tests {
 
     #[tokio::test]
     async fn expiry_retries_failed_withdrawals_without_false_events_or_reannouncement() {
+        let _metrics_guard = REPAIR_METRICS_LOCK.lock().await;
         // Cover rejection before removal and an ambiguous reply after removal.
         for failure_mode in [1, 2] {
             let repo = Arc::new(MockRepository::new());
@@ -587,6 +685,30 @@ mod tests {
             });
             let first = expired_mitigation("192.0.2.1");
             let second = expired_mitigation("192.0.2.2");
+            let mut unrelated = expired_mitigation("192.0.2.3");
+            unrelated.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+            repo.insert_mitigation(&unrelated).await.unwrap();
+            let mut group = CorrelationEngine::create_group("192.0.2.8", "udp_flood", 60);
+            group.window_expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+            repo.insert_signal_group(&group).await.unwrap();
+            let now = chrono::Utc::now();
+            repo.insert_corroborating_signal(&crate::correlation::CorroboratingSignal {
+                signal_id: uuid::Uuid::new_v4(),
+                source: "expired-test".into(),
+                vector: None,
+                customer_id: None,
+                pop: Some("test".into()),
+                service_id: None,
+                interface: None,
+                confidence: Some(0.5),
+                weight: 1.0,
+                ingested_at: now - chrono::Duration::minutes(2),
+                expires_at: now - chrono::Duration::seconds(1),
+                raw_details: None,
+                attached_group_ids: vec![],
+            })
+            .await
+            .unwrap();
             let (tx, mut rx) = broadcast::channel(8);
             let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
                 .with_ws_broadcast(tx);
@@ -619,10 +741,25 @@ mod tests {
                 matches!(rx.try_recv().unwrap(), WsMessage::MitigationExpired { mitigation_id } if mitigation_id == second.mitigation_id.to_string())
             );
             assert!(rx.try_recv().is_err());
-            assert_eq!(speaker.announcements.load(SeqCst), 0);
+            assert_eq!(
+                repo.get_signal_group(group.group_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                SignalGroupStatus::Expired
+            );
+            assert_eq!(
+                repo.delete_expired_corroborating_signals(now)
+                    .await
+                    .unwrap()
+                    .unattached_total(),
+                0
+            );
+            assert_eq!(speaker.announcements.load(SeqCst), 1);
             assert_eq!(
                 speaker.inner.announced_count().await,
-                usize::from(failure_mode == 1)
+                1 + usize::from(failure_mode == 1)
             );
 
             speaker.mode.store(0, SeqCst);
@@ -635,25 +772,31 @@ mod tests {
                     .status,
                 MitigationStatus::Expired
             );
-            assert!(speaker.list_active().await.unwrap().is_empty());
+            assert_eq!(speaker.list_active().await.unwrap().len(), 1);
             assert!(
                 matches!(rx.try_recv().unwrap(), WsMessage::MitigationExpired { mitigation_id } if mitigation_id == first.mitigation_id.to_string())
             );
             assert!(rx.try_recv().is_err());
-            assert_eq!(speaker.announcements.load(SeqCst), 0);
+            assert_eq!(speaker.announcements.load(SeqCst), 1);
         }
     }
     #[tokio::test]
     async fn failed_repair_returns_error_but_other_repairs_progress() {
+        let _metrics_guard = REPAIR_METRICS_LOCK.lock().await;
         let repo = Arc::new(MockRepository::new());
         let speaker = Arc::new(FailingWithdrawal {
-            inner: MockAnnouncer::new(),
+            inner: MockAnnouncer::with_peers(vec![PeerStatus {
+                name: "failed-repair-peer".into(),
+                address: "192.0.2.254".into(),
+                state: crate::bgp::SessionState::Idle,
+            }]),
             mode: AtomicUsize::new(3),
             announcements: AtomicUsize::new(0),
             inventories: AtomicUsize::new(0),
         });
         let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
-        for ip in ["192.0.2.1", "192.0.2.2"] {
+        // The mock lists newest first: force the failing repair before the healthy one.
+        for ip in ["192.0.2.2", "192.0.2.1"] {
             let mut mitigation = expired_mitigation(ip);
             mitigation.expires_at = chrono::Utc::now() + chrono::Duration::seconds(300);
             repo.insert_mitigation(&mitigation).await.unwrap();
@@ -661,7 +804,11 @@ mod tests {
         let metrics = &crate::observability::metrics::RECONCILIATION_REPAIRS;
         let failures = metrics.with_label_values(&["error"]).get();
         let successes = metrics.with_label_values(&["success"]).get();
+        let peer_up = crate::observability::metrics::BGP_SESSION_UP
+            .with_label_values(&["failed-repair-peer"]);
+        peer_up.set(1.0);
         assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(peer_up.get(), 0.0);
         assert_eq!(speaker.announcements.load(SeqCst), 2);
         let actual = speaker.list_active().await.unwrap();
         assert_eq!(actual.len(), 1);

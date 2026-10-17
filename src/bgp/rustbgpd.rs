@@ -90,7 +90,10 @@ impl RustBgpdAnnouncer {
         Fut: Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
     {
         for attempt in 0..3 {
-            match call().await {
+            let result = tokio::time::timeout(Duration::from_secs(30), call())
+                .await
+                .unwrap_or_else(|_| Err(tonic::Status::deadline_exceeded("RPC deadline elapsed")));
+            match result {
                 Ok(value) => return Ok(value.into_inner()),
                 Err(status)
                     if attempt < 2
