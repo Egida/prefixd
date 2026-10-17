@@ -89,7 +89,7 @@ frontend/
 │   └── use-permissions.ts     # Role-based permissions (deny-by-default, settled flag)
 ├── lib/
 │   ├── api.ts                 # Fetch wrapper, all API functions, 401 debounce dispatch
-│   └── mock-api-data.ts       # Mock data for development
+│   └── clipboard.ts           # Shared clipboard helper
 ├── __tests__/                 # Vitest tests
 ├── vitest.config.ts           # Vitest config (jsdom, react plugin, @ alias)
 └── vitest.setup.ts            # jest-dom matchers

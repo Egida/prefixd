@@ -6,8 +6,8 @@ WORKDIR /app
 # Copy package files
 COPY package.json bun.lock ./
 
-# Install dependencies (not frozen to handle minor version differences)
-RUN bun install
+# Install the committed resolution with the same Bun version as CI.
+RUN bun install --frozen-lockfile
 
 # Copy source
 COPY . .

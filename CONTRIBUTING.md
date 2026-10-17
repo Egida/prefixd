@@ -235,3 +235,19 @@ CI builds and publishes:
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.
+
+### Dashboard checks
+
+Use Bun 1.3.14 with the committed `frontend/bun.lock`:
+
+```bash
+cd frontend
+bun install --frozen-lockfile
+bun run test
+bun run build
+bun audit
+```
+
+The dashboard always uses the configured API. Keep response fixtures in tests;
+`NEXT_PUBLIC_MOCK_MODE` is retired. `next lint` was removed upstream; replacement
+ESLint/type-check checks and a browser harness remain frontend tooling work.
