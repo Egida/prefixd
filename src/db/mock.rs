@@ -141,12 +141,17 @@ impl RepositoryTrait for MockRepository {
     }
 
     async fn active_mitigations_for_pop(&self, pop: &str) -> Result<Vec<Mitigation>> {
+        self.active_mitigation_inventory(Some(pop)).await
+    }
+
+    async fn active_mitigation_inventory(&self, pop: Option<&str>) -> Result<Vec<Mitigation>> {
         Ok(self
             .mitigations
             .lock()
             .unwrap()
             .iter()
-            .filter(|m| m.pop == pop && m.is_active())
+            .rev()
+            .filter(|m| pop.is_none_or(|pop| m.pop == pop) && m.is_active())
             .cloned()
             .collect())
     }

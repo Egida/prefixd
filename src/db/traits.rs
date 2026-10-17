@@ -104,6 +104,18 @@ pub trait RepositoryTrait: Send + Sync {
     async fn find_expired_mitigations(&self) -> Result<Vec<Mitigation>>;
     /// Complete owner inventory, including pending rows, without a timestamp cursor.
     async fn active_mitigations_for_pop(&self, pop: &str) -> Result<Vec<Mitigation>>;
+    /// Strict complete owner inventory; `None` requests all POPs for standalone reconciliation.
+    /// Existing implementers retain scoped reads; override this method to support all POPs.
+    /// The default rejects an unsupported all-POP request instead of returning partial state.
+    async fn active_mitigation_inventory(&self, pop: Option<&str>) -> Result<Vec<Mitigation>> {
+        match pop {
+            Some(pop) => self.active_mitigations_for_pop(pop).await,
+            None => Err(crate::error::PrefixdError::Internal(
+                "all-POP mitigation inventory is unsupported by this repository".into(),
+            )),
+        }
+    }
+
     async fn begin_withdrawal(&self, request: &WithdrawalRequest) -> Result<WithdrawalRequest>;
     async fn pending_withdrawals(&self, pop: Option<&str>) -> Result<Vec<WithdrawalRequest>>;
     /// Atomically complete this exact operation and its unchanged mitigation revision.

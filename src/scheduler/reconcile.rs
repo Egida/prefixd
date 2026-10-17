@@ -414,37 +414,13 @@ impl ReconciliationLoop {
             .iter()
             .map(|request| request.nlri_hash.as_str())
             .collect();
-        // Page through all active mitigations using cursor pagination
-        let mut active = Vec::new();
-        let page_size: u32 = 500;
-        let mut cursor = None;
-        loop {
-            let params = crate::db::ListParams {
-                limit: page_size,
-                cursor,
-                ..Default::default()
-            };
-            let page = self
-                .repo
-                .list_mitigations(
-                    Some(&[MitigationStatus::Active, MitigationStatus::Escalated]),
-                    None,
-                    None,
-                    None,
-                    &params,
-                )
-                .await?;
-            let done = (page.len() as u32) < page_size;
-            if let Some(last) = page.last() {
-                cursor = Some(last.created_at);
-            }
-            active.extend(page);
-            if done {
-                break;
-            }
-        }
-
-        active.retain(|mitigation| pop.is_none_or(|pop| mitigation.pop == pop));
+        let mut active = self.repo.active_mitigation_inventory(pop).await?;
+        active.retain(|mitigation| {
+            matches!(
+                mitigation.status,
+                MitigationStatus::Active | MitigationStatus::Escalated
+            ) && pop.is_none_or(|pop| mitigation.pop == pop)
+        });
 
         crate::observability::metrics::RECONCILIATION_ACTIVE_COUNT
             .with_label_values(&["local"])
@@ -489,8 +465,10 @@ impl ReconciliationLoop {
             };
             let mitigation = match self.repo.get_mitigation(candidate.mitigation_id).await {
                 Ok(Some(mitigation))
-                    if mitigation.is_active()
-                        && mitigation.expires_at > chrono::Utc::now()
+                    if matches!(
+                        mitigation.status,
+                        MitigationStatus::Active | MitigationStatus::Escalated
+                    ) && mitigation.expires_at > chrono::Utc::now()
                         && pop.is_none_or(|pop| mitigation.pop == pop) =>
                 {
                     mitigation
@@ -674,6 +652,77 @@ mod tests {
         mitigation.activate();
         mitigation.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
         mitigation
+    }
+
+    #[tokio::test]
+    async fn pending_creation_is_excluded_from_gauges_and_fresh_repair_checks() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        struct PendingDuringInventory {
+            repo: Arc<MockRepository>,
+            id: uuid::Uuid,
+            inner: MockAnnouncer,
+        }
+        #[async_trait::async_trait]
+        impl FlowSpecAnnouncer for PendingDuringInventory {
+            async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+                self.inner.announce(rule).await
+            }
+            async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+                self.inner.withdraw(rule).await
+            }
+            async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
+                let mut mitigation = self.repo.get_mitigation(self.id).await?.unwrap();
+                mitigation.status = MitigationStatus::Pending;
+                self.repo.update_mitigation(&mitigation).await?;
+                self.inner.list_active().await
+            }
+            async fn session_status(&self) -> Result<Vec<PeerStatus>> {
+                self.inner.session_status().await
+            }
+        }
+        let repo = Arc::new(MockRepository::new());
+        let mut active = expired_mitigation("192.0.2.1");
+        active.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+        let mut pending = expired_mitigation("192.0.2.2");
+        pending.expires_at = active.expires_at;
+        pending.status = MitigationStatus::Pending;
+        let mut escalated = expired_mitigation("192.0.2.3");
+        escalated.expires_at = active.expires_at;
+        escalated.status = MitigationStatus::Escalated;
+        for mitigation in [&active, &pending, &escalated] {
+            repo.insert_mitigation(mitigation).await.unwrap();
+        }
+        let speaker = Arc::new(PendingDuringInventory {
+            repo: repo.clone(),
+            id: active.mitigation_id,
+            inner: MockAnnouncer::new(),
+        });
+        let reconciler = ReconciliationLoop::new(repo, speaker.clone(), 30, false);
+        reconciler.sync_announcements().await.unwrap();
+        assert_eq!(
+            crate::observability::metrics::MITIGATIONS_ACTIVE
+                .with_label_values(&["discard", "test"])
+                .get(),
+            2.0
+        );
+        assert_eq!(
+            speaker
+                .inner
+                .list_active()
+                .await
+                .unwrap()
+                .iter()
+                .map(|rule| rule.nlri_hash())
+                .collect::<Vec<_>>(),
+            vec![reconciler.build_flowspec_rule(&escalated).nlri_hash()]
+        );
+        reconciler.sync_announcements().await.unwrap();
+        assert_eq!(
+            crate::observability::metrics::MITIGATIONS_ACTIVE
+                .with_label_values(&["discard", "test"])
+                .get(),
+            1.0
+        );
     }
 
     #[tokio::test]

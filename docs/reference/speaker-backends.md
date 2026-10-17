@@ -110,6 +110,11 @@ must not trigger repeated injection. No received peer's rule is withdrawn by
 this API. Other controllers sharing local injection are not distinguished by an
 ownership marker; unknown local rules are currently reported, not deleted.
 
+Reconciliation reads the complete desired owner inventory for its POP. Malformed
+persisted rows fail the pass before repairs begin. Pending creation rows are
+excluded from repairs and status-active counts; expired and pending-withdrawal
+rows remain counted until their terminal transition but cannot be re-announced.
+
 The scheduler currently compares NLRI identity. Repairing action-only drift
 needs separate coverage and implementation. Successful injection does not
 prove export-policy acceptance, router receipt, or traffic enforcement.

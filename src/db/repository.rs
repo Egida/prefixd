@@ -181,8 +181,12 @@ impl RepositoryTrait for Repository {
     }
 
     async fn active_mitigations_for_pop(&self, pop: &str) -> Result<Vec<Mitigation>> {
+        self.active_mitigation_inventory(Some(pop)).await
+    }
+
+    async fn active_mitigation_inventory(&self, pop: Option<&str>) -> Result<Vec<Mitigation>> {
         let rows = sqlx::query_as::<_, MitigationRow>(
-            "SELECT * FROM mitigations WHERE pop = $1 AND status IN ('pending', 'active', 'escalated')",
+            "SELECT * FROM mitigations WHERE ($1::text IS NULL OR pop = $1) AND status IN ('pending', 'active', 'escalated')",
         )
         .bind(pop)
         .fetch_all(&self.pool)
