@@ -2,10 +2,139 @@
 
 ## General Principles
 
-- **Database migrations run automatically** on startup. No manual SQL required.
+- **Database migrations run automatically** on startup. Legacy speaker state also
+  requires the explicit ownership adoption below before the upgraded daemon starts.
 - **Config files are backward compatible.** New fields have sensible defaults; old configs continue to work.
 - **Mitigations survive restarts.** Active mitigations are stored in PostgreSQL and re-announced by the reconciliation loop after startup.
 - **Always back up the database** before upgrading.
+
+## Speaker ownership upgrade
+
+Migration 014 adds immutable `speaker_targets`, one-to-one `speaker_pop_bindings`,
+and a target reference on withdrawal requests. Startup validates the configured
+POP and speaker target before connecting to the speaker. A POP with no mitigation,
+withdrawal or announcement history binds automatically; events and safelist rows
+alone do not require adoption.
+
+For an existing deployment, back up PostgreSQL and stop the controller. Keep its
+**original POP, backend and speaker endpoint** configured, then run the new binary
+once:
+
+```bash
+prefixd --config /etc/prefixd --adopt-legacy-speaker
+# Compose: run the newly built image with the same config and database environment
+docker compose run --rm --no-deps prefixd --config /etc/prefixd --adopt-legacy-speaker
+```
+
+Choose the command for your installation, then start the controller normally.
+The one-shot command applies migrations, records the original target assignment,
+attaches previously unbound withdrawal requests, writes an adoption audit and
+exits. It never connects to the speaker or starts the API or reconciliation loop.
+It preserves each request's rule, actor, reason, timestamps, operation ID,
+completion state and enforced/dry-run mode. Adoption does not acknowledge an
+announcement or prove that the configured target is the original speaker; the
+operator must verify that identity. Repeating it with the same configuration is
+safe and does not duplicate the adoption audit.
+
+`--adopt-legacy-speaker` cannot force an existing binding to a different target,
+take another POP's target, or repair mismatched pending request ownership. Normal
+startup also rejects unadopted legacy requests, even when all mitigations have
+expired. Do not delete history or clear target IDs to make startup pass.
+
+The identity includes the normalized backend, HTTP(S) endpoint and fixed `GLOBAL`
+routing namespace. `sidecar` and `gobgp`, bare and explicit HTTP addresses, host
+case, equivalent IPv6 spelling and default ports normalize consistently. Token
+environment names/values, CA paths, timeouts and controller operation mode are
+excluded. Endpoints containing userinfo, a query or fragment are rejected.
+Rotating credentials therefore preserves ownership; changing the endpoint does
+not. Config reload continues to leave the running POP, BGP settings and mode
+unchanged. Restarting with a different target fails before any speaker connection.
+
+Run one controller per POP and use each physical speaker target exclusively.
+This database binding does not fence another process, recognize DNS aliases or
+prevent another tool from changing the speaker. Endpoint descriptors stay out of
+health/settings responses, WebSocket messages and ownership errors.
+
+### Drained target transfer
+
+Changing the target is a separate maintenance operation. Back up the database.
+While the original controller and speaker are still available, stop detector
+input, withdraw all active intent and drain pending cleanup. Verify directly on
+the original speaker that no owned rules remain, then **stop the controller**.
+Do not run two controllers during this procedure. The database checks below cannot
+prove remote deletion or fence a controller that is still running.
+
+Inspect the existing binding with an administrative database connection:
+
+```sql
+SELECT b.pop, b.target_id, t.backend, t.endpoint, t.routing_namespace
+FROM speaker_pop_bindings b JOIN speaker_targets t USING (target_id);
+```
+
+For a transfer that keeps the same POP, edit the values in this block: the POP,
+expected old target UUID, normalized new backend/endpoint and operator name.
+Use `gobgp` for either GoBGP mode spelling and an explicit HTTP(S) URL with the
+trailing `/` for an endpoint without a path. Use the same address in the new
+configuration. The block is one transaction and takes the same registration lock
+as startup. It rejects active/pending mitigations, pending cleanup, unadopted
+legacy requests, unresolved announcements and another POP's assigned target.
+
+<!-- speaker-transfer-sql -->
+```sql
+DO $$
+DECLARE
+    transfer_pop TEXT := 'iad1';
+    expected_old UUID := '00000000-0000-0000-0000-000000000001';
+    new_backend TEXT := 'gobgp';
+    new_endpoint TEXT := 'http://new-speaker.example:50051/';
+    operator_name TEXT := 'jsmith';
+    new_target UUID;
+BEGIN
+    LOCK TABLE speaker_pop_bindings IN SHARE ROW EXCLUSIVE MODE;
+    IF NOT EXISTS (SELECT 1 FROM speaker_pop_bindings
+                   WHERE pop = transfer_pop AND target_id = expected_old) THEN
+        RAISE EXCEPTION 'original speaker binding changed or is missing';
+    END IF;
+    IF EXISTS (SELECT 1 FROM mitigations WHERE pop = transfer_pop
+               AND status IN ('pending', 'active', 'escalated'))
+       OR EXISTS (SELECT 1 FROM withdrawal_requests WHERE pop = transfer_pop
+                  AND (completed_at IS NULL OR target_id IS NULL))
+       OR EXISTS (SELECT 1 FROM flowspec_announcements WHERE pop = transfer_pop
+                  AND status <> 'withdrawn') THEN
+        RAISE EXCEPTION 'speaker state must be fully drained and adopted first';
+    END IF;
+    INSERT INTO speaker_targets (target_id, backend, endpoint, routing_namespace)
+    VALUES (gen_random_uuid(), new_backend, new_endpoint, 'GLOBAL')
+    ON CONFLICT (backend, endpoint, routing_namespace) DO NOTHING;
+    SELECT target_id INTO STRICT new_target FROM speaker_targets
+    WHERE backend = new_backend AND endpoint = new_endpoint
+      AND routing_namespace = 'GLOBAL';
+    IF EXISTS (SELECT 1 FROM speaker_pop_bindings
+               WHERE target_id = new_target AND pop <> transfer_pop) THEN
+        RAISE EXCEPTION 'new speaker target belongs to another POP';
+    END IF;
+    UPDATE speaker_pop_bindings SET target_id = new_target
+    WHERE pop = transfer_pop AND target_id = expected_old;
+    INSERT INTO audit_log
+        (audit_id, timestamp, actor_type, actor_id, action, target_type, target_id, details_json)
+    VALUES
+        (gen_random_uuid(), now(), 'operator', operator_name, 'transfer_speaker_target',
+         'speaker_target', new_target::text,
+         json_build_object('pop', transfer_pop, 'old_target_id', expected_old,
+                           'new_target_id', new_target)::text);
+END;
+$$;
+```
+<!-- /speaker-transfer-sql -->
+
+Set the stopped controller's configuration to the new target and start normally;
+no adoption flag is needed. Verify startup, the selected speaker and the first
+reconciliation pass before resuming detector input. The original target identity
+and completed withdrawal rows remain unchanged. Completed history may reference
+the old target; a pending request referencing a different target always blocks
+startup and execution. Do not rewrite old target rows, rebind completed requests,
+or delete audit/history to perform a transfer. Changing the POP itself needs a
+separately reviewed state migration; this procedure keeps its identity intact.
 
 ## Speaker capability metadata
 

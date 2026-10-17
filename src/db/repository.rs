@@ -63,6 +63,94 @@ impl Repository {
 
 #[async_trait]
 impl RepositoryTrait for Repository {
+    async fn register_speaker_target(
+        &self,
+        pop: &str,
+        target: &crate::domain::SpeakerTarget,
+        adopt_legacy: bool,
+    ) -> Result<crate::domain::VerifiedSpeakerBinding> {
+        use crate::domain::{VerifiedSpeakerBinding, binding_mismatch};
+        if pop.is_empty() {
+            return Err(crate::error::PrefixdError::Config(
+                "speaker POP must not be empty".into(),
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        // Also serializes the absent-row case and competing POPs for one target.
+        // This is startup ownership registration, not an interprocess runtime lease.
+        sqlx::query("LOCK TABLE speaker_pop_bindings IN SHARE ROW EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO speaker_targets (target_id, backend, endpoint, routing_namespace) VALUES ($1, $2, $3, $4) ON CONFLICT (backend, endpoint, routing_namespace) DO NOTHING")
+            .bind(Uuid::new_v4()).bind(target.backend).bind(&target.endpoint).bind(target.namespace)
+            .execute(&mut *tx).await?;
+        let target_id: Uuid = sqlx::query_scalar("SELECT target_id FROM speaker_targets WHERE backend = $1 AND endpoint = $2 AND routing_namespace = $3")
+            .bind(target.backend).bind(&target.endpoint).bind(target.namespace)
+            .fetch_one(&mut *tx).await?;
+        let assigned: Option<Uuid> =
+            sqlx::query_scalar("SELECT target_id FROM speaker_pop_bindings WHERE pop = $1")
+                .bind(pop)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let foreign: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM speaker_pop_bindings WHERE target_id = $1 AND pop <> $2)",
+        )
+        .bind(target_id)
+        .bind(pop)
+        .fetch_one(&mut *tx)
+        .await?;
+        if assigned.is_some_and(|assigned| assigned != target_id) || foreign {
+            return Err(binding_mismatch());
+        }
+        let legacy: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM mitigations WHERE pop = $1) OR EXISTS (SELECT 1 FROM withdrawal_requests WHERE pop = $1) OR EXISTS (SELECT 1 FROM flowspec_announcements WHERE pop = $1)")
+            .bind(pop).fetch_one(&mut *tx).await?;
+        let unbound_requests: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM withdrawal_requests WHERE pop = $1 AND target_id IS NULL)")
+            .bind(pop).fetch_one(&mut *tx).await?;
+        let mismatched_requests: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM withdrawal_requests WHERE pop = $1 AND completed_at IS NULL AND target_id IS NOT NULL AND target_id <> $2)")
+            .bind(pop).bind(target_id).fetch_one(&mut *tx).await?;
+        if mismatched_requests {
+            return Err(binding_mismatch());
+        }
+        if !adopt_legacy && ((assigned.is_none() && legacy) || unbound_requests) {
+            return Err(crate::error::PrefixdError::Conflict(
+                "legacy speaker state requires explicit original-target adoption with --adopt-legacy-speaker".into(),
+            ));
+        }
+        if assigned.is_none() {
+            sqlx::query("INSERT INTO speaker_pop_bindings (pop, target_id) VALUES ($1, $2)")
+                .bind(pop)
+                .bind(target_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        let attached = if adopt_legacy {
+            sqlx::query("UPDATE withdrawal_requests SET target_id = $2 WHERE pop = $1 AND target_id IS NULL")
+                .bind(pop).bind(target_id).execute(&mut *tx).await?.rows_affected()
+        } else {
+            0
+        };
+        if adopt_legacy && ((assigned.is_none() && legacy) || attached > 0) {
+            let entry = AuditEntry::new(
+                ActorType::System,
+                Some("adopt-legacy-speaker".into()),
+                "adopt_speaker_target",
+                Some("speaker_target"),
+                Some(target_id.to_string()),
+                serde_json::json!({"pop": pop, "attached_withdrawals": attached}),
+            );
+            sqlx::query("INSERT INTO audit_log (audit_id, timestamp, actor_type, actor_id, action, target_type, target_id, details_json) VALUES ($1, $2, 'system', $3, $4, $5, $6, $7)")
+                .bind(entry.audit_id).bind(entry.timestamp).bind(entry.actor_id).bind(entry.action)
+                .bind(entry.target_type).bind(entry.target_id).bind(serde_json::to_string(&entry.details)?)
+                .execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(VerifiedSpeakerBinding::new(
+            pop.into(),
+            target_id,
+            target.clone(),
+        ))
+    }
+
     async fn insert_event(&self, event: &AttackEvent) -> Result<()> {
         sqlx::query(
             r#"
@@ -198,10 +286,12 @@ impl RepositoryTrait for Repository {
         sqlx::query(
             r#"INSERT INTO withdrawal_requests (
                 operation_id, mitigation_id, pop, nlri_hash, rule_json, mitigation_updated_at,
-                terminal_status, actor_type, actor, reason, requested_at, speaker_delete_required
-            ) SELECT $1, mitigation_id, pop, $4, $5, updated_at, $7, $8, $9, $10, $11, $12
+                terminal_status, actor_type, actor, reason, requested_at, speaker_delete_required, target_id
+            ) SELECT $1, mitigation_id, pop, $4, $5, updated_at, $7, $8, $9, $10, $11, $12, $13
               FROM mitigations WHERE mitigation_id = $2 AND pop = $3 AND updated_at = $6
                 AND status IN ('pending', 'active', 'escalated')
+                AND (($13::uuid IS NULL AND NOT EXISTS (SELECT 1 FROM speaker_pop_bindings WHERE pop = $3))
+                  OR EXISTS (SELECT 1 FROM speaker_pop_bindings WHERE pop = $3 AND target_id = $13))
               ON CONFLICT (mitigation_id) DO NOTHING"#,
         )
         .bind(request.operation_id)
@@ -216,12 +306,15 @@ impl RepositoryTrait for Repository {
         .bind(&request.reason)
         .bind(request.requested_at)
         .bind(request.speaker_delete_required)
+        .bind(request.target_id)
         .execute(&self.pool)
         .await?;
         sqlx::query_as::<_, WithdrawalRequest>(
-            "SELECT * FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL",
+            "SELECT * FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL AND pop = $2 AND target_id IS NOT DISTINCT FROM $3",
         )
         .bind(request.mitigation_id)
+        .bind(&request.pop)
+        .bind(request.target_id)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| {
@@ -243,10 +336,12 @@ impl RepositoryTrait for Repository {
     async fn finish_withdrawal(&self, request: &WithdrawalRequest) -> Result<Option<Mitigation>> {
         let mut transaction = self.pool.begin().await?;
         let pending = sqlx::query_as::<_, WithdrawalRequest>(
-            "SELECT * FROM withdrawal_requests WHERE operation_id = $1 AND mitigation_id = $2 AND completed_at IS NULL FOR UPDATE",
+            "SELECT * FROM withdrawal_requests WHERE operation_id = $1 AND mitigation_id = $2 AND completed_at IS NULL AND pop = $3 AND target_id IS NOT DISTINCT FROM $4 FOR UPDATE",
         )
         .bind(request.operation_id)
         .bind(request.mitigation_id)
+        .bind(&request.pop)
+        .bind(request.target_id)
         .fetch_optional(&mut *transaction)
         .await?;
         let Some(pending) = pending else {
@@ -256,7 +351,7 @@ impl RepositoryTrait for Repository {
         let row = sqlx::query_as::<_, MitigationRow>(
             r#"UPDATE mitigations SET status = $3, withdrawn_at = $4, updated_at = $4,
                 reason = CASE WHEN $3 = 'expired' THEN reason ELSE $5 END
-               WHERE mitigation_id = $1 AND updated_at = $2
+               WHERE mitigation_id = $1 AND updated_at = $2 AND pop = $6
                  AND status IN ('pending', 'active', 'escalated') RETURNING *"#,
         )
         .bind(pending.mitigation_id)
@@ -264,6 +359,7 @@ impl RepositoryTrait for Repository {
         .bind(&pending.terminal_status)
         .bind(now)
         .bind(&pending.reason)
+        .bind(&pending.pop)
         .fetch_optional(&mut *transaction)
         .await?;
         let Some(row) = row else { return Ok(None) };

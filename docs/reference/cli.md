@@ -43,6 +43,16 @@ prefixdctl -a http://127.0.0.1:8080 -t $TOKEN <command>
 
 ---
 
+## Daemon startup option
+
+The daemon, `prefixd`, accepts `--adopt-legacy-speaker` with `--config PATH`.
+This one-shot command adopts existing database history onto its verified original
+speaker configuration, audits the change and exits before connecting to the
+speaker or starting the API. It cannot force a different target or replace an
+existing assignment. Follow the backup and stop procedure in the
+[speaker ownership upgrade guide](../how-to/upgrading.md#speaker-ownership-upgrade)
+before using it. This is not a `prefixdctl` command.
+
 ## Commands
 
 ### Status

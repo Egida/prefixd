@@ -124,6 +124,7 @@ async fn test_ambiguous_withdrawals_retry_without_reannouncement_or_consuming_ne
                 "scheduler",
                 "TTL expired".into(),
                 true,
+                None,
             )
             .await
             .unwrap();
@@ -739,6 +740,7 @@ async fn test_foreign_pop_cannot_delete_local_rule_or_receive_local_repair() {
         "remote-operator",
         "remote cleanup".into(),
         true,
+        None,
     )
     .await
     .unwrap();

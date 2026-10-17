@@ -18,7 +18,14 @@ use crate::domain::{
 use crate::error::Result;
 use crate::observability::AuditEntry;
 
+#[derive(Default)]
+struct MockSpeakerBindings {
+    targets: Vec<(Uuid, crate::domain::SpeakerTarget)>,
+    pops: HashMap<String, Uuid>,
+}
+
 pub struct MockRepository {
+    speaker_bindings: Mutex<MockSpeakerBindings>,
     events: Mutex<Vec<AttackEvent>>,
     #[cfg(test)]
     mitigation_reads: std::sync::atomic::AtomicUsize,
@@ -60,6 +67,7 @@ impl MockRepository {
 
     pub fn new() -> Self {
         Self {
+            speaker_bindings: Mutex::new(MockSpeakerBindings::default()),
             events: Mutex::new(Vec::new()),
             #[cfg(test)]
             mitigation_reads: std::sync::atomic::AtomicUsize::new(0),
@@ -86,6 +94,81 @@ impl Default for MockRepository {
 
 #[async_trait]
 impl RepositoryTrait for MockRepository {
+    async fn register_speaker_target(
+        &self,
+        pop: &str,
+        target: &crate::domain::SpeakerTarget,
+        adopt_legacy: bool,
+    ) -> Result<crate::domain::VerifiedSpeakerBinding> {
+        use crate::domain::{VerifiedSpeakerBinding, binding_mismatch};
+        if pop.is_empty() {
+            return Err(crate::error::PrefixdError::Config(
+                "speaker POP must not be empty".into(),
+            ));
+        }
+        let mut bindings = self.speaker_bindings.lock().unwrap();
+        let mitigations = self.mitigations.lock().unwrap();
+        let mut withdrawals = self.withdrawals.lock().unwrap();
+        let known = bindings
+            .targets
+            .iter()
+            .find(|(_, known)| known == target)
+            .map(|(id, _)| *id);
+        let target_id = known.unwrap_or_else(Uuid::new_v4);
+        let assigned = bindings.pops.get(pop).copied();
+        if assigned.is_some_and(|id| id != target_id)
+            || bindings
+                .pops
+                .iter()
+                .any(|(owner, id)| *id == target_id && owner != pop)
+            || withdrawals.iter().any(|request| {
+                request.pop == pop
+                    && request.completed_at.is_none()
+                    && request.target_id.is_some_and(|id| id != target_id)
+            })
+        {
+            return Err(binding_mismatch());
+        }
+        let legacy =
+            mitigations.iter().any(|m| m.pop == pop) || withdrawals.iter().any(|r| r.pop == pop);
+        let unbound = withdrawals
+            .iter()
+            .any(|r| r.pop == pop && r.target_id.is_none());
+        if !adopt_legacy && ((assigned.is_none() && legacy) || unbound) {
+            return Err(crate::error::PrefixdError::Conflict(
+                "legacy speaker state requires explicit original-target adoption with --adopt-legacy-speaker".into()));
+        }
+        if known.is_none() {
+            bindings.targets.push((target_id, target.clone()));
+        }
+        bindings.pops.insert(pop.into(), target_id);
+        let mut attached = 0;
+        if adopt_legacy {
+            for request in withdrawals
+                .iter_mut()
+                .filter(|r| r.pop == pop && r.target_id.is_none())
+            {
+                request.target_id = Some(target_id);
+                attached += 1;
+            }
+            if (assigned.is_none() && legacy) || attached > 0 {
+                self.audit.lock().unwrap().push(AuditEntry::new(
+                    crate::observability::ActorType::System,
+                    Some("adopt-legacy-speaker".into()),
+                    "adopt_speaker_target",
+                    Some("speaker_target"),
+                    Some(target_id.to_string()),
+                    serde_json::json!({"pop": pop, "attached_withdrawals": attached}),
+                ));
+            }
+        }
+        Ok(VerifiedSpeakerBinding::new(
+            pop.into(),
+            target_id,
+            target.clone(),
+        ))
+    }
+
     async fn insert_event(&self, event: &AttackEvent) -> Result<()> {
         self.events.lock().unwrap().push(event.clone());
         Ok(())
@@ -157,13 +240,20 @@ impl RepositoryTrait for MockRepository {
     }
 
     async fn begin_withdrawal(&self, request: &WithdrawalRequest) -> Result<WithdrawalRequest> {
+        let bindings = self.speaker_bindings.lock().unwrap();
+        if bindings.pops.get(&request.pop).copied() != request.target_id {
+            return Err(crate::domain::binding_mismatch());
+        }
         let mitigations = self.mitigations.lock().unwrap();
         let mut withdrawals = self.withdrawals.lock().unwrap();
         if let Some(existing) = withdrawals
             .iter()
             .find(|r| r.mitigation_id == request.mitigation_id)
         {
-            return if existing.completed_at.is_none() {
+            return if existing.completed_at.is_none()
+                && existing.pop == request.pop
+                && existing.target_id == request.target_id
+            {
                 Ok(existing.clone())
             } else {
                 Err(crate::error::PrefixdError::Conflict(
@@ -205,6 +295,8 @@ impl RepositoryTrait for MockRepository {
         let Some(pending) = withdrawals.iter_mut().find(|r| {
             r.operation_id == request.operation_id
                 && r.mitigation_id == request.mitigation_id
+                && r.pop == request.pop
+                && r.target_id == request.target_id
                 && r.completed_at.is_none()
         }) else {
             return Ok(None);
@@ -212,6 +304,7 @@ impl RepositoryTrait for MockRepository {
         let Some(mitigation) = mitigations.iter_mut().find(|m| {
             m.mitigation_id == pending.mitigation_id
                 && m.updated_at == pending.mitigation_updated_at
+                && m.pop == pending.pop
                 && m.is_active()
         }) else {
             return Ok(None);

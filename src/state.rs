@@ -10,6 +10,7 @@ use crate::bgp::FlowSpecAnnouncer;
 use crate::config::{AuthMode, Inventory, Playbooks, Settings};
 use crate::correlation::CorrelationConfig;
 use crate::db::RepositoryTrait;
+use crate::domain::{SpeakerTarget, VerifiedSpeakerBinding, binding_mismatch};
 use crate::error::{PrefixdError, Result};
 use crate::ws::WsMessage;
 use sqlx::PgPool;
@@ -48,6 +49,7 @@ pub struct AppState {
     /// Directory containing config files (for hot-reload)
     pub config_dir: PathBuf,
     shutting_down: AtomicBool,
+    speaker_binding: Option<VerifiedSpeakerBinding>,
 }
 
 impl AppState {
@@ -124,7 +126,48 @@ impl AppState {
             db_pool,
             config_dir,
             shutting_down: AtomicBool::new(false),
+            speaker_binding: None,
         }))
+    }
+
+    /// Install the repository's startup proof before sharing state with any task.
+    pub fn with_speaker_binding(
+        mut self: Arc<Self>,
+        binding: VerifiedSpeakerBinding,
+    ) -> Result<Arc<Self>> {
+        binding.validate(
+            &self.settings.pop,
+            &SpeakerTarget::from_config(&self.settings.bgp)?,
+            self.announcer.backend(),
+        )?;
+        let state = Arc::get_mut(&mut self).ok_or_else(|| {
+            PrefixdError::Internal(
+                "speaker binding must be installed before sharing application state".into(),
+            )
+        })?;
+        state.speaker_binding = Some(binding);
+        Ok(self)
+    }
+
+    /// Cheap local assertion; startup registration does the persistent validation.
+    /// Only an explicitly selected mock paired with a mock speaker may be unbound.
+    pub fn verified_speaker_binding(&self) -> Result<Option<&VerifiedSpeakerBinding>> {
+        match &self.speaker_binding {
+            Some(binding) => {
+                binding.validate(
+                    &self.settings.pop,
+                    &SpeakerTarget::from_config(&self.settings.bgp)?,
+                    self.announcer.backend(),
+                )?;
+                Ok(Some(binding))
+            }
+            None if self.settings.bgp.mode == crate::config::BgpMode::Mock
+                && self.announcer.backend() == "mock" =>
+            {
+                Ok(None)
+            }
+            None => Err(binding_mismatch()),
+        }
     }
 
     pub fn subscribe_shutdown(&self) -> broadcast::Receiver<()> {

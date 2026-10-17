@@ -1543,6 +1543,7 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
         "alice",
         "stale".into(),
         true,
+        None,
     )
     .await
     .unwrap();
@@ -1580,6 +1581,7 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
         "alice",
         "simulation".into(),
         false,
+        None,
     )
     .await
     .unwrap();
@@ -1593,7 +1595,7 @@ async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
         .unwrap();
     assert!(!persisted.speaker_delete_required);
     let deletes_before = speaker.deletes.load(SeqCst);
-    prefixd::domain::execute_withdrawal(&reconstructed, speaker.as_ref(), true, &persisted)
+    prefixd::domain::execute_withdrawal(&reconstructed, speaker.as_ref(), true, &persisted, None)
         .await
         .unwrap();
     assert_eq!(speaker.deletes.load(SeqCst), deletes_before);
@@ -2276,6 +2278,7 @@ async fn test_reconciliation_inventory_excludes_ineligible_owners() {
         "fixture",
         "pending withdrawal".into(),
         true,
+        None,
     )
     .await
     .unwrap();
@@ -2718,6 +2721,7 @@ async fn test_expiry_failure_keeps_pending_cleanup_and_peer_refresh() {
         "expiry-fixture",
         "pending before expiry enumeration".into(),
         true,
+        None,
     )
     .await
     .unwrap();

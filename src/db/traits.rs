@@ -64,6 +64,21 @@ pub struct ListParams {
 
 #[async_trait]
 pub trait RepositoryTrait: Send + Sync {
+    /// Serialize startup registration/adoption; never rebind an existing POP or target.
+    /// Trusted implementations must persist/validate ownership and commit before
+    /// issuing a binding. Legacy implementations remain source-compatible but
+    /// explicitly fail closed until they implement this contract.
+    async fn register_speaker_target(
+        &self,
+        _pop: &str,
+        _target: &crate::domain::SpeakerTarget,
+        _adopt_legacy: bool,
+    ) -> Result<crate::domain::VerifiedSpeakerBinding> {
+        Err(crate::error::PrefixdError::Config(
+            "speaker target registration is unsupported by this repository".into(),
+        ))
+    }
+
     // Events
     async fn insert_event(&self, event: &AttackEvent) -> Result<()>;
     /// Find the most recent ban event by external_event_id.

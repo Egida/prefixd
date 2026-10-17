@@ -8,6 +8,19 @@ use prefixd::{
 };
 
 use prefixd::bgp::{FlowSpecReader, FlowSpecWriter, PeerObserver};
+fn fixture_settings(fixture: &fixture::Speaker, pop: &str) -> prefixd::config::Settings {
+    let mut settings = common::test_settings();
+    settings.pop = pop.into();
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    settings.bgp.mode = prefixd::config::BgpMode::Rustbgpd;
+    settings.bgp.rustbgpd = Some(prefixd::config::RustBgpdConfig {
+        endpoint: fixture.endpoint.clone(),
+        bearer_token_env: "PREFIXD_RUSTBGPD_TEST_TOKEN".into(),
+        ca_cert_path: None,
+    });
+    settings
+}
+
 fn rule() -> FlowSpecRule {
     FlowSpecRule::new(
         FlowSpecNlri {
@@ -69,7 +82,17 @@ async fn live_rustbgpd_ttl_reconciliation() {
     let fixture = fixture::Speaker::start().await;
     let speaker = Arc::new(fixture.connect().await);
     let repo = Arc::new(MockRepository::new());
-    let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+    let settings = fixture_settings(&fixture, "live-test");
+    let binding = repo
+        .register_speaker_target(
+            &settings.pop,
+            &prefixd::domain::SpeakerTarget::from_config(&settings.bgp).unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+    let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+        .with_speaker_binding(binding);
     for (ip, length) in [("192.0.2.232", 32), ("2001:db8::232", 128)] {
         let mut mitigation = Mitigation::from_intent(
             MitigationIntent {
@@ -185,6 +208,15 @@ async fn live_rustbgpd_restart_recovers_with_the_same_client_and_desired_state()
     let fixture = fixture::Speaker::start().await;
     let speaker = Arc::new(fixture.connect().await);
     let repo = Arc::new(MockRepository::new());
+    let settings = fixture_settings(&fixture, "restart-test");
+    let binding = repo
+        .register_speaker_target(
+            &settings.pop,
+            &prefixd::domain::SpeakerTarget::from_config(&settings.bgp).unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
     let mut desired = Vec::new();
     for (ip, length, action_type, rate_bps) in [
         ("192.0.2.233", 32, ActionType::Discard, None),
@@ -235,7 +267,8 @@ async fn live_rustbgpd_restart_recovers_with_the_same_client_and_desired_state()
         observed.clone(),
         interval.as_secs() as u32,
         false,
-    );
+    )
+    .with_speaker_binding(binding.clone());
     let (shutdown, rx) = tokio::sync::broadcast::channel(1);
     let task = tokio::spawn(async move { reconciler.run(rx).await });
     tokio::time::timeout(interval, observed.observed.notified())
@@ -317,13 +350,15 @@ async fn live_rustbgpd_restart_recovers_with_the_same_client_and_desired_state()
 
     metrics::init_metrics();
     let state = prefixd::AppState::new(
-        common::test_settings(),
+        settings,
         common::test_inventory(),
         common::test_playbooks(),
         repo,
         speaker,
         ".".into(),
     )
+    .unwrap()
+    .with_speaker_binding(binding)
     .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
