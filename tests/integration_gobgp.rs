@@ -516,9 +516,12 @@ async fn test_local_provenance_and_unsupported_local_rule() {
     announcer.announce(&rule).await.unwrap();
     let endpoint =
         std::env::var("PREFIXD_GOBGP_TEST_ENDPOINT").unwrap_or_else(|_| GOBGP_ENDPOINT.into());
-    let mut client = GoBgpServiceClient::connect(format!("http://{endpoint}"))
-        .await
-        .unwrap();
+    let endpoint = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        endpoint
+    } else {
+        format!("http://{endpoint}")
+    };
+    let mut client = GoBgpServiceClient::connect(endpoint).await.unwrap();
     let family = apipb::Family { afi: 1, safi: 133 };
     let mut stream = client
         .list_path(apipb::ListPathRequest {
