@@ -15,11 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Digest-pinned rustbgpd v0.76.0/v0.77.0 CI coverage for local lifecycle, TTL
+  withdrawal and recovery through the same client after a speaker restart.
+- Reconciliation repair outcome counters and operator recovery/alert guidance.
+
 - Experimental rustbgpd speaker adapter behind `bgp-rustbgpd`, with explicit
   backend selection, authenticated gRPC, local-rule read-back, and IPv4/IPv6
   discard/policing support. Existing GoBGP and mock configurations remain valid.
 
 ### Fixed
+
+- Failed announcement repairs now make reconciliation fail while other repairs
+  continue. Startup performs one immediate pass, then waits for the interval.
+- Grafana reconciliation runs and configuration reloads now group and label
+  the actual `status` series.
 
 - **Safelist removal from the dashboard returned 404.** The Next.js API proxy joins percent-decoded route segments, so `DELETE /v1/safelist/8.9.8.9%2F32` reached the backend as `/v1/safelist/8.9.8.9/32` and missed the single-segment route. The proxy now re-encodes each segment, and the route accepts a literal slash form (`{*prefix}`) for proxies that decode `%2F`.
 - **Dashboard had no sign-out (and no role-based permissions).** `/v1/auth/login` and `/v1/auth/me` return a flat operator (`operator_id`), but the client read `data.operator`, leaving `operator` as `undefined`. The user menu (and therefore sign-out) never rendered, and role checks denied admin actions to authenticated admins. Auth responses are now mapped to the client `Operator` shape and `isAuthenticated` is a strict boolean.

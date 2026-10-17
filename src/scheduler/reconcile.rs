@@ -91,7 +91,8 @@ impl ReconciliationLoop {
             }
         }
 
-        let mut interval = tokio::time::interval(self.interval);
+        let mut interval =
+            tokio::time::interval_at(tokio::time::Instant::now() + self.interval, self.interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -405,7 +406,8 @@ impl ReconciliationLoop {
         let announced_hashes: std::collections::HashSet<_> =
             announced.iter().map(|r| r.nlri_hash()).collect();
 
-        // Re-announce missing rules
+        let mut repair_error = None;
+        // Sequential RPCs keep recovery from creating a concurrent injection burst.
         for mitigation in &active {
             let rule = self.build_flowspec_rule(mitigation);
             let hash = rule.nlri_hash();
@@ -420,12 +422,19 @@ impl ReconciliationLoop {
                 if !self.dry_run {
                     let start = std::time::Instant::now();
                     if let Err(e) = self.announcer.announce(&rule).await {
+                        crate::observability::metrics::RECONCILIATION_REPAIRS
+                            .with_label_values(&["error"])
+                            .inc();
                         tracing::error!(
                             mitigation_id = %mitigation.mitigation_id,
                             error = %e,
                             "failed to re-announce"
                         );
+                        repair_error = Some(e);
                     } else {
+                        crate::observability::metrics::RECONCILIATION_REPAIRS
+                            .with_label_values(&["success"])
+                            .inc();
                         crate::observability::metrics::ANNOUNCEMENTS_TOTAL
                             .with_label_values(&["announced"])
                             .inc();
@@ -452,7 +461,10 @@ impl ReconciliationLoop {
             }
         }
 
-        Ok(())
+        match repair_error {
+            Some(error) => Err(error.into()),
+            None => Ok(()),
+        }
     }
 
     async fn update_bgp_session_metrics(&self) {
@@ -499,12 +511,18 @@ mod tests {
         inner: MockAnnouncer,
         mode: AtomicUsize,
         announcements: AtomicUsize,
+        inventories: AtomicUsize,
     }
 
     #[async_trait::async_trait]
     impl FlowSpecAnnouncer for FailingWithdrawal {
         async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
             self.announcements.fetch_add(1, SeqCst);
+            if self.mode.load(SeqCst) == 3 && rule.nlri.dst_prefix == "192.0.2.1/32" {
+                return Err(PrefixdError::BgpAnnouncementFailed(
+                    "temporary repair failure".into(),
+                ));
+            }
             self.inner.announce(rule).await
         }
 
@@ -522,6 +540,7 @@ mod tests {
         }
 
         async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
+            self.inventories.fetch_add(1, SeqCst);
             self.inner.list_active().await
         }
 
@@ -564,6 +583,7 @@ mod tests {
                 inner: MockAnnouncer::new(),
                 mode: AtomicUsize::new(failure_mode),
                 announcements: AtomicUsize::new(0),
+                inventories: AtomicUsize::new(0),
             });
             let first = expired_mitigation("192.0.2.1");
             let second = expired_mitigation("192.0.2.2");
@@ -622,5 +642,62 @@ mod tests {
             assert!(rx.try_recv().is_err());
             assert_eq!(speaker.announcements.load(SeqCst), 0);
         }
+    }
+    #[tokio::test]
+    async fn failed_repair_returns_error_but_other_repairs_progress() {
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(FailingWithdrawal {
+            inner: MockAnnouncer::new(),
+            mode: AtomicUsize::new(3),
+            announcements: AtomicUsize::new(0),
+            inventories: AtomicUsize::new(0),
+        });
+        let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+        for ip in ["192.0.2.1", "192.0.2.2"] {
+            let mut mitigation = expired_mitigation(ip);
+            mitigation.expires_at = chrono::Utc::now() + chrono::Duration::seconds(300);
+            repo.insert_mitigation(&mitigation).await.unwrap();
+        }
+        let metrics = &crate::observability::metrics::RECONCILIATION_REPAIRS;
+        let failures = metrics.with_label_values(&["error"]).get();
+        let successes = metrics.with_label_values(&["success"]).get();
+        assert!(reconciler.reconcile().await.is_err());
+        assert_eq!(speaker.announcements.load(SeqCst), 2);
+        let actual = speaker.list_active().await.unwrap();
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].nlri.dst_prefix, "192.0.2.2/32");
+        assert_eq!(metrics.with_label_values(&["error"]).get(), failures + 1.0);
+        assert_eq!(
+            metrics.with_label_values(&["success"]).get(),
+            successes + 1.0
+        );
+        speaker.mode.store(0, SeqCst);
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.list_active().await.unwrap().len(), 2);
+        assert_eq!(speaker.announcements.load(SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_runs_once_then_waits_for_the_interval() {
+        let speaker = Arc::new(FailingWithdrawal {
+            inner: MockAnnouncer::new(),
+            mode: AtomicUsize::new(0),
+            announcements: AtomicUsize::new(0),
+            inventories: AtomicUsize::new(0),
+        });
+        let reconciler =
+            ReconciliationLoop::new(Arc::new(MockRepository::new()), speaker.clone(), 30, false);
+        let (shutdown, rx) = broadcast::channel(1);
+        let task = tokio::spawn(async move { reconciler.run(rx).await });
+        tokio::task::yield_now().await;
+        assert_eq!(speaker.inventories.load(SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(29)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(speaker.inventories.load(SeqCst), 1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(speaker.inventories.load(SeqCst), 2);
+        shutdown.send(()).unwrap();
+        task.await.unwrap();
     }
 }

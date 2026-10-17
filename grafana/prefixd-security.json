@@ -420,8 +420,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "sum(rate(prefixd_config_reload_total[5m])) by (result)",
-          "legendFormat": "Config Reload ({{result}})",
+          "expr": "sum(rate(prefixd_config_reload_total[5m])) by (status)",
+          "legendFormat": "Config Reload ({{status}})",
           "refId": "A"
         },
         {

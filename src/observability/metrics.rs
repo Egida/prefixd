@@ -108,6 +108,15 @@ pub static RECONCILIATION_RUNS: Lazy<CounterVec> = Lazy::new(|| {
     .unwrap()
 });
 
+pub static RECONCILIATION_REPAIRS: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "prefixd_reconciliation_repairs_total",
+        "Missing local announcement repair attempts, by RPC outcome (not router enforcement)",
+        &["status"]
+    )
+    .unwrap()
+});
+
 pub static RECONCILIATION_ACTIVE_COUNT: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!(
         "prefixd_reconciliation_active_count",
@@ -322,6 +331,11 @@ pub fn init_metrics() {
     Lazy::force(&BGP_SESSION_UP);
     Lazy::force(&GUARDRAIL_REJECTIONS);
     Lazy::force(&RECONCILIATION_RUNS);
+    Lazy::force(&RECONCILIATION_REPAIRS);
+    for status in ["success", "error"] {
+        RECONCILIATION_RUNS.with_label_values(&[status]);
+        RECONCILIATION_REPAIRS.with_label_values(&[status]);
+    }
     Lazy::force(&RECONCILIATION_ACTIVE_COUNT);
     Lazy::force(&CONFIG_RELOADS);
     Lazy::force(&ESCALATIONS_TOTAL);
