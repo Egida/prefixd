@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Build both Docker images on pull requests without registry login or publishing; main/tag pushes retain publishing.
 - Update `async-trait` to 0.1.92 for strict Clippy on Rust 1.99 and select the Rustls provider before TLS startup.
 
 ### Security
