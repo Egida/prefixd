@@ -1092,3 +1092,854 @@ async fn test_signal_group_different_vectors_separate() {
     let count = ctx.repo.count_open_groups().await.unwrap();
     assert_eq!(count, 2);
 }
+
+#[tokio::test]
+async fn test_withdrawal_intent_storage_failures_and_controller_restart() {
+    use prefixd::{
+        AppState,
+        bgp::{FlowSpecAnnouncer, MockAnnouncer, PeerStatus},
+        db::{Repository, RepositoryTrait, init_postgres_pool},
+        domain::{
+            ActionParams, ActionType, AttackVector, FlowSpecRule, MatchCriteria, Mitigation,
+            MitigationIntent, mitigation_rule, request_withdrawal,
+        },
+        error::{PrefixdError, Result},
+        scheduler::ReconciliationLoop,
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering::SeqCst},
+    };
+
+    struct Speaker {
+        inner: MockAnnouncer,
+        mode: AtomicUsize,
+        deletes: AtomicUsize,
+        adds: AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl FlowSpecAnnouncer for Speaker {
+        async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.adds.fetch_add(1, SeqCst);
+            self.inner.announce(rule).await
+        }
+        async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.deletes.fetch_add(1, SeqCst);
+            self.inner.withdraw(rule).await?;
+            if self.mode.load(SeqCst) == 1 {
+                return Err(PrefixdError::BgpWithdrawalFailed(
+                    "reply lost after delete".into(),
+                ));
+            }
+            Ok(())
+        }
+        async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
+            self.inner.list_active().await
+        }
+        async fn session_status(&self) -> Result<Vec<PeerStatus>> {
+            Ok(vec![])
+        }
+    }
+    let context = TestContext::new().await;
+    let pool = context.pool.clone();
+    let connection = context.state.settings.storage.connection_string.clone();
+    let repo = Arc::new(Repository::new(pool.clone()));
+    let speaker = Arc::new(Speaker {
+        inner: MockAnnouncer::new(),
+        mode: AtomicUsize::new(0),
+        deletes: AtomicUsize::new(0),
+        adds: AtomicUsize::new(0),
+    });
+    let mut mitigation = Mitigation::from_intent(
+        MitigationIntent {
+            event_id: uuid::Uuid::new_v4(),
+            customer_id: None,
+            service_id: None,
+            pop: "test-pop".into(),
+            match_criteria: MatchCriteria {
+                dst_prefix: "203.0.113.10/32".into(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+            },
+            action_type: ActionType::Discard,
+            action_params: ActionParams { rate_bps: None },
+            ttl_seconds: 600,
+            reason: "test".into(),
+        },
+        "203.0.113.10".into(),
+        AttackVector::UdpFlood,
+    );
+    mitigation.activate();
+    repo.insert_mitigation(&mitigation).await.unwrap();
+    speaker
+        .inner
+        .announce(&mitigation_rule(&mitigation))
+        .await
+        .unwrap();
+    let mut settings = common::test_settings();
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    let state = AppState::new(
+        settings.clone(),
+        common::test_inventory(),
+        common::test_playbooks(),
+        repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let app = prefixd::api::create_test_router(state.clone());
+    let withdraw = || {
+        Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/v1/mitigations/{}/withdraw",
+                mitigation.mitigation_id
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"operator_id":"forged","reason":"original reason"}"#,
+            ))
+            .unwrap()
+    };
+    // Duplicate admission must not replace a speaker rule before the unique DB index rejects it.
+    let mut expanded = mitigation.clone();
+    expanded.mitigation_id = uuid::Uuid::new_v4();
+    expanded.victim_ip = "2001:0DB8:0:0:0:0:0:1".into();
+    expanded.match_criteria.dst_prefix = format!("{}/128", expanded.victim_ip);
+    expanded.scope_hash = expanded.match_criteria.compute_scope_hash();
+    repo.insert_mitigation(&expanded).await.unwrap();
+    speaker
+        .inner
+        .announce(&mitigation_rule(&expanded))
+        .await
+        .unwrap();
+    for (original, requested_ip) in [(&mitigation, "203.0.113.10"), (&expanded, "2001:db8::1")] {
+        let before = repo
+            .get_mitigation(original.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let payload = serde_json::json!({"victim_ip":requested_ip, "protocol":"udp", "dst_ports":[53],
+            "action":"police", "rate_bps":800, "ttl_seconds":60, "reason":"duplicate must preserve discard"});
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/mitigations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(speaker.adds.load(SeqCst), 0);
+        assert_eq!(speaker.deletes.load(SeqCst), 0);
+        let after = repo
+            .get_mitigation(original.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.expires_at, before.expires_at);
+        assert_eq!(after.updated_at, before.updated_at);
+        assert_eq!(after.scope_hash, before.scope_hash);
+        assert_eq!(after.action_type, ActionType::Discard);
+        let routes = speaker.inner.list_active().await.unwrap();
+        assert_eq!(routes.len(), 2);
+        assert!(
+            routes
+                .iter()
+                .all(|rule| rule.actions[0].action_type == ActionType::Discard)
+        );
+    }
+    // Remove only this alias fixture so later assertions still describe one pending deletion.
+    speaker
+        .inner
+        .withdraw(&mitigation_rule(&expanded))
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM mitigations WHERE mitigation_id = $1")
+        .bind(expanded.mitigation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // A failed authoritative owner inventory must reject admission before any speaker RPC.
+    sqlx::query("ALTER TABLE mitigations RENAME TO hidden_mitigations")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let manual = serde_json::json!({"victim_ip":"203.0.113.11", "protocol":"udp", "dst_ports":[53], "action":"discard", "ttl_seconds":60, "reason":"preflight fault"});
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/mitigations")
+                .header("content-type", "application/json")
+                .body(Body::from(manual.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let event = serde_json::json!({"event_id":"preflight-failure", "timestamp":chrono::Utc::now(), "source":"test", "victim_ip":"203.0.113.11", "vector":"udp_flood", "pps":50000, "top_dst_ports":[53]});
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events")
+                .header("content-type", "application/json")
+                .body(Body::from(event.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(speaker.adds.load(SeqCst), 0);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+    assert!(
+        repo.find_ban_event_by_external_id("test", "preflight-failure")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    sqlx::query("ALTER TABLE hidden_mitigations RENAME TO mitigations")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE FUNCTION reject_withdrawal() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected storage failure'; END $$; CREATE TRIGGER reject_request BEFORE INSERT ON withdrawal_requests FOR EACH ROW EXECUTE FUNCTION reject_withdrawal();").execute(&pool).await.unwrap();
+    assert_eq!(
+        app.clone().oneshot(withdraw()).await.unwrap().status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+    assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+    sqlx::query("DROP TRIGGER reject_request ON withdrawal_requests")
+        .execute(&pool)
+        .await
+        .unwrap();
+    speaker.mode.store(1, SeqCst);
+    assert_eq!(
+        app.clone().oneshot(withdraw()).await.unwrap().status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(speaker.deletes.load(SeqCst), 1);
+    assert_eq!(speaker.inner.announced_count().await, 0);
+    let original = repo.pending_withdrawals(None).await.unwrap().pop().unwrap();
+    assert!(original.speaker_delete_required);
+    assert_eq!(original.actor, "anonymous");
+    assert_eq!(original.reason, "anonymous: original reason");
+
+    sqlx::query("CREATE TRIGGER reject_completion BEFORE UPDATE ON withdrawal_requests FOR EACH ROW EXECUTE FUNCTION reject_withdrawal()").execute(&pool).await.unwrap();
+    speaker.mode.store(0, SeqCst);
+    let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+        .with_app_state(state.clone());
+    assert!(reconciler.reconcile().await.is_err());
+    assert_eq!(
+        repo.get_mitigation(mitigation.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MitigationStatus::Active
+    );
+    assert_eq!(repo.pending_withdrawals(None).await.unwrap().len(), 1);
+    let audits: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'withdraw'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(audits, 0);
+    assert_eq!(speaker.adds.load(SeqCst), 0);
+
+    // An unavailable authoritative ledger must fail closed before either cleanup or repair.
+    sqlx::query("ALTER TABLE withdrawal_requests RENAME TO hidden_withdrawal_requests")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let deletes = speaker.deletes.load(SeqCst);
+    assert!(reconciler.reconcile().await.is_err());
+    assert_eq!(speaker.deletes.load(SeqCst), deletes);
+    assert_eq!(speaker.adds.load(SeqCst), 0);
+    sqlx::query("ALTER TABLE hidden_withdrawal_requests RENAME TO withdrawal_requests")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DROP TRIGGER reject_completion ON withdrawal_requests")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Simulate an existing table from before originating mode was recorded.
+    sqlx::query("ALTER TABLE withdrawal_requests DROP COLUMN speaker_delete_required")
+        .execute(&pool)
+        .await
+        .unwrap();
+    drop(reconciler);
+    drop(app);
+    drop(state);
+    drop(repo);
+    pool.close().await;
+
+    // Rebuild the repository and controller with a new pool; no in-memory request is retained.
+    let restarted_pool = init_postgres_pool(&connection).await.unwrap();
+    let restarted_repo = Arc::new(Repository::new(restarted_pool.clone()));
+    let persisted = restarted_repo.pending_withdrawals(None).await.unwrap();
+    assert_eq!(persisted.len(), 1);
+    assert!(persisted[0].speaker_delete_required);
+    let (tx, mut updates) = tokio::sync::broadcast::channel(4);
+    let dry_run = ReconciliationLoop::new(restarted_repo.clone(), speaker.clone(), 30, true)
+        .with_ws_broadcast(tx);
+    let deletes_before = speaker.deletes.load(SeqCst);
+    assert!(dry_run.reconcile().await.is_err());
+    assert_eq!(speaker.deletes.load(SeqCst), deletes_before);
+    assert!(updates.try_recv().is_err());
+    assert!(
+        restarted_repo
+            .get_mitigation(mitigation.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+    assert_eq!(
+        restarted_repo
+            .pending_withdrawals(None)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let audits: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_log WHERE action = 'withdraw'")
+            .fetch_one(&restarted_pool)
+            .await
+            .unwrap();
+    assert_eq!(audits, 0);
+
+    let state = AppState::new(
+        settings,
+        common::test_inventory(),
+        common::test_playbooks(),
+        restarted_repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let reconciler = ReconciliationLoop::new(restarted_repo.clone(), speaker.clone(), 30, false)
+        .with_app_state(state);
+    reconciler.reconcile().await.unwrap();
+    let withdrawn = restarted_repo
+        .get_mitigation(mitigation.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(withdrawn.status, MitigationStatus::Withdrawn);
+    assert_eq!(withdrawn.reason, original.reason);
+    assert!(
+        restarted_repo
+            .pending_withdrawals(None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let (actor, details): (String, String) =
+        sqlx::query_as("SELECT actor_id, details_json FROM audit_log WHERE action = 'withdraw'")
+            .fetch_one(&restarted_pool)
+            .await
+            .unwrap();
+    assert_eq!(actor, "anonymous");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&details).unwrap()["operation_id"],
+        original.operation_id.to_string()
+    );
+    let deletes = speaker.deletes.load(SeqCst);
+    reconciler.reconcile().await.unwrap();
+    assert_eq!(speaker.deletes.load(SeqCst), deletes);
+
+    // A later lifecycle revision cannot be finalized by an old operation.
+    mitigation.mitigation_id = uuid::Uuid::new_v4();
+    mitigation.activate();
+    restarted_repo.insert_mitigation(&mitigation).await.unwrap();
+    let current = restarted_repo
+        .get_mitigation(mitigation.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let stale = request_withdrawal(
+        restarted_repo.as_ref(),
+        &current,
+        false,
+        "operator",
+        "alice",
+        "stale".into(),
+        true,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE mitigations SET updated_at = updated_at + INTERVAL '1 second' WHERE mitigation_id = $1").bind(mitigation.mitigation_id).execute(&restarted_pool).await.unwrap();
+    assert!(
+        restarted_repo
+            .finish_withdrawal(&stale)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        restarted_repo
+            .get_mitigation(mitigation.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+    let mut simulated = mitigation.clone();
+    simulated.mitigation_id = uuid::Uuid::new_v4();
+    simulated.match_criteria.dst_prefix = "203.0.113.11/32".into();
+    simulated.scope_hash = simulated.match_criteria.compute_scope_hash();
+    restarted_repo.insert_mitigation(&simulated).await.unwrap();
+    let simulated = restarted_repo
+        .get_mitigation(simulated.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = request_withdrawal(
+        restarted_repo.as_ref(),
+        &simulated,
+        false,
+        "operator",
+        "alice",
+        "simulation".into(),
+        false,
+    )
+    .await
+    .unwrap();
+    let reconstructed = Repository::new(restarted_pool.clone());
+    let persisted = reconstructed
+        .pending_withdrawals(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|pending| pending.operation_id == request.operation_id)
+        .unwrap();
+    assert!(!persisted.speaker_delete_required);
+    let deletes_before = speaker.deletes.load(SeqCst);
+    prefixd::domain::execute_withdrawal(&reconstructed, speaker.as_ref(), true, &persisted)
+        .await
+        .unwrap();
+    assert_eq!(speaker.deletes.load(SeqCst), deletes_before);
+}
+
+#[tokio::test]
+async fn test_legacy_canonical_owners_finish_ttl_cleanup_after_last_live_owner() {
+    use prefixd::{
+        domain::{
+            ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+            mitigation_rule,
+        },
+        scheduler::ReconciliationLoop,
+    };
+    let context = TestContext::new().await;
+    let mut first = Mitigation::from_intent(
+        MitigationIntent {
+            event_id: uuid::Uuid::new_v4(),
+            customer_id: None,
+            service_id: None,
+            pop: "test-pop".into(),
+            match_criteria: MatchCriteria {
+                dst_prefix: "2001:db8::1/128".into(),
+                protocol: Some(17),
+                dst_ports: vec![53],
+            },
+            action_type: ActionType::Discard,
+            action_params: ActionParams { rate_bps: None },
+            ttl_seconds: 60,
+            reason: "legacy".into(),
+        },
+        "2001:db8::1".into(),
+        AttackVector::UdpFlood,
+    );
+    first.activate();
+    first.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+    first.scope_hash = "historical compressed owner".into();
+    let mut second = first.clone();
+    second.mitigation_id = uuid::Uuid::new_v4();
+    second.match_criteria.dst_prefix = "2001:0DB8:0:0:0:0:0:1/128".into();
+    second.scope_hash = "historical expanded owner".into();
+    second.expires_at = chrono::Utc::now() + chrono::Duration::minutes(10);
+    for owner in [&first, &second] {
+        context.repo.insert_mitigation(owner).await.unwrap();
+    }
+    context
+        .state
+        .announcer
+        .announce(&mitigation_rule(&first))
+        .await
+        .unwrap();
+    let reconciler = ReconciliationLoop::new(
+        context.repo.clone(),
+        context.state.announcer.clone(),
+        30,
+        false,
+    )
+    .with_app_state(context.state.clone());
+    assert!(reconciler.reconcile().await.is_err());
+    assert_eq!(
+        context.state.announcer.list_active().await.unwrap().len(),
+        1
+    );
+    assert!(
+        context
+            .repo
+            .get_mitigation(first.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active()
+    );
+    second.expires_at = first.expires_at;
+    context.repo.update_mitigation(&second).await.unwrap();
+    reconciler.reconcile().await.unwrap();
+    for owner in [&first, &second] {
+        assert_eq!(
+            context
+                .repo
+                .get_mitigation(owner.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Expired
+        );
+    }
+    assert!(
+        context
+            .state
+            .announcer
+            .list_active()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        context
+            .repo
+            .pending_withdrawals(None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn test_documented_retention_preserves_live_intent_and_referenced_history() {
+    use prefixd::{
+        domain::{
+            ActionParams, ActionType, AttackEvent, AttackEventInput, AttackVector, MatchCriteria,
+            Mitigation, MitigationIntent, mitigation_rule,
+        },
+        observability::{ActorType, AuditEntry},
+    };
+    enum RequestState {
+        Missing,
+        Pending,
+        Completed(i64),
+    }
+    use RequestState::{Completed, Missing, Pending};
+    let context = TestContext::new().await;
+    let now = chrono::Utc::now();
+    for (name, status, age_days, request, has_announcement) in [
+        (
+            "expired-completed",
+            MitigationStatus::Expired,
+            8,
+            Completed(8),
+            false,
+        ),
+        (
+            "withdrawn-completed",
+            MitigationStatus::Withdrawn,
+            8,
+            Completed(8),
+            false,
+        ),
+        (
+            "without-request",
+            MitigationStatus::Withdrawn,
+            8,
+            Missing,
+            false,
+        ),
+        (
+            "active-pending",
+            MitigationStatus::Active,
+            8,
+            Pending,
+            false,
+        ),
+        (
+            "terminal-pending",
+            MitigationStatus::Withdrawn,
+            8,
+            Pending,
+            false,
+        ),
+        (
+            "pending-parent",
+            MitigationStatus::Pending,
+            8,
+            Pending,
+            false,
+        ),
+        (
+            "active-completed",
+            MitigationStatus::Active,
+            8,
+            Completed(8),
+            false,
+        ),
+        (
+            "recent-completed",
+            MitigationStatus::Withdrawn,
+            1,
+            Completed(1),
+            false,
+        ),
+        (
+            "terminal-recent-completed",
+            MitigationStatus::Expired,
+            8,
+            Completed(1),
+            false,
+        ),
+        (
+            "with-announcement",
+            MitigationStatus::Expired,
+            8,
+            Completed(8),
+            true,
+        ),
+    ] {
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: "test-pop".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: "203.0.113.10/32".into(),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams { rate_bps: None },
+                ttl_seconds: 60,
+                reason: name.into(),
+            },
+            "203.0.113.10".into(),
+            AttackVector::UdpFlood,
+        );
+        mitigation.scope_hash = name.into();
+        mitigation.status = status;
+        mitigation.created_at = now - chrono::Duration::days(age_days);
+        mitigation.updated_at = mitigation.created_at;
+        mitigation.expires_at = mitigation.created_at + chrono::Duration::seconds(60);
+        context.repo.insert_mitigation(&mitigation).await.unwrap();
+        let rule = mitigation_rule(&mitigation);
+        if !matches!(request, Missing) {
+            let completed_at = match request {
+                Completed(days) => Some(now - chrono::Duration::days(days)),
+                _ => None,
+            };
+            sqlx::query(
+                r#"INSERT INTO withdrawal_requests (
+                operation_id, mitigation_id, pop, nlri_hash, rule_json, mitigation_updated_at,
+                terminal_status, actor_type, actor, reason, requested_at, completed_at
+            ) SELECT $1, mitigation_id, pop, $3, $4, updated_at, 'withdrawn',
+                'operator', 'retention-test', 'retention fixture', updated_at, $5
+              FROM mitigations WHERE mitigation_id = $2"#,
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(mitigation.mitigation_id)
+            .bind(rule.nlri_hash())
+            .bind(serde_json::to_string(&rule).unwrap())
+            .bind(completed_at)
+            .execute(&context.pool)
+            .await
+            .unwrap();
+        }
+        if has_announcement {
+            sqlx::query(
+                r#"INSERT INTO flowspec_announcements (
+                announcement_id, mitigation_id, pop, peer_name, peer_address,
+                nlri_hash, nlri_json, action_json, status
+            ) VALUES ($1, $2, 'test-pop', 'fixture', '127.0.0.1', $3, $4, $5, 'failed')"#,
+            )
+            .bind(uuid::Uuid::new_v4())
+            .bind(mitigation.mitigation_id)
+            .bind(rule.nlri_hash())
+            .bind(serde_json::to_string(&rule.nlri).unwrap())
+            .bind(serde_json::to_string(&rule.actions).unwrap())
+            .execute(&context.pool)
+            .await
+            .unwrap();
+        }
+    }
+    let group =
+        prefixd::correlation::CorrelationEngine::create_group("203.0.113.10", "udp_flood", 300);
+    context.repo.insert_signal_group(&group).await.unwrap();
+    for (external_id, age_days) in [
+        ("old-ingestion", 8),
+        ("recent-ingestion", 1),
+        ("old-triggering-event", 8),
+        ("old-last-event", 8),
+        ("old-group-event", 8),
+        ("old-pruned-parent-event", 8),
+    ] {
+        let input: AttackEventInput = serde_json::from_value(serde_json::json!({
+            "event_id":external_id, "timestamp":now - chrono::Duration::days(20), "source":"retention-test",
+            "victim_ip":"203.0.113.10", "vector":"udp_flood"
+        })).unwrap();
+        let mut event = AttackEvent::from_input(input);
+        event.ingested_at = now - chrono::Duration::days(age_days);
+        context.repo.insert_event(&event).await.unwrap();
+        match external_id {
+            "old-triggering-event" => {
+                sqlx::query("UPDATE mitigations SET triggering_event_id = $1 WHERE reason = 'active-pending'")
+                    .bind(event.event_id).execute(&context.pool).await.unwrap();
+            }
+            "old-last-event" => {
+                sqlx::query(
+                    "UPDATE mitigations SET last_event_id = $1 WHERE reason = 'terminal-pending'",
+                )
+                .bind(event.event_id)
+                .execute(&context.pool)
+                .await
+                .unwrap();
+            }
+            "old-pruned-parent-event" => {
+                sqlx::query("UPDATE mitigations SET triggering_event_id = $1 WHERE reason = 'expired-completed'")
+                    .bind(event.event_id).execute(&context.pool).await.unwrap();
+            }
+            "old-group-event" => {
+                context
+                    .repo
+                    .add_event_to_group(group.group_id, event.event_id, 1.0)
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+    }
+    context
+        .repo
+        .insert_audit(&AuditEntry::new(
+            ActorType::System,
+            None,
+            "retention-preserve",
+            None,
+            None,
+            serde_json::json!({}),
+        ))
+        .await
+        .unwrap();
+
+    // Parent-only pruning from the previous guide fails on retained withdrawal references.
+    let mut transaction = context.pool.begin().await.unwrap();
+    let old_prune = sqlx::query("DELETE FROM mitigations WHERE status IN ('expired', 'withdrawn') AND updated_at < NOW() - INTERVAL '7 days' AND reason = 'expired-completed'")
+        .execute(&mut *transaction).await.unwrap_err();
+    assert_eq!(
+        old_prune.as_database_error().unwrap().code().as_deref(),
+        Some("23503")
+    );
+    assert_eq!(
+        old_prune.as_database_error().unwrap().constraint(),
+        Some("withdrawal_requests_mitigation_id_fkey")
+    );
+    transaction.rollback().await.unwrap();
+
+    let guide = include_str!("../docs/troubleshooting.md");
+    let (_, retention) = guide
+        .split_once("<!-- database-retention-prune -->")
+        .unwrap();
+    let (_, block) = retention.split_once("```sql\n").unwrap();
+    let (sql, remaining) = block.split_once("```").unwrap();
+    assert!(sql.trim().starts_with("BEGIN;"));
+    assert!(sql.trim().ends_with("COMMIT;"));
+    sqlx::raw_sql(sql).execute(&context.pool).await.unwrap();
+    let counts_query = "SELECT (SELECT COUNT(*) FROM mitigations), (SELECT COUNT(*) FROM withdrawal_requests), (SELECT COUNT(*) FROM events), (SELECT COUNT(*) FROM audit_log), (SELECT COUNT(*) FROM flowspec_announcements)";
+    let after_first: (i64, i64, i64, i64, i64) = sqlx::query_as(counts_query)
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql(sql).execute(&context.pool).await.unwrap();
+    let after_second: (i64, i64, i64, i64, i64) = sqlx::query_as(counts_query)
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    assert_eq!(after_second, after_first);
+
+    let (_, vacuum) = remaining.split_once("```sql\n").unwrap();
+    let (vacuum, _) = vacuum.split_once("```").unwrap();
+    sqlx::raw_sql(vacuum).execute(&context.pool).await.unwrap();
+
+    let parents: Vec<String> = sqlx::query_scalar("SELECT reason FROM mitigations ORDER BY reason")
+        .fetch_all(&context.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        parents,
+        [
+            "active-completed",
+            "active-pending",
+            "pending-parent",
+            "recent-completed",
+            "terminal-pending",
+            "terminal-recent-completed",
+            "with-announcement"
+        ]
+    );
+    let requests: Vec<String> = sqlx::query_scalar("SELECT mitigation.reason FROM withdrawal_requests AS request JOIN mitigations AS mitigation USING (mitigation_id) ORDER BY mitigation.reason")
+        .fetch_all(&context.pool).await.unwrap();
+    assert_eq!(
+        requests,
+        [
+            "active-completed",
+            "active-pending",
+            "pending-parent",
+            "recent-completed",
+            "terminal-pending",
+            "terminal-recent-completed"
+        ]
+    );
+    let events: Vec<String> =
+        sqlx::query_scalar("SELECT external_event_id FROM events ORDER BY external_event_id")
+            .fetch_all(&context.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        events,
+        [
+            "old-group-event",
+            "old-last-event",
+            "old-triggering-event",
+            "recent-ingestion"
+        ]
+    );
+    let audit_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    let announcement_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM flowspec_announcements")
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    assert_eq!(audit_count, 1);
+    assert_eq!(announcement_count, 1);
+    let membership_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM signal_group_events")
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    assert_eq!(membership_count, 1);
+}

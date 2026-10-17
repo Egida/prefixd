@@ -137,7 +137,7 @@ http:
 
 ```yaml
 bgp:
-  # Mode: sidecar (real GoBGP) or mock (testing)
+  # Modes: gobgp, sidecar (existing GoBGP name), rustbgpd, mock
   mode: sidecar
   
   # GoBGP gRPC endpoint
@@ -149,6 +149,32 @@ bgp:
   # Router ID
   router_id: "10.10.0.10"
 ```
+
+`sidecar` remains the default. The experimental rustbgpd adapter requires a
+binary built with `--features bgp-rustbgpd` and a separate subsection:
+
+```yaml
+bgp:
+  mode: rustbgpd
+  rustbgpd:
+    endpoint: "http://127.0.0.1:50051"
+    bearer_token_env: "PREFIXD_RUSTBGPD_TOKEN"
+    # For a remote endpoint, use https:// and a trusted server CA:
+    # ca_cert_path: "/etc/prefixd/rustbgpd-ca.pem"
+  local_asn: 65010
+  router_id: "10.10.0.10"
+```
+
+`gobgp_grpc` is optional when using rustbgpd or mock. Bearer authentication is
+required for rustbgpd; plaintext permits only literal loopback addresses.
+HTTPS verifies the server against system roots and any configured PEM CA.
+The rustbgpd listener principal needs the `operator` role for injection and
+withdrawal. Its BGP ASN, router ID, neighbors and export policies are configured
+in rustbgpd itself; these prefixd fields do not configure its sessions.
+
+Speaker selection and credentials are startup configuration, not hot-reloaded.
+The settings API continues to omit speaker endpoints and credential details.
+See [speaker backends](speaker-backends.md) for the rollout and current limits.
 
 ### Storage
 
@@ -522,9 +548,14 @@ shutdown:
   # Seconds to wait for in-flight requests to complete during graceful shutdown
   drain_timeout_seconds: 30
   
-  # Keep FlowSpec announcements active after shutdown (fail-open)
+  # Retention preference (currently logged only; false does not withdraw rules)
   preserve_announcements: true
 ```
+
+Graceful shutdown currently stops reconciliation and waits for the configured
+drain period. It does not withdraw announcements, including when
+`preserve_announcements` is false. Withdrawal behavior is tracked in the speaker
+compatibility work; do not use this setting as a cleanup guarantee.
 
 ---
 

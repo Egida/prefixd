@@ -161,7 +161,10 @@ fn default_burst() -> u32 {
 pub struct BgpConfig {
     #[serde(default = "default_bgp_mode")]
     pub mode: BgpMode,
+    #[serde(default)]
     pub gobgp_grpc: String,
+    #[serde(default)]
+    pub rustbgpd: Option<RustBgpdConfig>,
     pub local_asn: u32,
     pub router_id: String,
     #[serde(default)]
@@ -176,7 +179,17 @@ fn default_bgp_mode() -> BgpMode {
 #[serde(rename_all = "lowercase")]
 pub enum BgpMode {
     Sidecar,
+    Gobgp,
+    Rustbgpd,
     Mock,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RustBgpdConfig {
+    pub endpoint: String,
+    pub bearer_token_env: String,
+    #[serde(default)]
+    pub ca_cert_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,6 +407,27 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speaker_modes_preserve_old_configs_and_accept_rustbgpd_without_gobgp() {
+        let old: BgpConfig =
+            serde_yaml::from_str("gobgp_grpc: gobgp:50051\nlocal_asn: 65010\nrouter_id: 192.0.2.1")
+                .unwrap();
+        assert_eq!(old.mode, BgpMode::Sidecar);
+        assert!(old.rustbgpd.is_none());
+        for mode in ["sidecar", "gobgp", "mock", "rustbgpd"] {
+            let config: BgpConfig = serde_yaml::from_str(&format!("mode: {mode}\nlocal_asn: 65010\nrouter_id: 192.0.2.1\nrustbgpd:\n  endpoint: http://127.0.0.1:50051\n  bearer_token_env: TEST_TOKEN")).unwrap();
+            assert_eq!(serde_json::to_value(config.mode).unwrap(), mode);
+            assert!(config.gobgp_grpc.is_empty());
+            assert_eq!(config.rustbgpd.unwrap().bearer_token_env, "TEST_TOKEN");
+        }
+        assert!(
+            serde_yaml::from_str::<BgpConfig>(
+                "mode: unsupported\nlocal_asn: 65010\nrouter_id: 192.0.2.1"
+            )
+            .is_err()
+        );
+    }
 
     /// Minimal valid YAML for a Settings struct (no correlation section).
     const MINIMAL_SETTINGS_YAML: &str = r#"

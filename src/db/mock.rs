@@ -12,13 +12,20 @@ use crate::correlation::engine::{
     CorroboratingSignal, EventDimensions, SignalGroup, SignalGroupEvent, SignalGroupFilter,
     SignalGroupStatus,
 };
-use crate::domain::{AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole};
+use crate::domain::{
+    AttackEvent, Mitigation, MitigationStatus, Operator, OperatorRole, WithdrawalRequest,
+};
 use crate::error::Result;
 use crate::observability::AuditEntry;
 
 pub struct MockRepository {
     events: Mutex<Vec<AttackEvent>>,
+    #[cfg(test)]
+    mitigation_reads: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    pending_reads: std::sync::atomic::AtomicUsize,
     mitigations: Mutex<Vec<Mitigation>>,
+    withdrawals: Mutex<Vec<WithdrawalRequest>>,
     safelist: Mutex<Vec<SafelistEntry>>,
     audit: Mutex<Vec<AuditEntry>>,
     operators: Mutex<Vec<Operator>>,
@@ -42,10 +49,24 @@ type MockGroupEventLink = (
 );
 
 impl MockRepository {
+    #[cfg(test)]
+    pub fn lifecycle_read_counts(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            self.mitigation_reads.load(Relaxed),
+            self.pending_reads.load(Relaxed),
+        )
+    }
+
     pub fn new() -> Self {
         Self {
             events: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            mitigation_reads: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            pending_reads: std::sync::atomic::AtomicUsize::new(0),
             mitigations: Mutex::new(Vec::new()),
+            withdrawals: Mutex::new(Vec::new()),
             safelist: Mutex::new(Vec::new()),
             audit: Mutex::new(Vec::new()),
             operators: Mutex::new(Vec::new()),
@@ -119,6 +140,87 @@ impl RepositoryTrait for MockRepository {
             .collect())
     }
 
+    async fn active_mitigations_for_pop(&self, pop: &str) -> Result<Vec<Mitigation>> {
+        Ok(self
+            .mitigations
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|m| m.pop == pop && m.is_active())
+            .cloned()
+            .collect())
+    }
+
+    async fn begin_withdrawal(&self, request: &WithdrawalRequest) -> Result<WithdrawalRequest> {
+        let mitigations = self.mitigations.lock().unwrap();
+        let mut withdrawals = self.withdrawals.lock().unwrap();
+        if let Some(existing) = withdrawals
+            .iter()
+            .find(|r| r.mitigation_id == request.mitigation_id)
+        {
+            return if existing.completed_at.is_none() {
+                Ok(existing.clone())
+            } else {
+                Err(crate::error::PrefixdError::Conflict(
+                    "withdrawal already completed".into(),
+                ))
+            };
+        }
+        if !mitigations.iter().any(|m| {
+            m.mitigation_id == request.mitigation_id
+                && m.is_active()
+                && m.updated_at == request.mitigation_updated_at
+                && m.pop == request.pop
+        }) {
+            return Err(crate::error::PrefixdError::Conflict(
+                "mitigation changed before withdrawal was persisted".into(),
+            ));
+        }
+        withdrawals.push(request.clone());
+        Ok(request.clone())
+    }
+
+    async fn pending_withdrawals(&self, pop: Option<&str>) -> Result<Vec<WithdrawalRequest>> {
+        #[cfg(test)]
+        self.pending_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(self
+            .withdrawals
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.completed_at.is_none() && pop.is_none_or(|p| p == r.pop))
+            .cloned()
+            .collect())
+    }
+
+    async fn finish_withdrawal(&self, request: &WithdrawalRequest) -> Result<Option<Mitigation>> {
+        let mut mitigations = self.mitigations.lock().unwrap();
+        let mut withdrawals = self.withdrawals.lock().unwrap();
+        let Some(pending) = withdrawals.iter_mut().find(|r| {
+            r.operation_id == request.operation_id
+                && r.mitigation_id == request.mitigation_id
+                && r.completed_at.is_none()
+        }) else {
+            return Ok(None);
+        };
+        let Some(mitigation) = mitigations.iter_mut().find(|m| {
+            m.mitigation_id == pending.mitigation_id
+                && m.updated_at == pending.mitigation_updated_at
+                && m.is_active()
+        }) else {
+            return Ok(None);
+        };
+        if pending.is_expiry() {
+            mitigation.expire();
+        } else {
+            mitigation.withdraw(Some(pending.reason.clone()));
+        }
+        self.audit.lock().unwrap().push(pending.audit_entry());
+        pending.completed_at = Some(Utc::now());
+        Ok(Some(mitigation.clone()))
+    }
+
     async fn insert_mitigation(&self, m: &Mitigation) -> Result<()> {
         self.mitigations.lock().unwrap().push(m.clone());
         Ok(())
@@ -136,6 +238,9 @@ impl RepositoryTrait for MockRepository {
     }
 
     async fn get_mitigation(&self, id: Uuid) -> Result<Option<Mitigation>> {
+        #[cfg(test)]
+        self.mitigation_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations.iter().find(|m| m.mitigation_id == id).cloned())
     }

@@ -86,6 +86,11 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
             "signal_groups_playbook",
             include_str!("../../migrations/012_signal_groups_playbook.sql"),
         ),
+        (
+            13,
+            "withdrawal_requests",
+            include_str!("../../migrations/013_withdrawal_requests.sql"),
+        ),
     ];
 
     // Bootstrap: run all migrations first (they use IF NOT EXISTS)

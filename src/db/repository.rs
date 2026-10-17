@@ -11,6 +11,7 @@ use crate::correlation::engine::{
 };
 use crate::domain::{
     AttackEvent, Mitigation, MitigationRow, MitigationStatus, Operator, OperatorRole,
+    WithdrawalRequest,
 };
 use crate::error::Result;
 use crate::observability::{ActorType, AuditEntry, metrics::ROW_PARSE_ERRORS};
@@ -177,6 +178,111 @@ impl RepositoryTrait for Repository {
         .await?;
 
         Ok(rows.into_iter().map(AuditEntry::from_row).collect())
+    }
+
+    async fn active_mitigations_for_pop(&self, pop: &str) -> Result<Vec<Mitigation>> {
+        let rows = sqlx::query_as::<_, MitigationRow>(
+            "SELECT * FROM mitigations WHERE pop = $1 AND status IN ('pending', 'active', 'escalated')",
+        )
+        .bind(pop)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(Mitigation::from_row).collect()
+    }
+
+    async fn begin_withdrawal(&self, request: &WithdrawalRequest) -> Result<WithdrawalRequest> {
+        sqlx::query(
+            r#"INSERT INTO withdrawal_requests (
+                operation_id, mitigation_id, pop, nlri_hash, rule_json, mitigation_updated_at,
+                terminal_status, actor_type, actor, reason, requested_at, speaker_delete_required
+            ) SELECT $1, mitigation_id, pop, $4, $5, updated_at, $7, $8, $9, $10, $11, $12
+              FROM mitigations WHERE mitigation_id = $2 AND pop = $3 AND updated_at = $6
+                AND status IN ('pending', 'active', 'escalated')
+              ON CONFLICT (mitigation_id) DO NOTHING"#,
+        )
+        .bind(request.operation_id)
+        .bind(request.mitigation_id)
+        .bind(&request.pop)
+        .bind(&request.nlri_hash)
+        .bind(&request.rule_json)
+        .bind(request.mitigation_updated_at)
+        .bind(&request.terminal_status)
+        .bind(&request.actor_type)
+        .bind(&request.actor)
+        .bind(&request.reason)
+        .bind(request.requested_at)
+        .bind(request.speaker_delete_required)
+        .execute(&self.pool)
+        .await?;
+        sqlx::query_as::<_, WithdrawalRequest>(
+            "SELECT * FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL",
+        )
+        .bind(request.mitigation_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            crate::error::PrefixdError::Conflict(
+                "mitigation changed before withdrawal was persisted".into(),
+            )
+        })
+    }
+
+    async fn pending_withdrawals(&self, pop: Option<&str>) -> Result<Vec<WithdrawalRequest>> {
+        Ok(sqlx::query_as::<_, WithdrawalRequest>(
+            "SELECT * FROM withdrawal_requests WHERE completed_at IS NULL AND ($1::text IS NULL OR pop = $1) ORDER BY requested_at, operation_id",
+        )
+        .bind(pop)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    async fn finish_withdrawal(&self, request: &WithdrawalRequest) -> Result<Option<Mitigation>> {
+        let mut transaction = self.pool.begin().await?;
+        let pending = sqlx::query_as::<_, WithdrawalRequest>(
+            "SELECT * FROM withdrawal_requests WHERE operation_id = $1 AND mitigation_id = $2 AND completed_at IS NULL FOR UPDATE",
+        )
+        .bind(request.operation_id)
+        .bind(request.mitigation_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+        let now = Utc::now();
+        let row = sqlx::query_as::<_, MitigationRow>(
+            r#"UPDATE mitigations SET status = $3, withdrawn_at = $4, updated_at = $4,
+                reason = CASE WHEN $3 = 'expired' THEN reason ELSE $5 END
+               WHERE mitigation_id = $1 AND updated_at = $2
+                 AND status IN ('pending', 'active', 'escalated') RETURNING *"#,
+        )
+        .bind(pending.mitigation_id)
+        .bind(pending.mitigation_updated_at)
+        .bind(&pending.terminal_status)
+        .bind(now)
+        .bind(&pending.reason)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else { return Ok(None) };
+        let mitigation = Mitigation::from_row(row)?;
+        sqlx::query("UPDATE withdrawal_requests SET completed_at = $2 WHERE operation_id = $1")
+            .bind(pending.operation_id)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        let entry = pending.audit_entry();
+        sqlx::query("INSERT INTO audit_log (audit_id, timestamp, actor_type, actor_id, action, target_type, target_id, details_json) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+            .bind(entry.audit_id)
+            .bind(entry.timestamp)
+            .bind(&pending.actor_type)
+            .bind(&entry.actor_id)
+            .bind(&entry.action)
+            .bind(&entry.target_type)
+            .bind(&entry.target_id)
+            .bind(serde_json::to_string(&entry.details)?)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(Some(mitigation))
     }
 
     async fn insert_mitigation(&self, m: &Mitigation) -> Result<()> {

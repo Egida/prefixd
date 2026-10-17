@@ -43,7 +43,7 @@ src/
 │   ├── openapi.rs     # utoipa OpenAPI spec registration
 │   └── metrics.rs     # HTTP request metrics middleware
 ├── auth/              # AuthBackend (axum-login), mode-aware auth (none/bearer/credentials/mtls)
-├── bgp/               # FlowSpecAnnouncer trait, GoBGP gRPC client, mock
+├── bgp/               # FlowSpecAnnouncer, GoBGP and experimental rustbgpd gRPC clients, mock
 ├── config/            # Settings, Inventory, Playbooks (YAML parsing)
 ├── correlation/       # Multi-signal correlation engine (config, engine, signal groups, webhook adapter)
 ├── db/                # PostgreSQL repository with sqlx + MockRepository for testing

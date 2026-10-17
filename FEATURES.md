@@ -228,7 +228,7 @@ The reconciliation loop runs every 30 seconds:
 
 ### TTL Enforcement
 
-- The running controller attempts withdrawals for expired mitigations
+- The running controller withdraws expired mitigations and retries failed TTL withdrawals
 - If prefixd crashes while the speaker stays up, rules can persist until
   reconciliation resumes or an operator withdraws them; there is no router TTL lease
 - GoBGP can restart independently; prefixd re-syncs on reconnect

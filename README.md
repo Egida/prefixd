@@ -227,7 +227,7 @@ Configure GoBGP neighbors in `configs/gobgp.conf` and set up FlowSpec import pol
 **TTL enforcement:** The running controller withdraws expired mitigations.
 If prefixd stops while its separate BGP speaker stays up, rules can persist
 until reconciliation resumes or an operator withdraws them. See
-[ADR 025](docs/adr/025-pluggable-speaker-backends.md) for the rustbgpd rollout and failure
+[speaker backends](docs/speaker-backends.md) for the rustbgpd rollout and failure
 semantics.
 
 ---

@@ -28,9 +28,9 @@ pub trait FlowSpecAnnouncer: Send + Sync {
 
 (The trait is defined in `src/bgp/announcer.rs`; `Result` is `crate::error::Result`.)
 
-Existing implementations and the planned adapter:
+Implementations:
 - `GoBgpAnnouncer` — GoBGP gRPC client (the shipped backend, ADR 001)
-- `RustBgpdAnnouncer` — planned rustbgpd gRPC adapter ([ADR 023](023-rustbgpd-over-grpc.md)); implementation and qualification land separately
+- `RustBgpdAnnouncer` — experimental gRPC adapter behind `bgp-rustbgpd` ([ADR 023](023-rustbgpd-over-grpc.md))
 - `MockAnnouncer` — in-memory store for tests, records all calls
 
 ## Consequences

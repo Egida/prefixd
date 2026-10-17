@@ -29,7 +29,10 @@ impl FlowSpecNlri {
 
     pub fn compute_hash(&self) -> String {
         let mut hasher = Sha256::new();
-        hasher.update(self.dst_prefix.as_bytes());
+        match self.dst_prefix.parse::<ipnet::IpNet>() {
+            Ok(prefix) => hasher.update(prefix.to_string().as_bytes()),
+            Err(_) => hasher.update(self.dst_prefix.as_bytes()),
+        }
         if let Some(proto) = self.protocol {
             hasher.update([proto]);
         }
@@ -126,5 +129,24 @@ impl AnnouncementStatus {
 impl std::fmt::Display for AnnouncementStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equivalent_ipv6_prefix_spellings_have_the_same_rule_identity() {
+        let mut nlri = FlowSpecNlri {
+            dst_prefix: "2001:0DB8:0:0:0:0:0:1/128".into(),
+            protocol: Some(6),
+            dst_ports: vec![443, 80],
+        };
+        let hash = nlri.compute_hash();
+        nlri.dst_prefix = "2001:db8::1/128".into();
+        assert_eq!(nlri.compute_hash(), hash);
+        nlri.dst_prefix = "2001:db8::2/128".into();
+        assert_ne!(nlri.compute_hash(), hash);
     }
 }

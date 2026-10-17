@@ -7,7 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Refresh the October audit baseline: `rustls` 0.23.46, `quinn-proto` 0.11.18, `h2` 0.4.19 and non-yanked `chacha20` 0.10.2 address current lockfile findings. Patch both `rand` branches to 0.8.6/0.9.3 and remove the now-obsolete RUSTSEC-2026-0097 exception. The only remaining vulnerability exception is `rsa` (RUSTSEC-2023-0071), present through sqlx's optional, uncompiled MySQL driver with no patched release. The unmaintained YAML dependency warning remains visible and tracked separately.
+- Replace unmaintained `rustls-pemfile` with `rustls-pki-types` for certificate, CA and private-key loading; remove its audit exception while preserving mandatory mTLS client verification.
+- Refresh Next.js to 16.3.8, Undici to 7.29.1, and affected frontend transitive dependencies including sharp, source-map-js, js-yaml, Vitest and nanoid. `bun audit` reports no vulnerabilities.
+
+### Added
+
+- Experimental rustbgpd speaker adapter behind `bgp-rustbgpd`, with explicit
+  backend selection, authenticated gRPC, local-rule read-back, and IPv4/IPv6
+  discard/policing support. Existing GoBGP and mock configurations remain valid.
+
 ### Fixed
+
+- Persist withdrawal intent before speaker RPCs so ambiguous replies and database
+  failures cannot restore a requested deletion. Retry across controller restarts,
+  preserve the original actor/reason in an atomic audit transaction, and reject
+  foreign-POP, shared-owner and stale-operation deletions. New mutations conflicting
+  with pending cleanup return 409. Drain cleanup before changing speaker targets
+  or downgrading to a binary that ignores the queue.
+- Continue independent reconciliation housekeeping and peer observations after
+  mutation failures; release the lifecycle lock between scheduler rules.
+- Preserve enforced-mode withdrawal requests across dry-run restarts. Reject
+  canonical duplicate creation before RPC, extend a single canonical detector
+  owner, and let expired legacy duplicate owners complete TTL cleanup once no
+  live owner remains.
+- Keep pending or failed-expiry rows in status-active mitigation gauges. Use
+  rustbgpd peer addresses for unique session names and skip unnecessary locked
+  database reads for already-observed announcement candidates.
+- Correct the documented history-pruning transaction to retire completed
+  withdrawals safely and retain pending cleanup, recent history and referenced
+  detector/correlation events. Preserve audit records and run vacuum separately.
+- Bound complete GoBGP and rustbgpd mutation responses, including stalled bodies
+  and trailers, to 30 seconds per attempt with at most three attempts.
+
 - Prevent handled failed GET requests from also producing unhandled browser rejections during cache cleanup.
 - **Safelist removal from the dashboard returned 404.** The Next.js API proxy joins percent-decoded route segments, so `DELETE /v1/safelist/8.9.8.9%2F32` reached the backend as `/v1/safelist/8.9.8.9/32` and missed the single-segment route. The proxy now re-encodes each segment, and the route accepts a literal slash form (`{*prefix}`) for proxies that decode `%2F`.
 - **Dashboard had no sign-out (and no role-based permissions).** `/v1/auth/login` and `/v1/auth/me` return a flat operator (`operator_id`), but the client read `data.operator`, leaving `operator` as `undefined`. The user menu (and therefore sign-out) never rendered, and role checks denied admin actions to authenticated admins. Auth responses are now mapped to the client `Operator` shape and `isAuthenticated` is a strict boolean.
@@ -16,11 +50,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Run pull-request CI for stacked topic branches as well as `main`, so dependency-ordered PRs receive their own checks.
 - Build both Docker images on pull requests without registry login or publishing; main/tag pushes retain publishing.
 - Update `async-trait` to 0.1.92 for strict Clippy on Rust 1.99 and select the Rustls provider before TLS startup.
+- Keep expired mitigations eligible for withdrawal retry when the speaker call
+  fails. Successful expiry state and notifications now require a confirmed
+  withdrawal; other expired mitigations are still processed during a failure.
+- Detector unban and bulk withdrawal now report speaker failures and preserve
+  active state instead of reporting successful removal. Operators can retry.
+- Canonicalize prefix spelling when computing FlowSpec rule identity so
+  equivalent IPv6 addresses do not trigger repeated reconciliation injections.
 
-### Security
-- Refresh the October audit baseline: `rustls` 0.23.46, `quinn-proto` 0.11.18, `h2` 0.4.19 and non-yanked `chacha20` 0.10.2 address current lockfile findings. Patch both `rand` branches to 0.8.6/0.9.3 and remove the now-obsolete RUSTSEC-2026-0097 exception. The only remaining vulnerability exception is `rsa` (RUSTSEC-2023-0071), present through sqlx's optional, uncompiled MySQL driver with no patched release. The unmaintained YAML dependency warning remains visible and tracked separately.
-- Replace unmaintained `rustls-pemfile` with `rustls-pki-types` for certificate, CA and private-key loading; remove its audit exception while preserving mandatory mTLS client verification.
-- Refresh Next.js to 16.3.8, Undici to 7.29.1, and affected frontend transitive dependencies including sharp, source-map-js, js-yaml, Vitest and nanoid. `bun audit` reports no vulnerabilities.
+### Documentation
+
+- Record the rustbgpd-first, pluggable-speaker rollout while retaining GoBGP.
+  Correct the controller-crash claim: a separate BGP daemon can keep advertising
+  while prefixd is down; TTL enforcement requires running reconciliation.
 
 ## [0.19.1] - 2026-08-06
 

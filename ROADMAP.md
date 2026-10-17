@@ -238,15 +238,15 @@ Target: Quality-of-life for operators during active incidents. These are the fea
 Use [rustbgpd](https://github.com/lance0/rustbgpd) through its controller gRPC
 API, keeping GoBGP as a supported alternative. Peer lifecycle stays in the
 speaker daemon. [ADR 025](docs/adr/025-pluggable-speaker-backends.md) records the
-support decision. It defines the
+support decision; [speaker backends](docs/speaker-backends.md) tracks the
 capability boundary, evidence limits, and delivery order.
 
 ### Phase 1: Selectable rustbgpd Adapter
 
-- [ ] Vendor the controller proto behind `bgp-rustbgpd`
-- [ ] Implement and validate `RustBgpdAnnouncer` for announce, withdraw, retained local-rule read-back, and peer status
-- [ ] Add compatible `sidecar`, `gobgp`, `rustbgpd`, and `mock` selection; preserve existing defaults until qualification
-- [ ] Retry failed TTL withdrawals before marking mitigations expired
+- [x] Vendor the controller proto behind `bgp-rustbgpd`
+- [x] Implement and validate the experimental `RustBgpdAnnouncer` for announce, withdraw, retained local-rule read-back, and peer status
+- [x] Add compatible `sidecar`, `gobgp`, `rustbgpd`, and `mock` selection; preserve existing defaults until qualification
+- [x] Persist and retry failed withdrawals before terminal state, including TTL expiry and enforced-mode cleanup across dry-run restarts
 - [ ] Complete UDS/client-certificate mTLS and rustbgpd deployment wiring
 
 ### Phase 2: Qualification and Default Migration

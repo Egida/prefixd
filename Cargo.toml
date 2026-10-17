@@ -95,6 +95,8 @@ harness = false
 [features]
 default = []
 test-utils = []
+# Experimental rustbgpd adapter (ADR 025); GoBGP remains supported.
+bgp-rustbgpd = ["tonic/tls-aws-lc", "tonic/tls-native-roots"]
 
 [[bin]]
 name = "prefixd"

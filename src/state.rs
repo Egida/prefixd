@@ -42,8 +42,8 @@ pub struct AppState {
     pub correlation_loaded_at: RwLock<DateTime<Utc>>,
     /// PostgreSQL pool for metrics (None in tests with MockRepository)
     pub db_pool: Option<PgPool>,
-    /// Serializes mitigation creation to prevent TOCTOU race between
-    /// find_active_by_scope and insert_mitigation in handle_ban.
+    /// Serializes lifecycle reads, speaker RPCs and commits within one controller.
+    /// One controller owns each POP/speaker; this is not an active-active fence.
     pub mitigation_lock: tokio::sync::Mutex<()>,
     /// Directory containing config files (for hot-reload)
     pub config_dir: PathBuf,
