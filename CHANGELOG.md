@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Experimental rustbgpd speaker adapter behind `bgp-rustbgpd`, with explicit
+  backend selection, authenticated gRPC, local-rule read-back, and IPv4/IPv6
+  discard/policing support. Existing GoBGP and mock configurations remain valid.
+
+### Documentation
+
+- Record the rustbgpd-first, pluggable-speaker rollout while retaining GoBGP.
+  Correct the controller-crash claim: a separate BGP daemon can keep advertising
+  while prefixd is down; TTL enforcement requires running reconciliation.
+
+### Fixed
+
+- Keep expired mitigations eligible for withdrawal retry when the speaker call
+  fails. Successful expiry state and notifications now require a confirmed
+  withdrawal; other expired mitigations are still processed during a failure.
+- Detector unban and bulk withdrawal now report speaker failures and preserve
+  active state instead of reporting successful removal. Operators can retry.
+- Update `async-trait` to 0.1.92 to fix strict Clippy failures on Rust 1.99
+  without suppressing diagnostics.
+- Canonicalize prefix spelling when computing FlowSpec rule identity so
+  equivalent IPv6 addresses do not trigger repeated reconciliation injections.
+
 ## [0.19.1] - 2026-08-06
 
 ### Changed

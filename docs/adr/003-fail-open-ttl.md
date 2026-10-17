@@ -18,22 +18,33 @@ A DDoS mitigation system that fails closed (leaves rules permanently installed) 
 
 ## Decision
 
-All mitigations **must** have a TTL. There is no way to create a permanent FlowSpec rule through prefixd. The reconciliation loop enforces expiry, and if prefixd itself dies, GoBGP's session to the router will eventually drop (BGP hold timer), clearing all announced routes.
+All mitigations **must** have a TTL. The running reconciliation loop enforces
+expiry by asking the speaker to withdraw the rule. The TTL is application
+state; it is not a lease encoded in the FlowSpec rule.
+
+Corrected 2026-10-17: prefixd and its BGP speaker are separate processes.
+prefixd exiting does not close GoBGP's or rustbgpd's router sessions. Rules can
+remain installed while the controller is down. Automatic cleanup after a
+controller crash requires an explicit lease or coupled-lifecycle mechanism;
+neither is provided by the current deployment.
 
 The safety chain:
 1. **Application TTL** - prefixd expires mitigations and sends withdrawals
-2. **BGP hold timer** - If prefixd/GoBGP dies, the router clears routes after hold time (default 90s)
+2. **Speaker session loss** - A speaker failure can clear routes through BGP
+   session teardown; configured Graceful Restart retention can delay removal.
+   This does not cover an independent controller failure.
 3. **Operator withdrawal** - `prefixdctl mitigations withdraw <id>` for manual override
 
 ## Consequences
 
 **Positive:**
-- No mitigation can outlive its usefulness without active renewal
-- System crash = all mitigations eventually clear = traffic restored
-- Operators have confidence that the system won't cause permanent damage
+- Active reconciliation withdraws mitigations whose TTL has elapsed
+- Speaker and controller failures have separate recovery requirements
 - Reconciliation loop catches and withdraws any rules that should have expired
 
 **Negative:**
 - Long-running mitigations need periodic extension (detectors must re-send events)
 - Short TTLs increase event volume; long TTLs delay cleanup
 - No "permanent safelist via FlowSpec" use case (use router static config instead)
+- Controller downtime suspends application TTL enforcement; restore
+  reconciliation or explicitly withdraw rules from the speaker.

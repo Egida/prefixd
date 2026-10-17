@@ -43,7 +43,7 @@ src/
 │   ├── openapi.rs     # utoipa OpenAPI spec registration
 │   └── metrics.rs     # HTTP request metrics middleware
 ├── auth/              # AuthBackend (axum-login), mode-aware auth (none/bearer/credentials/mtls)
-├── bgp/               # FlowSpecAnnouncer trait, GoBGP gRPC client, mock
+├── bgp/               # FlowSpecAnnouncer, GoBGP and experimental rustbgpd gRPC clients, mock
 ├── config/            # Settings, Inventory, Playbooks (YAML parsing)
 ├── correlation/       # Multi-signal correlation engine (config, engine, signal groups, webhook adapter)
 ├── db/                # PostgreSQL repository with sqlx + MockRepository for testing
@@ -115,7 +115,7 @@ tests/
 3. **axum** - Async HTTP framework
 4. **tonic** - gRPC client for GoBGP
 5. **Trait-based BGP abstraction** - `FlowSpecAnnouncer` with `GoBgpAnnouncer` and `MockAnnouncer`
-6. **Fail-open** - If prefixd dies, mitigations expire via TTL (no permanent rules)
+6. **Application TTLs** - Running reconciliation enforces expiry; rules can persist while prefixd is down and the separate speaker stays up (ADR 003, corrected)
 7. **Allowlist config redaction** - Only explicitly safe fields exposed via API (ADR 014)
 8. **Health endpoint split** - Public liveness vs authenticated detail (ADR 015)
 9. **Nginx single-origin** - All traffic through port 80, no split-origin CORS issues (ADR 005)

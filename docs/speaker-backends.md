@@ -1,0 +1,112 @@
+# Speaker backends
+
+prefixd owns mitigation policy, guardrails, and desired state. The selected BGP
+daemon owns peer sessions and protocol distribution. rustbgpd is the preferred
+integration target; GoBGP remains supported. The default deployment continues
+to use GoBGP while the rustbgpd path is qualified.
+
+## Current boundary
+
+`FlowSpecAnnouncer` has four required operations: announce, withdraw, list active
+local rules, and observe peer state. A factory selects the configured adapter;
+the policy engine and scheduler use the same trait for every backend.
+
+| Backend | Runtime selection | Read-back / peers | Status |
+|---------|-------------------|-------------------|--------|
+| GoBGP | `gobgp` or existing `sidecar` | Implemented / implemented | Existing backend; existing lab receipts apply to this path |
+| rustbgpd | `rustbgpd`, built with `bgp-rustbgpd` | Local injected view / neighbor states | Experimental adapter; deployment and router parity gates remain open |
+| Mock | `mock` | In-memory / synthetic | Automated testing only |
+| Generic HTTP shim | Planned | Capability-dependent | Requires durable ledger and optional observation support |
+| ExaBGP or another daemon | Planned adapter or shim | Must be verified | No support or interoperability claim yet |
+
+FRR, BIRD, and OpenBGPD are not selectable backends today. A router accepting a
+FlowSpec route is distinct from a daemon exposing the origination/control API
+prefixd needs. Each proposed adapter needs that evidence before implementation.
+
+## rustbgpd configuration
+
+Build with `cargo build --features bgp-rustbgpd`. A local authenticated TCP
+configuration uses:
+
+```yaml
+bgp:
+  mode: rustbgpd
+  rustbgpd:
+    endpoint: "http://127.0.0.1:50051"
+    bearer_token_env: "PREFIXD_RUSTBGPD_TOKEN"
+  local_asn: 65010
+  router_id: "10.10.0.10"
+```
+
+Set the environment variable to the token stored in rustbgpd's `token_file`.
+The daemon's listener principal needs an `operator` role for Add/DeleteFlowSpec;
+the token authenticates that listener identity. The client sends the bearer
+token, not a user-supplied principal header. Credential values are never YAML
+configuration fields or settings API output.
+
+For a remote endpoint use `https://speaker.example:50051` and set
+`ca_cert_path` to the PEM CA certificate that authenticates the server. The
+certificate must match the endpoint hostname. Plain HTTP accepts only literal
+loopback IPs, including `127.0.0.1` and `[::1]`; a hostname is not a loopback
+guarantee. UDS and client-certificate mTLS are follow-up work.
+
+The relevant vendored controller message fields were checked against rustbgpd
+`v0.77.0`. This is a protocol baseline, not proof that an arbitrary binary
+reporting that version has passed the deployment or router tests.
+
+## Rule and reconciliation semantics
+
+The adapter supports destination prefix, optional protocol, equality lists of
+destination ports, and discard or traffic policing. Components are sent in RFC
+type order. Policing uses bits/sec in prefixd and floating-point bytes/sec in
+the daemon; rates that cannot be represented exactly are rejected. Unsupported matches or
+actions must produce an error instead of being dropped during decoding.
+
+Add is an upsert; reapplying unchanged intent succeeds. Delete requests opt into
+`allow_missing`, so an already absent rule is success. Unknown mutation outcomes
+and missing read-view acknowledgements are errors, including an empty response
+from an older daemon that ignored the selector.
+
+Both address families are read from retained local intent with
+`received_peer_address = "0.0.0.0"`. A nonselected local rule still exists and
+must not trigger repeated injection. No received peer's rule is withdrawn by
+this API. Other controllers sharing local injection are not distinguished by an
+ownership marker; unknown local rules are currently reported, not deleted.
+
+The scheduler currently compares NLRI identity. Repairing action-only drift
+needs separate coverage and implementation. Successful injection does not
+prove export-policy acceptance, router receipt, or traffic enforcement.
+
+Mandatory TTLs are enforced by the running controller. Losing prefixd does not
+drop a separate daemon's router sessions or automatically expire its rules.
+Monitor controller availability and restore reconciliation after failure. A
+controller lease or coupled lifecycle needs its own design and failure tests.
+
+## Delivery order
+
+| Stage | Work and gate | Linear |
+|-------|---------------|--------|
+| 1 | Keep GoBGP supported; selectable rustbgpd adapter, compatible config, authenticated RPC and codec tests | LAN-2122, LAN-1947 |
+| 2 | Retry failed expiry withdrawals; real daemon TTL/restart recovery and transport/deployment wiring | LAN-2288, LAN-2125, LAN-2126, LAN-2127 |
+| 3 | Router interop, migration and rollback evidence; only then change deployment defaults | LAN-2128, LAN-2129, LAN-2130, LAN-2131 |
+| 4 | Split required writing from optional reading/peer observation; persist confirmed announcement state and pending cleanup | LAN-2132, LAN-2133 |
+| 5 | Expose capabilities in health/CLI/dashboard/metrics; retain legacy public fields during migration | LAN-2134, LAN-1948 |
+| 6 | HTTP shim, a second transport proof, shared conformance and per-backend CI | LAN-2135, LAN-2136, LAN-2137, LAN-2138, LAN-2139 |
+
+The capability/ledger work can proceed before the default switch, but a
+write-only backend cannot ship before its reconciliation path is verified.
+Generic exec transport, runtime plugin loading, and unrelated framework or UI
+rewrites are outside this first slice.
+
+## Contributor and certification gates
+
+Add an adapter module, its config subsection, and a factory entry. Preserve the
+shared trait until optional-capability handling is implemented. Test exact RPC
+or transport payloads, authentication, transient and permanent failures, rule
+identity, replacement, repeated delete, both families, and action read-back.
+Run against a pinned real daemon before calling the adapter supported. Record
+router evidence separately and include restart/TTL behavior in the release gate.
+
+The existing `gobgp` health field and `apipb` export remain compatibility
+surfaces. They do not select the active backend. Operator-facing generic naming
+and capability badges belong to the later compatibility stage.

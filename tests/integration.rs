@@ -17,6 +17,138 @@ use prefixd::config::{
 use prefixd::db::{MockRepository, RepositoryTrait};
 use prefixd::domain::AttackVector;
 
+struct RecoveringWithdrawal {
+    inner: MockAnnouncer,
+    failing: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait::async_trait]
+impl prefixd::bgp::FlowSpecAnnouncer for RecoveringWithdrawal {
+    async fn announce(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+        self.inner.announce(rule).await
+    }
+    async fn withdraw(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(prefixd::error::PrefixdError::BgpWithdrawalFailed(
+                "temporary".into(),
+            ));
+        }
+        self.inner.withdraw(rule).await
+    }
+    async fn list_active(&self) -> prefixd::error::Result<Vec<prefixd::domain::FlowSpecRule>> {
+        self.inner.list_active().await
+    }
+    async fn session_status(&self) -> prefixd::error::Result<Vec<prefixd::bgp::PeerStatus>> {
+        self.inner.session_status().await
+    }
+}
+
+#[tokio::test]
+async fn test_failed_bulk_and_detector_withdrawals_preserve_active_state_for_retry() {
+    use prefixd::domain::MitigationStatus;
+    use std::sync::atomic::Ordering::SeqCst;
+
+    for bulk in [true, false] {
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(RecoveringWithdrawal {
+            inner: MockAnnouncer::new(),
+            failing: std::sync::atomic::AtomicBool::new(true),
+        });
+        let mut settings = test_settings();
+        settings.mode = prefixd::config::OperationMode::Enforced;
+        let state = AppState::new(
+            settings,
+            test_inventory(),
+            test_playbooks(),
+            repo.clone(),
+            speaker.clone(),
+            ".".into(),
+        )
+        .unwrap();
+        let mut updates = state.ws_broadcast.subscribe();
+        let app = create_test_router(state);
+        let mut event = serde_json::json!({
+            "event_id": "retry-test", "timestamp": chrono::Utc::now(), "source": "test",
+            "victim_ip": "203.0.113.10", "vector": "udp_flood", "pps": 50000,
+            "top_dst_ports": [53], "confidence": 0.9,
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(event.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id: uuid::Uuid = json["mitigation_id"].as_str().unwrap().parse().unwrap();
+        while updates.try_recv().is_ok() {}
+        event["action"] = "unban".into();
+        let (path, payload) = if bulk {
+            (
+                "/v1/mitigations/withdraw",
+                serde_json::json!({"mitigation_ids": [id], "reason": "retry test"}),
+            )
+        } else {
+            ("/v1/events", event)
+        };
+
+        for failing in [true, false] {
+            speaker.failing.store(failing, SeqCst);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .body(Body::from(payload.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            if bulk {
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(json["failed"], if failing { 1 } else { 0 });
+            } else {
+                assert_eq!(
+                    response.status(),
+                    if failing {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    } else {
+                        StatusCode::ACCEPTED
+                    }
+                );
+            }
+            let mitigation = repo.get_mitigation(id).await.unwrap().unwrap();
+            assert_eq!(
+                mitigation.status,
+                if failing {
+                    MitigationStatus::Active
+                } else {
+                    MitigationStatus::Withdrawn
+                }
+            );
+            assert_eq!(speaker.inner.announced_count().await, usize::from(failing));
+            if failing {
+                assert!(updates.try_recv().is_err());
+            }
+        }
+    }
+}
+
 fn test_settings() -> Settings {
     Settings {
         pop: "test1".to_string(),
@@ -34,6 +166,7 @@ fn test_settings() -> Settings {
             cors_origin: None,
         },
         bgp: BgpConfig {
+            rustbgpd: None,
             mode: BgpMode::Mock,
             gobgp_grpc: "127.0.0.1:50051".to_string(),
             local_asn: 65000,
@@ -295,6 +428,50 @@ async fn test_config_settings_endpoint() {
         json["settings"]["bgp"]["router_id"].is_null(),
         "router_id should not be in allowlist"
     );
+}
+
+#[tokio::test]
+async fn test_rustbgpd_config_credentials_are_not_exposed() {
+    let mut settings = test_settings();
+    settings.bgp.mode = BgpMode::Rustbgpd;
+    settings.bgp.rustbgpd = Some(prefixd::config::RustBgpdConfig {
+        endpoint: "https://private-speaker.example:50051".into(),
+        bearer_token_env: "PRIVATE_SPEAKER_TOKEN".into(),
+        ca_cert_path: Some("/private/speaker-ca.pem".into()),
+    });
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        Arc::new(MockRepository::new()),
+        Arc::new(MockAnnouncer::new()),
+        ".".into(),
+    )
+    .unwrap();
+    let response = create_test_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/v1/config/settings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["settings"]["bgp"]["mode"], "rustbgpd");
+    assert!(json["settings"]["bgp"].get("rustbgpd").is_none());
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    for private_value in [
+        "private-speaker",
+        "PRIVATE_SPEAKER_TOKEN",
+        "/private/speaker-ca.pem",
+    ] {
+        assert!(!body.contains(private_value));
+    }
 }
 
 #[tokio::test]

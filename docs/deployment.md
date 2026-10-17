@@ -5,7 +5,8 @@
 prefixd requires:
 
 - **prefixd** daemon
-- **GoBGP v4.x** sidecar for BGP FlowSpec
+- **GoBGP v4.x** sidecar for BGP FlowSpec (current default), or the experimental
+  rustbgpd adapter described in [speaker backends](speaker-backends.md)
 - **PostgreSQL 14+**
 - **Routers** with FlowSpec support
 
@@ -22,6 +23,37 @@ prefixd requires:
 ```
 
 ---
+
+## Experimental rustbgpd deployment
+
+The shipped Compose stack still uses GoBGP. To evaluate rustbgpd, build prefixd
+with `cargo build --features bgp-rustbgpd`, configure `bgp.mode: rustbgpd` as in
+the [configuration reference](configuration.md#bgp), and run rustbgpd separately.
+Do not point test workloads at a production speaker.
+
+On the rustbgpd side, a local TCP listener uses a private token file and a
+principal with the `operator` role:
+
+```toml
+[global.telemetry.grpc_tcp]
+address = "127.0.0.1:50051"
+token_file = "/etc/rustbgpd/prefixd-token"
+principal = "prefixd"
+
+[security.grpc.roles]
+prefixd = "operator"
+```
+
+Set `PREFIXD_RUSTBGPD_TOKEN` in prefixd's environment to that token's contents.
+Configure the daemon's BGP peers, both FlowSpec families, and export policy
+separately; use its config checker before starting. Remote TCP requires a
+verified TLS endpoint. UDS and client-certificate mTLS, Compose wiring, and the
+default switch are follow-up work rather than shipped deployment recipes.
+
+The running controller enforces TTLs. Stopping prefixd alone does not terminate
+the speaker's BGP sessions, and injected rules carry no application expiry
+lease. Restore reconciliation or explicitly withdraw rules after controller
+failure; monitor controller availability independently from BGP session health.
 
 ## Quick Start
 

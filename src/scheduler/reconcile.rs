@@ -145,6 +145,7 @@ impl ReconciliationLoop {
 
     async fn expire_mitigations(&self) -> anyhow::Result<()> {
         let expired = self.repo.find_expired_mitigations().await?;
+        let mut withdrawal_error = None;
 
         for mut mitigation in expired {
             tracing::info!(
@@ -163,6 +164,8 @@ impl ReconciliationLoop {
                         error = %e,
                         "failed to withdraw expired mitigation"
                     );
+                    withdrawal_error = Some(e);
+                    continue;
                 } else {
                     crate::observability::metrics::ANNOUNCEMENTS_TOTAL
                         .with_label_values(&["withdrawn"])
@@ -195,7 +198,11 @@ impl ReconciliationLoop {
             }
         }
 
-        Ok(())
+        // Retain active state for retry and skip sync so an uncertain delete is not re-announced.
+        match withdrawal_error {
+            Some(error) => Err(error.into()),
+            None => Ok(()),
+        }
     }
 
     async fn expire_signal_groups(&self) -> anyhow::Result<()> {
@@ -472,5 +479,148 @@ impl ReconciliationLoop {
         let nlri = FlowSpecNlri::from(&m.match_criteria);
         let action = FlowSpecAction::from((m.action_type, &m.action_params));
         FlowSpecRule::new(nlri, action)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        bgp::{MockAnnouncer, PeerStatus},
+        db::MockRepository,
+        domain::{
+            ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+        },
+        error::{PrefixdError, Result},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    struct FailingWithdrawal {
+        inner: MockAnnouncer,
+        mode: AtomicUsize,
+        announcements: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl FlowSpecAnnouncer for FailingWithdrawal {
+        async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.announcements.fetch_add(1, SeqCst);
+            self.inner.announce(rule).await
+        }
+
+        async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+            let mode = self.mode.load(SeqCst);
+            if rule.nlri.dst_prefix == "192.0.2.1/32" && mode != 0 {
+                if mode == 2 {
+                    self.inner.withdraw(rule).await?;
+                }
+                return Err(PrefixdError::BgpWithdrawalFailed(
+                    "temporary failure".into(),
+                ));
+            }
+            self.inner.withdraw(rule).await
+        }
+
+        async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
+            self.inner.list_active().await
+        }
+
+        async fn session_status(&self) -> Result<Vec<PeerStatus>> {
+            self.inner.session_status().await
+        }
+    }
+
+    fn expired_mitigation(ip: &str) -> Mitigation {
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: "test".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: format!("{ip}/32"),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams { rate_bps: None },
+                ttl_seconds: 30,
+                reason: "test".into(),
+            },
+            ip.into(),
+            AttackVector::UdpFlood,
+        );
+        mitigation.activate();
+        mitigation.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        mitigation
+    }
+
+    #[tokio::test]
+    async fn expiry_retries_failed_withdrawals_without_false_events_or_reannouncement() {
+        // Cover rejection before removal and an ambiguous reply after removal.
+        for failure_mode in [1, 2] {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FailingWithdrawal {
+                inner: MockAnnouncer::new(),
+                mode: AtomicUsize::new(failure_mode),
+                announcements: AtomicUsize::new(0),
+            });
+            let first = expired_mitigation("192.0.2.1");
+            let second = expired_mitigation("192.0.2.2");
+            let (tx, mut rx) = broadcast::channel(8);
+            let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+                .with_ws_broadcast(tx);
+            for mitigation in [&first, &second] {
+                repo.insert_mitigation(mitigation).await.unwrap();
+                speaker
+                    .inner
+                    .announce(&reconciler.build_flowspec_rule(mitigation))
+                    .await
+                    .unwrap();
+            }
+            assert!(reconciler.reconcile().await.is_err());
+            assert_eq!(
+                repo.get_mitigation(first.mitigation_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                MitigationStatus::Active
+            );
+            assert_eq!(
+                repo.get_mitigation(second.mitigation_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                MitigationStatus::Expired
+            );
+            assert!(
+                matches!(rx.try_recv().unwrap(), WsMessage::MitigationExpired { mitigation_id } if mitigation_id == second.mitigation_id.to_string())
+            );
+            assert!(rx.try_recv().is_err());
+            assert_eq!(speaker.announcements.load(SeqCst), 0);
+            assert_eq!(
+                speaker.inner.announced_count().await,
+                usize::from(failure_mode == 1)
+            );
+
+            speaker.mode.store(0, SeqCst);
+            reconciler.reconcile().await.unwrap();
+            assert_eq!(
+                repo.get_mitigation(first.mitigation_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                MitigationStatus::Expired
+            );
+            assert!(speaker.list_active().await.unwrap().is_empty());
+            assert!(
+                matches!(rx.try_recv().unwrap(), WsMessage::MitigationExpired { mitigation_id } if mitigation_id == first.mitigation_id.to_string())
+            );
+            assert!(rx.try_recv().is_err());
+            assert_eq!(speaker.announcements.load(SeqCst), 0);
+        }
     }
 }

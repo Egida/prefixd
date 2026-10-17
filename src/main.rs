@@ -6,8 +6,8 @@ use clap::Parser;
 use prefixd::AppState;
 use prefixd::api::create_router;
 use prefixd::auth::create_auth_layer;
-use prefixd::bgp::{GoBgpAnnouncer, MockAnnouncer};
-use prefixd::config::{AppConfig, AuthMode, BgpMode};
+use prefixd::bgp::speaker_factory;
+use prefixd::config::{AppConfig, AuthMode};
 use prefixd::db;
 use prefixd::observability::init_tracing;
 use prefixd::scheduler::ReconciliationLoop;
@@ -26,6 +26,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let cli = Cli::parse();
 
     // Load config
@@ -43,6 +44,8 @@ async fn main() -> anyhow::Result<()> {
         "starting prefixd"
     );
 
+    let announcer = speaker_factory(&config.settings.bgp).await?;
+
     // Init database
     // DATABASE_URL env var takes precedence over config file
     let connection_string = std::env::var("DATABASE_URL")
@@ -57,20 +60,6 @@ async fn main() -> anyhow::Result<()> {
         repo.insert_safelist(prefix, "config", Some("from prefixd.yaml"))
             .await?;
     }
-
-    // Init BGP announcer
-    let announcer: Arc<dyn prefixd::bgp::FlowSpecAnnouncer> = match config.settings.bgp.mode {
-        BgpMode::Mock => {
-            tracing::info!("using mock BGP announcer");
-            Arc::new(MockAnnouncer::new())
-        }
-        BgpMode::Sidecar => {
-            tracing::info!(endpoint = %config.settings.bgp.gobgp_grpc, "using GoBGP sidecar");
-            let mut gobgp = GoBgpAnnouncer::new(config.settings.bgp.gobgp_grpc.clone());
-            gobgp.connect().await?;
-            Arc::new(gobgp)
-        }
-    };
 
     // Load alerting config from alerting.yaml if present, falling back to prefixd.yaml
     let alerting_path = cli.config.join("alerting.yaml");

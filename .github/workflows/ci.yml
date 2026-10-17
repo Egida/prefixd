@@ -43,6 +43,9 @@ jobs:
       - name: Run tests
         run: cargo test --features test-utils
 
+      - name: Test rustbgpd backend
+        run: cargo test --features bgp-rustbgpd,test-utils
+
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -73,6 +76,9 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      - name: Lint rustbgpd backend
+        run: cargo clippy --all-targets --features bgp-rustbgpd,test-utils -- -D warnings
 
   build:
     name: Build

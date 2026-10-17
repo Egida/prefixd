@@ -30,5 +30,9 @@ Format follows [Michael Nygard's template](https://cognitect.com/blog/2011/11/15
 | [020](020-generic-webhook-adapter.md) | Generic Webhook Adapter | Accepted | 2026-04-18 |
 | [021](021-corroborating-signals.md) | Corroborating Signals | Accepted | 2026-04-19 |
 | [022](022-confidence-decay.md) | Confidence Decay for Signal Groups | Accepted | 2026-05-11 |
+| [025](025-pluggable-speaker-backends.md) | Pluggable speakers with rustbgpd as the preferred backend | Accepted | 2026-10-17 |
+
+Numbers 023 and 024 are reserved by the open architecture PR #150. ADR 025
+records the current decision to retain GoBGP as a supported choice.
 
 ADRs are numbered sequentially as written. Retroactive ADRs (009-013) were documented on 2026-02-18 but dated to when the decision was originally made.

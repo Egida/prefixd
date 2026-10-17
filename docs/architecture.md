@@ -49,15 +49,16 @@ prefixd doesn't detect attacks. Detectors (FastNetMon, Prometheus alerts, custom
 - Tune detection thresholds independently
 - Correlate multiple weak signals (future: v1.5)
 
-### 2. Fail-Open
+### 2. TTL Enforcement
 
 If prefixd crashes or becomes unavailable:
 
-- **Existing mitigations continue** until their TTL expires
+- **Existing rules can remain advertised** while the separate speaker stays up
 - **No new mitigations** are created (attacks may go unblocked)
-- **No permanent rules** are left behind
+- **Application TTL enforcement pauses** until reconciliation resumes
 
-This is intentional. The alternative (fail-closed with permanent rules) risks blocking legitimate traffic indefinitely if prefixd dies.
+FlowSpec injection carries no controller expiry lease. Controller-crash cleanup
+needs an explicit lease or coupled lifecycle; see [ADR 003](adr/003-fail-open-ttl.md).
 
 ### 3. /32 Only (IPv4)
 
@@ -477,7 +478,8 @@ For 1000+ mitigations/second, consider batching (not yet implemented).
 
 ### prefixd Crash
 
-- Existing mitigations continue (TTL-based expiry)
+- Existing rules can persist while the speaker stays up; application TTL expiry
+  resumes with reconciliation
 - No new mitigations until restart
 - Reconciliation syncs state on restart
 

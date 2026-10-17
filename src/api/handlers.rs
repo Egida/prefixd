@@ -557,7 +557,7 @@ async fn handle_unban(
         let start = std::time::Instant::now();
         if let Err(e) = state.announcer.withdraw(&rule).await {
             tracing::error!(error = %e, "BGP withdrawal failed");
-            // Continue anyway - mark as withdrawn in DB
+            return Err(AppError(e));
         } else {
             crate::observability::metrics::ANNOUNCEMENTS_TOTAL
                 .with_label_values(&["withdrawn"])
@@ -1798,6 +1798,13 @@ pub async fn bulk_withdraw_mitigations(
             let start = std::time::Instant::now();
             if let Err(e) = state.announcer.withdraw(&rule).await {
                 tracing::error!(error = %e, mitigation_id = %id, "BGP withdrawal failed in bulk withdraw");
+                failed += 1;
+                results.push(BulkWithdrawResult {
+                    mitigation_id: *id,
+                    status: "error".to_string(),
+                    error: Some("speaker withdrawal failed".to_string()),
+                });
+                continue;
             } else {
                 crate::observability::metrics::ANNOUNCEMENTS_TOTAL
                     .with_label_values(&["withdrawn"])

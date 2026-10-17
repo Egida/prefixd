@@ -21,14 +21,19 @@ Define a `FlowSpecAnnouncer` trait that abstracts BGP operations:
 pub trait FlowSpecAnnouncer: Send + Sync {
     async fn announce(&self, rule: &FlowSpecRule) -> Result<(), PrefixdError>;
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<(), PrefixdError>;
-    async fn get_rib(&self) -> Result<Vec<FlowSpecRule>, PrefixdError>;
-    async fn get_peers(&self) -> Result<Vec<PeerStatus>, PrefixdError>;
+    async fn list_active(&self) -> Result<Vec<FlowSpecRule>, PrefixdError>;
+    async fn session_status(&self) -> Result<Vec<PeerStatus>, PrefixdError>;
 }
 ```
 
-Two implementations:
+Implementations:
 - `GoBgpAnnouncer` -- real gRPC client for production
 - `MockAnnouncer` -- in-memory store for tests, records all calls
+- `RustBgpdAnnouncer` -- experimental gRPC adapter behind `bgp-rustbgpd`
+
+[ADR 025](025-pluggable-speaker-backends.md) keeps GoBGP supported while rustbgpd
+is qualified. Optional reader/peer capabilities and write-only adapters require
+separate reconciliation and ledger work.
 
 ## Consequences
 

@@ -233,38 +233,42 @@ Target: Quality-of-life for operators during active incidents. These are the fea
 
 ---
 
-## Native BGP Speaker (rustbgpd)
+## Pluggable BGP Speakers (rustbgpd preferred)
 
-Replace the GoBGP container dependency with [rustbgpd](https://github.com/lance0/rustbgpd) crates embedded directly into the prefixd binary. Eliminates the separate process, gRPC client overhead, proto compilation, and container orchestration. prefixd becomes a single binary that speaks BGP natively.
+Use [rustbgpd](https://github.com/lance0/rustbgpd) through its controller gRPC
+API, keeping GoBGP as a supported alternative. Peer lifecycle stays in the
+speaker daemon. [ADR 025](docs/adr/025-pluggable-speaker-backends.md) records the
+support decision; [speaker backends](docs/speaker-backends.md) tracks the
+capability boundary, evidence limits, and delivery order.
 
-### Phase 1: Embedded Announcer
+### Phase 1: Selectable rustbgpd Adapter
 
-- [ ] Add `rustbgpd-wire`, `rustbgpd-fsm`, `rustbgpd-transport`, `rustbgpd-rib` as workspace dependencies
-- [ ] Implement `RustBgpdAnnouncer` behind the existing `FlowSpecAnnouncer` trait (announce, withdraw, list_active, session_status)
-- [ ] Peer lifecycle managed by prefixd config (ASN, neighbor address, AFI-SAFI, timers)
-- [ ] Feature-flag the announcer backend (`--features gobgp` vs `--features native-bgp`, default native)
+- [x] Vendor the controller proto behind `bgp-rustbgpd`
+- [ ] Implement and validate `RustBgpdAnnouncer` for announce, withdraw, retained local-rule read-back, and peer status (LAN-1947)
+- [ ] Add compatible `sidecar`, `gobgp`, `rustbgpd`, and `mock` selection; preserve existing defaults until qualification
+- [ ] Retry failed TTL withdrawals before marking mitigations expired (LAN-2288)
+- [ ] Complete UDS/client-certificate mTLS and rustbgpd deployment wiring (LAN-2125)
 
-### Phase 2: Reconciliation + RIB Direct Access
+### Phase 2: Qualification and Default Migration
 
-- [ ] Reconciliation loop reads the embedded RIB directly instead of querying GoBGP via gRPC
-- [ ] Expose BGP session state in health detail endpoint from the embedded FSM
-- [ ] Map existing `gobgp.conf` semantics to rustbgpd peer config (migration path for existing deployments)
+- [ ] Verify real-daemon TTL withdrawal and restart re-injection (LAN-2126, LAN-2127)
+- [ ] Re-run FRR and Juniper interop against rustbgpd; qualify Arista/Cisco independently (LAN-2128, LAN-2144)
+- [ ] Re-run bounded chaos/load checks and attribute evidence to the tested backend (LAN-2129)
+- [ ] Publish migration/rollback instructions and an explicit version pin/upgrade policy (LAN-2130, LAN-2131)
+- [ ] Switch default deployment to rustbgpd after these gates pass; retain GoBGP's adapter, proto, configuration, and CI
 
-### Phase 3: Remove GoBGP
+### Phase 3: Other Daemons
 
-- [ ] Remove `proto/` directory and `build.rs` proto compilation
-- [ ] Remove tonic/prost GoBGP client dependencies
-- [ ] Remove `gobgp` service from `docker-compose.yml`
-- [ ] Update all lab topologies (containerlab configs peer directly with prefixd)
-- [ ] Update deployment docs, vendor configs, and troubleshooting guides
+- [ ] Split required writing from optional RIB reading and peer observation; declare capabilities honestly (LAN-2132)
+- [ ] Persist announcement confirmations and retryable cleanup in a durable ledger before write-only adapters (LAN-2133)
+- [ ] Expose backend and capabilities through compatible health, CLI, dashboard, metrics and Grafana surfaces (LAN-2134, LAN-1948)
+- [ ] Define a generic HTTP shim; qualify ExaBGP or another API as an independent transport proof (LAN-2135, LAN-2137)
+- [ ] Require shared conformance, per-backend CI, maintainer ownership, and documented qualification (LAN-2136, LAN-2138, LAN-2139)
 
-### Phase 4: Validation
-
-- [ ] Re-run Juniper cJunosEvolved interop (announce, rate-limit, withdraw, TTL expiry)
-- [ ] Re-run FRR containerlab interop
-- [ ] Arista EOS validation (if hardware available)
-- [ ] Chaos and load test suites pass against embedded speaker
-- [ ] Migration guide for existing GoBGP deployments
+Controller TTL enforcement requires running reconciliation. A separate speaker
+can keep advertising after prefixd stops; crash cleanup needs its own explicit
+lease or lifecycle design. Successful RPCs and committed advertisements do not
+prove that a router installed or enforced a rule.
 
 ---
 

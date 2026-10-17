@@ -223,12 +223,14 @@ The reconciliation loop runs every 30 seconds:
 1. **Expire mitigations** - Withdraw FlowSpec rules past TTL
 2. **Detect drift** - Compare desired state (DB) vs actual state (GoBGP RIB)
 3. **Repair missing** - Re-announce rules that should exist but don't
-4. **Clean orphans** - Withdraw rules in RIB that aren't in desired state
+4. **Report unknown rules** - Warn about speaker rules absent from desired state;
+   automatic orphan withdrawal is not implemented
 
-### Fail-Open Design
+### TTL Enforcement
 
-- If prefixd crashes, mitigations auto-expire via router TTL
-- No permanent rules, no operator intervention required
+- The running controller withdraws expired mitigations and retries failed TTL withdrawals
+- If prefixd crashes while the speaker stays up, rules can persist until
+  reconciliation resumes or an operator withdraws them; there is no router TTL lease
 - GoBGP can restart independently; prefixd re-syncs on reconnect
 
 ### WebSocket Notifications

@@ -162,6 +162,7 @@ pub fn test_settings() -> Settings {
             cors_origin: None,
         },
         bgp: BgpConfig {
+            rustbgpd: None,
             mode: BgpMode::Mock,
             gobgp_grpc: "127.0.0.1:50051".to_string(),
             local_asn: 65000,
