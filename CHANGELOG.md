@@ -74,6 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Isolate integration-test HMAC secrets in bounded child processes, use cached
+  bearer-token fixtures and forbid unsafe code in the integration-test crate.
+  Cover real bearer startup loading and missing/empty-token rejection in child tests.
+
 - Put active mitigation intent, signal evidence, expiry and honest router-observation
   limits first in the operator workspace. Refresh the light/dark theme, Geist
   typography and navigation; preserve user zoom and remove decorative pulses,
