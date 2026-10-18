@@ -76,12 +76,29 @@ pub trait PeerObserver: Send + Sync {
     async fn session_status(&self) -> Result<Vec<PeerStatus>>;
 }
 
+/// Process metadata observed from the speaker, independently of peer sessions.
+#[derive(Debug, Clone)]
+pub struct DaemonHealth {
+    pub version: Option<String>,
+    pub uptime_seconds: u64,
+    pub ready: bool,
+}
+
+#[async_trait]
+pub trait DaemonHealthObserver: Send + Sync {
+    async fn daemon_health(&self) -> Result<DaemonHealth>;
+}
+
 /// Selected speaker: writing is required, observation is explicitly optional.
 /// A production write-only backend still needs a durable reconciliation ledger.
 pub trait FlowSpecAnnouncer: FlowSpecWriter {
     fn backend(&self) -> &'static str;
 
     fn reader(&self) -> Option<&dyn FlowSpecReader> {
+        None
+    }
+
+    fn daemon_health_observer(&self) -> Option<&dyn DaemonHealthObserver> {
         None
     }
 
@@ -97,6 +114,8 @@ pub trait FlowSpecAnnouncer: FlowSpecWriter {
 pub struct SpeakerCapabilities {
     pub rule_reader: bool,
     pub peer_observer: bool,
+    #[serde(default)]
+    pub daemon_health: bool,
 }
 
 impl dyn FlowSpecAnnouncer + '_ {
@@ -104,6 +123,7 @@ impl dyn FlowSpecAnnouncer + '_ {
         SpeakerCapabilities {
             rule_reader: self.reader().is_some(),
             peer_observer: self.peer_observer().is_some(),
+            daemon_health: self.daemon_health_observer().is_some(),
         }
     }
 }

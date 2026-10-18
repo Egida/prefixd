@@ -1443,7 +1443,7 @@ Lightweight liveness check. No authentication required. Does not query database 
 | Field | Description |
 |-------|-------------|
 | `status` | Always `"ok"` if the daemon is running |
-| `version` | Daemon version |
+| `version` | Controller (prefixd) version |
 | `auth_mode` | Authentication mode: `none`, `bearer`, `credentials`, `mtls` |
 
 ### Health Detail (Authenticated)
@@ -1474,7 +1474,14 @@ Full operational health. Requires authentication.
   },
   "speaker": {
     "backend": "gobgp",
-    "capabilities": { "rule_reader": true, "peer_observer": true }
+    "capabilities": { "rule_reader": true, "peer_observer": true, "daemon_health": false },
+    "daemon": {
+      "status": "unsupported",
+      "version": null,
+      "uptime_seconds": null,
+      "ready": null,
+      "observed_at": null
+    }
   },
   "auth_mode": "none"
 }
@@ -1482,12 +1489,22 @@ Full operational health. Requires authentication.
 
 | Status | Meaning |
 |--------|---------|
-| `healthy` | Database and supported peer observation succeeded |
-| `degraded` | Database or supported peer observation failed |
+| `healthy` | Database and supported observations succeeded; observed daemon is ready |
+| `degraded` | Database or supported observation failed, or observed daemon is not ready |
 
 `speaker` is additive metadata: backend identity plus observation availability.
 Older daemons may omit it. Capabilities do not report recent read success or
 rule delivery. Health performs no rule inventory probe.
+
+Top-level `version` and `uptime_seconds` describe prefixd. `speaker.daemon`
+independently reports authenticated speaker process metadata: `observed`, `error`
+or `unsupported`. Successful observations carry receipt time `observed_at`,
+reported uptime (including zero), readiness and a nullable daemon version. Empty
+versions remain unknown. Errors and unsupported observations carry null metadata.
+GoBGP's current API lacks this process metadata; peer uptime is not substituted.
+The additional health probe runs concurrently with existing checks, with a
+two-second observation budget including retries. This may add latency. No rule
+inventory or routing-enforcement probe is performed.
 
 The compatibility field `gobgp.status` describes the selected speaker's peer
 observation: `connected` means a successful read, including zero peers; `error`

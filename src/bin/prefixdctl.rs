@@ -195,6 +195,17 @@ struct HealthResponse {
 struct SpeakerHealth {
     backend: String,
     capabilities: prefixd::bgp::SpeakerCapabilities,
+    #[serde(default)]
+    daemon: Option<DaemonHealthObservation>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct DaemonHealthObservation {
+    status: String,
+    version: Option<String>,
+    uptime_seconds: Option<u64>,
+    ready: Option<bool>,
+    observed_at: Option<String>,
 }
 
 impl HealthResponse {
@@ -411,6 +422,34 @@ async fn cmd_status(client: &Client, format: OutputFormat) -> Result<(), String>
             println!("Active Mitigations: {}", health.active_mitigations);
             if let Some(speaker) = &health.speaker {
                 println!("Speaker: {}", speaker.backend);
+                match &speaker.daemon {
+                    Some(daemon) if daemon.status == "observed" => {
+                        println!(
+                            "  Daemon version: {}",
+                            daemon.version.as_deref().unwrap_or("unavailable")
+                        );
+                        println!(
+                            "  Daemon uptime: {}",
+                            daemon
+                                .uptime_seconds
+                                .map(|seconds| format!("{seconds}s"))
+                                .unwrap_or_else(|| "unavailable".into())
+                        );
+                        println!(
+                            "  Daemon ready: {}",
+                            daemon
+                                .ready
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "unavailable".into())
+                        );
+                        println!(
+                            "  Observed at: {}",
+                            daemon.observed_at.as_deref().unwrap_or("unavailable")
+                        );
+                    }
+                    Some(daemon) => println!("  Daemon metadata: {}", daemon.status),
+                    None => println!("  Daemon metadata: unavailable"),
+                }
                 if !speaker.capabilities.rule_reader {
                     println!("Rule observation: unsupported by this speaker");
                 }
@@ -999,5 +1038,22 @@ mod tests {
                 .unwrap_err()
                 .contains("RPC unavailable")
         );
+    }
+    #[test]
+    fn daemon_health_metadata_keeps_zero_missing_version_and_unavailable_states() {
+        for status in ["observed", "error", "unsupported"] {
+            let daemon: DaemonHealthObservation = serde_json::from_value(serde_json::json!({
+                "status": status, "version": null,
+                "uptime_seconds": if status == "observed" { Some(0_u64) } else { None },
+                "ready": if status == "observed" { Some(false) } else { None },
+                "observed_at": if status == "observed" { Some("2026-01-01T00:00:00Z") } else { None }
+            })).unwrap();
+            assert_eq!(daemon.status, status);
+            assert!(daemon.version.is_none());
+            assert_eq!(
+                daemon.uptime_seconds,
+                if status == "observed" { Some(0) } else { None }
+            );
+        }
     }
 }

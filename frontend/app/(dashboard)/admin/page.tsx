@@ -110,7 +110,7 @@ export default function AdminPage() {
   const { mutate } = useSWRConfig()
   const { operator } = useAuth()
   const permissions = usePermissions()
-  const { data: health, error: healthError, isLoading: healthLoading } = useHealthDetail()
+  const { data: health, error: healthError, isLoading: healthLoading, isStale: healthStale } = useHealthDetail()
   const { data: stats, error: statsError, isLoading: statsLoading } = useStats()
   const { data: safelist, error: safelistError, isLoading: safelistLoading, mutate: mutateSafelist } = useSafelist()
   const { data: pops, error: popsError, isLoading: popsLoading } = usePops()
@@ -330,6 +330,8 @@ export default function AdminPage() {
                 <LoadingCard title="Daemon Status" />
               ) : healthError ? (
                 <ErrorCard title="Daemon Status" error="Failed to connect" />
+              ) : healthStale ? (
+                <ErrorCard title="Daemon Status" error="Health observation is stale" />
               ) : health ? (
                 <Card className="bg-card border-border">
                   <CardHeader className="pb-2">
@@ -365,6 +367,8 @@ export default function AdminPage() {
                 <LoadingCard title="BGP Peers" />
               ) : healthError ? (
                 <ErrorCard title="BGP Peers" error="Failed to connect" />
+              ) : healthStale ? (
+                <ErrorCard title="BGP Peers" error="Health observation is stale" />
               ) : health ? (
                 <Card className="bg-card border-border">
                   <CardHeader className="pb-2">

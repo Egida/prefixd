@@ -223,7 +223,7 @@ pub struct AuditListResponse {
 pub struct PublicHealthResponse {
     /// Health status (healthy, degraded)
     status: String,
-    /// Daemon version
+    /// Controller (prefixd) version
     version: String,
     /// Authentication mode (none, bearer, credentials, mtls)
     auth_mode: String,
@@ -233,11 +233,11 @@ pub struct PublicHealthResponse {
 pub struct HealthResponse {
     /// Health status (healthy, degraded)
     status: String,
-    /// Daemon version
+    /// Controller (prefixd) version
     version: String,
     /// POP identifier
     pop: String,
-    /// Seconds since daemon started
+    /// Seconds since the controller (prefixd) started
     uptime_seconds: u64,
     /// BGP session states by peer name
     bgp_sessions: std::collections::HashMap<String, String>,
@@ -247,7 +247,7 @@ pub struct HealthResponse {
     database: String,
     /// Peer observation status (legacy field name)
     gobgp: ComponentHealth,
-    /// Selected backend and available observations; no extra RPC is performed
+    /// Selected backend, capabilities and independent daemon observation
     speaker: SpeakerHealth,
     /// Authentication mode (none, bearer, credentials, mtls)
     auth_mode: String,
@@ -257,6 +257,47 @@ pub struct HealthResponse {
 pub struct SpeakerHealth {
     backend: &'static str,
     capabilities: crate::bgp::SpeakerCapabilities,
+    daemon: DaemonHealthObservation,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct DaemonHealthObservation {
+    /// observed, error, or unsupported; independent of peer session state.
+    status: String,
+    version: Option<String>,
+    uptime_seconds: Option<u64>,
+    ready: Option<bool>,
+    /// Controller receipt time after a successful authenticated speaker RPC.
+    observed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+async fn observe_daemon_health(state: &AppState) -> DaemonHealthObservation {
+    let Some(observer) = state.announcer.daemon_health_observer() else {
+        return DaemonHealthObservation {
+            status: "unsupported".into(),
+            version: None,
+            uptime_seconds: None,
+            ready: None,
+            observed_at: None,
+        };
+    };
+    // Bound the added operational probe, including any adapter retries.
+    match tokio::time::timeout(std::time::Duration::from_secs(2), observer.daemon_health()).await {
+        Ok(Ok(health)) => DaemonHealthObservation {
+            status: "observed".into(),
+            version: health.version,
+            uptime_seconds: Some(health.uptime_seconds),
+            ready: Some(health.ready),
+            observed_at: Some(chrono::Utc::now()),
+        },
+        _ => DaemonHealthObservation {
+            status: "error".into(),
+            version: None,
+            uptime_seconds: None,
+            ready: None,
+            observed_at: None,
+        },
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -2431,7 +2472,11 @@ pub async fn health_detail(
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
-    let (status, bgp_map, active, db_status, gobgp_health) = check_health_status(&state).await;
+    let ((mut status, bgp_map, active, db_status, gobgp_health), daemon) =
+        tokio::join!(check_health_status(&state), observe_daemon_health(&state));
+    if daemon.status == "error" || daemon.ready == Some(false) {
+        status = "degraded".into();
+    }
 
     Ok(Json(HealthResponse {
         status,
@@ -2445,6 +2490,7 @@ pub async fn health_detail(
         speaker: SpeakerHealth {
             backend: state.announcer.backend(),
             capabilities: state.announcer.capabilities(),
+            daemon,
         },
         auth_mode: resolve_auth_mode(&state),
     }))

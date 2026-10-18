@@ -1267,17 +1267,21 @@ async fn test_health_detail_endpoint() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn health_distinguishes_unsupported_failed_empty_and_populated_peer_observation() {
     use prefixd::bgp::{FlowSpecAnnouncer, PeerStatus, SessionState};
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
     struct HealthSpeaker {
         mode: usize,
         peer_calls: AtomicUsize,
+        health_calls: AtomicUsize,
     }
     impl FlowSpecAnnouncer for HealthSpeaker {
         fn backend(&self) -> &'static str {
             "health-test"
+        }
+        fn daemon_health_observer(&self) -> Option<&dyn prefixd::bgp::DaemonHealthObserver> {
+            if self.mode == 0 { None } else { Some(self) }
         }
         fn reader(&self) -> Option<&dyn FlowSpecReader> {
             if self.mode == 4 { None } else { Some(self) }
@@ -1310,7 +1314,7 @@ async fn health_distinguishes_unsupported_failed_empty_and_populated_peer_observ
                     "peer RPC failed".into(),
                 )),
                 2 => Ok(vec![]),
-                3 | 4 => Ok(vec![PeerStatus {
+                3..=5 => Ok(vec![PeerStatus {
                     name: "router".into(),
                     address: "192.0.2.1".into(),
                     state: SessionState::Established,
@@ -1319,10 +1323,34 @@ async fn health_distinguishes_unsupported_failed_empty_and_populated_peer_observ
             }
         }
     }
-    for mode in 0..5 {
+    #[async_trait::async_trait]
+    impl prefixd::bgp::DaemonHealthObserver for HealthSpeaker {
+        async fn daemon_health(&self) -> prefixd::error::Result<prefixd::bgp::DaemonHealth> {
+            self.health_calls.fetch_add(1, SeqCst);
+            if self.mode == 5 {
+                return std::future::pending().await;
+            }
+            if self.mode == 1 {
+                return Err(prefixd::error::PrefixdError::Internal(
+                    "private upstream diagnostic".into(),
+                ));
+            }
+            Ok(prefixd::bgp::DaemonHealth {
+                version: if self.mode == 2 {
+                    None
+                } else {
+                    Some("actual-daemon-version".into())
+                },
+                uptime_seconds: if self.mode == 2 { 0 } else { 123 },
+                ready: self.mode != 4,
+            })
+        }
+    }
+    for mode in 0..6 {
         let speaker = Arc::new(HealthSpeaker {
             mode,
             peer_calls: AtomicUsize::new(0),
+            health_calls: AtomicUsize::new(0),
         });
         let state = AppState::new(
             test_settings(),
@@ -1333,15 +1361,22 @@ async fn health_distinguishes_unsupported_failed_empty_and_populated_peer_observ
             ".".into(),
         )
         .unwrap();
-        let response = create_test_router(state)
-            .oneshot(
+        let started = tokio::time::Instant::now();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            create_test_router(state).oneshot(
                 Request::builder()
                     .uri("/v1/health/detail")
                     .body(Body::empty())
                     .unwrap(),
-            )
-            .await
-            .unwrap();
+            ),
+        )
+        .await
+        .expect("daemon operational observation must finish within its budget")
+        .unwrap();
+        if mode == 5 {
+            assert_eq!(started.elapsed(), std::time::Duration::from_secs(2));
+        }
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -1358,18 +1393,57 @@ async fn health_distinguishes_unsupported_failed_empty_and_populated_peer_observ
                 "error",
                 "connected",
                 "connected",
+                "connected",
                 "connected"
             ][mode]
         );
         assert_eq!(
             json["status"],
-            if mode == 1 { "degraded" } else { "healthy" }
+            if matches!(mode, 1 | 4 | 5) {
+                "degraded"
+            } else {
+                "healthy"
+            }
         );
         assert_eq!(json["gobgp"]["error"].is_string(), mode == 1);
         assert_eq!(
             json["bgp_sessions"].as_object().unwrap().len(),
             usize::from(mode >= 3)
         );
+        assert_eq!(json["speaker"]["capabilities"]["daemon_health"], mode != 0);
+        assert_eq!(speaker.health_calls.load(SeqCst), usize::from(mode != 0));
+        let daemon = &json["speaker"]["daemon"];
+        assert_eq!(
+            daemon["status"],
+            if mode == 0 {
+                "unsupported"
+            } else if matches!(mode, 1 | 5) {
+                "error"
+            } else {
+                "observed"
+            }
+        );
+        if matches!(mode, 0 | 1 | 5) {
+            for field in ["version", "uptime_seconds", "ready", "observed_at"] {
+                assert!(daemon[field].is_null());
+            }
+        } else {
+            assert!(
+                daemon["observed_at"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<chrono::DateTime<chrono::Utc>>()
+                    .is_ok()
+            );
+            assert_eq!(daemon["ready"], mode != 4);
+            assert_eq!(daemon["uptime_seconds"], if mode == 2 { 0 } else { 123 });
+            if mode == 2 {
+                assert!(daemon["version"].is_null());
+            } else {
+                assert_eq!(daemon["version"], "actual-daemon-version");
+            }
+        }
+        assert!(!json.to_string().contains("private upstream diagnostic"));
         if mode >= 3 {
             assert_eq!(json["bgp_sessions"]["router"], "established");
         }

@@ -1,5 +1,6 @@
 "use client"
 
+import { useEffect, useState } from "react"
 import useSWR from "swr"
 import useSWRInfinite from "swr/infinite"
 import * as api from "@/lib/api"
@@ -17,15 +18,35 @@ export function useHealth() {
   )
 }
 
+// Client receipt time belongs to the SWR snapshot, never the public API schema.
+export type HealthDetailSnapshot = api.HealthResponse & { receivedAt: number }
+
+export async function fetchHealthDetailSnapshot(): Promise<HealthDetailSnapshot> {
+  return { ...await api.getHealthDetail(), receivedAt: performance.now() }
+}
+
+export function healthReceiptAge(receivedAt: number | undefined, now: number): number | null {
+  if (receivedAt === undefined) return null
+  const age = now - receivedAt
+  return Number.isFinite(age) && age >= 0 ? age : null
+}
+
 export function useHealthDetail() {
-  return useSWR(
+  const [now, setNow] = useState(() => performance.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(performance.now()), REFRESH_INTERVAL)
+    return () => clearInterval(timer)
+  }, [])
+  const query = useSWR(
     "health-detail",
-    api.getHealthDetail,
+    fetchHealthDetailSnapshot,
     {
       refreshInterval: REFRESH_INTERVAL,
       revalidateOnFocus: true,
     }
   )
+  const receiptAge = healthReceiptAge(query.data?.receivedAt, Math.max(now, performance.now()))
+  return { ...query, receiptAge, isStale: Boolean(query.data) && (receiptAge === null || receiptAge > 15000) }
 }
 
 export function useStats() {

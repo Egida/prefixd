@@ -21,12 +21,23 @@ failure fails the pass and increments the run error counter; it never becomes
 an empty inventory. Unsupported peer observation skips peer metric updates;
 a failed observation also retains the last successful metric values.
 
-Health detail adds `speaker.backend` and two availability booleans under
-`speaker.capabilities`: `rule_reader` and `peer_observer`. The legacy `gobgp`
+Health detail adds `speaker.backend` and availability booleans under
+`speaker.capabilities`: `rule_reader`, `peer_observer` and `daemon_health`. The legacy `gobgp`
 component reports `unsupported` without an error when peer observation is absent,
 `error` when it fails, and `connected` when it succeeds (even with zero peers).
 `bgp_sessions` remains the same peer-name/state map. Missing optional observation
 alone does not make overall health degraded. Health does not probe the RIB.
+Rust's authenticated `GetHealth` supplies `speaker.daemon` version, process
+uptime, readiness and successful observation time. Missing version remains null;
+zero uptime is valid. Unsupported GoBGP process metadata and failed probes have
+no invented values. The dashboard labels controller metadata separately and
+records successful browser receipt on a monotonic clock separately from server observation time and
+marks cached health older than three five-second poll intervals stale for every
+backend, hiding cached healthy peer badges. Server/browser clock skew does not
+determine freshness. Fetch errors hide cached observations. CLI status
+also labels daemon metadata explicitly. Uptime is an observation, not a unique
+boot identifier or a restart/replay trigger.
+
 These fields describe API availability and peer observation, not announcement,
 export, or enforcement confirmation.
 
