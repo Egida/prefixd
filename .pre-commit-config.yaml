@@ -1,24 +1,31 @@
+# Optional quick checks, not the full pre-PR gate. Install both Git stages.
+default_install_hook_types: [pre-commit, pre-push]
+
 repos:
   - repo: local
     hooks:
       - id: cargo-fmt
-        name: cargo fmt
-        entry: cargo fmt --all --
+        name: cargo fmt check
+        entry: just fmt
         language: system
         types: [rust]
         pass_filenames: false
+        stages: [pre-commit]
 
       - id: cargo-clippy
         name: cargo clippy
-        entry: cargo clippy --all-targets --all-features -- -D warnings
+        entry: just clippy-all
         language: system
-        types: [rust]
+        files: '(^|/)(Cargo\.(toml|lock)|[^/]+\.rs)$|^proto/.*\.proto$|^(\.cargo/.*|rust-toolchain(\.toml)?)$'
+        types: [file]
         pass_filenames: false
+        stages: [pre-commit]
 
       - id: cargo-test
-        name: cargo test
-        entry: cargo test --lib
+        name: cargo library and binary tests
+        entry: just test-fast
         language: system
-        types: [rust]
+        files: '(^|/)(Cargo\.(toml|lock)|[^/]+\.rs)$|^proto/.*\.proto$|^(\.cargo/.*|rust-toolchain(\.toml)?)$'
+        types: [file]
         pass_filenames: false
         stages: [pre-push]

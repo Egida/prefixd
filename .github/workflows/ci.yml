@@ -22,6 +22,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install just
+        uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
+
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
@@ -40,10 +45,10 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Test GoBGP fallback
-        run: cargo test --locked --no-default-features --features test-utils
+        run: just test-gobgp
 
       - name: Test all backend features
-        run: cargo test --locked --all-features
+        run: just test-all
 
   msrv:
     name: MSRV (1.89.0)
@@ -53,6 +58,11 @@ jobs:
       RUSTUP_AUTO_INSTALL: "0"
     steps:
       - uses: actions/checkout@v7
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       - name: Install Rust 1.89.0
@@ -70,12 +80,8 @@ jobs:
           key: ${{ runner.os }}-cargo-msrv-1.89.0-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-msrv-1.89.0-
-      - name: Check production binaries with rustbgpd
-        run: cargo +1.89.0 check --locked --bins --features bgp-rustbgpd
-      - name: Check all targets and features
-        run: cargo +1.89.0 check --locked --all-targets --all-features
-      - name: Check no-default-feature binaries
-        run: cargo +1.89.0 check --locked --no-default-features --bins
+      - name: Check minimum-compiler feature matrix
+        run: just msrv
 
   gobgp:
     name: GoBGP (4.10.0)
@@ -145,6 +151,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install just
+        uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
+
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
@@ -165,19 +176,24 @@ jobs:
             ${{ runner.os }}-cargo-clippy-
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: just fmt
 
       - name: Lint GoBGP fallback
-        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
+        run: just clippy-gobgp
 
       - name: Lint all backend features
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: just clippy-all
 
   build:
     name: Build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
 
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -197,7 +213,7 @@ jobs:
             ${{ runner.os }}-cargo-release-
 
       - name: Build release binary
-        run: cargo build --release
+        run: just build
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v7
@@ -227,6 +243,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Install just
+        uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
+
       - name: Install test runtime
         uses: actions/setup-node@v7
         with:
@@ -237,17 +258,19 @@ jobs:
         with:
           bun-version: "1.4.3"
 
-      - run: bun install --frozen-lockfile
-
-      - run: bun run test
-
-      - run: bun run build
+      - name: Frozen install, native types, tests and production build
+        run: just frontend
 
   security:
     name: Security Audit
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
 
       - name: Audit Rust dependencies
         uses: actions-rust-lang/audit@v1
@@ -274,13 +297,9 @@ jobs:
 
       - name: Audit frontend dependencies
         working-directory: frontend
-        run: |
-          bun install --frozen-lockfile
-          # Fails the build. Fix advisories by bumping the dep (`bun update`, or an
-          # `overrides` entry in package.json when it is pinned transitively). Only
-          # add --ignore=<GHSA-id> for an advisory with no fixed release upstream,
-          # and say why in a comment here.
-          bun audit
+        # Fix advisories in the committed resolution. Any exception needs an
+        # unfixed upstream advisory and an explicit reason in the shared recipe.
+        run: just audit-frontend
 
   docker:
     name: Docker

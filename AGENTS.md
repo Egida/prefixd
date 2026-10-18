@@ -114,14 +114,16 @@ on cached endpoint lists, version numbers or test totals.
 
 Start with the smallest meaningful check, then complete the relevant broader
 gates. Cover consequential validation, failure, retry and race behavior; use a
-negative control when a claim needs proof that the old behavior fails. Prose
-edits need link and diff checks, not a redundant local application rebuild.
+negative control when a claim needs proof that the old behavior fails. Before
+opening a PR with substantive code changes, run `just gate`. Prose-only changes
+need affected-link checks and `git diff --check`.
 
 Run commands from the repository root unless stated otherwise, within the agreed
 CPU and job budget:
 
 | Check | Command |
 | --- | --- |
+| Substantive code pre-PR bar | `just gate` |
 | Rust formatting | `cargo fmt --all -- --check` |
 | Strict Rust lint | `cargo clippy --locked --all-targets --all-features -- -D warnings` |
 | GoBGP-only backend tests | `cargo test --locked --no-default-features --features test-utils` |
