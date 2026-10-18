@@ -5136,3 +5136,292 @@ async fn test_shared_quota_statement_timeout_and_cancellation_roll_back() {
         admission_pool.close().await;
     }
 }
+
+#[tokio::test]
+async fn checked_timestamps_reject_http_lookahead_corruption_without_unwinding() {
+    use prefixd::domain::{AttackEvent, AttackEventInput};
+    let ctx = TestContext::new().await;
+    let app = ctx.router().await;
+    let now = chrono::Utc::now();
+    for id in [1, 2] {
+        let input: AttackEventInput = serde_json::from_value(serde_json::json!({
+            "timestamp": now, "source": "timestamp-fixture", "victim_ip": "203.0.113.10", "vector": "udp_flood",
+        })).unwrap();
+        let mut event = AttackEvent::from_input(input);
+        event.event_id = uuid::Uuid::from_u128(id);
+        event.ingested_at = now;
+        ctx.repo.insert_event(&event).await.unwrap();
+    }
+    let page = public_list_page(&app, "/v1/events?limit=1").await;
+    assert_eq!(page["count"], 1);
+    assert_eq!(page["has_more"], true);
+    for bad in ["infinity", "-infinity", "280000-01-01 00:00:00+00"] {
+        // The older ID is the second fetched row: corruption must not be hidden by lookahead.
+        sqlx::query(
+            "UPDATE events SET event_timestamp = $1::text::timestamptz WHERE event_id = $2",
+        )
+        .bind(bad)
+        .bind(uuid::Uuid::from_u128(1))
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events?limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "{bad}"
+        );
+    }
+    sqlx::query("UPDATE events SET event_timestamp = $1")
+        .bind(now)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        public_list_page(&app, "/v1/events?limit=1").await["count"],
+        1
+    );
+    let response = app.oneshot(Request::builder().method("POST").uri("/v1/events")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"timestamp":"infinity","source":"test","victim_ip":"203.0.113.10","vector":"udp_flood"}"#)).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn checked_timestamp_scoped_reconciliation_returns_errors_and_recovers() {
+    use prefixd::domain::{mitigation_rule, request_withdrawal};
+    use prefixd::scheduler::ReconciliationLoop;
+    let ctx = TestContext::new().await;
+    let now = chrono::Utc::now();
+    let pending = inventory_mitigation("192.0.2.201/32", "test-pop", now, MitigationStatus::Active);
+    let mut corrupt =
+        inventory_mitigation("192.0.2.202/32", "test-pop", now, MitigationStatus::Active);
+    corrupt.expires_at = now - chrono::Duration::seconds(10);
+    ctx.repo.insert_mitigation(&pending).await.unwrap();
+    let speaker = std::sync::Arc::new(InventorySpeaker::new(false));
+    speaker
+        .inner
+        .announce(&mitigation_rule(&pending))
+        .await
+        .unwrap();
+    let mut settings = common::test_settings();
+    settings.pop = "test-pop".into();
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    let state = prefixd::AppState::new(
+        settings,
+        common::test_inventory(),
+        common::test_playbooks(),
+        ctx.repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let reconciler =
+        ReconciliationLoop::new(ctx.repo.clone(), speaker.clone(), 30, false).with_app_state(state);
+    // A valid production-scoped poll converges before administratively corrupting an owned row.
+    reconciler.reconcile().await.unwrap();
+    assert!(speaker.announcements.lock().unwrap().is_empty());
+    assert!(speaker.withdrawals.lock().unwrap().is_empty());
+    ctx.repo.insert_mitigation(&corrupt).await.unwrap();
+    speaker
+        .inner
+        .announce(&mitigation_rule(&corrupt))
+        .await
+        .unwrap();
+    let pending = ctx
+        .repo
+        .get_mitigation(pending.mitigation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let request = request_withdrawal(
+        ctx.repo.as_ref(),
+        &pending,
+        false,
+        "operator",
+        "timestamp-fixture",
+        "owned pending withdrawal".into(),
+        true,
+        None,
+    )
+    .await
+    .unwrap();
+    let before: Vec<_> = speaker
+        .list_active()
+        .await
+        .unwrap()
+        .iter()
+        .map(|rule| rule.nlri_hash())
+        .collect();
+    sqlx::query("UPDATE mitigations SET created_at='infinity'::timestamptz WHERE mitigation_id=$1")
+        .bind(corrupt.mitigation_id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    let error = reconciler.reconcile().await.unwrap_err();
+    assert!(format!("{error:#}").contains("supported finite range"));
+    // Ownership validation fails closed for this POP; no write may bypass the corrupt inventory.
+    assert_eq!(
+        ctx.repo
+            .get_mitigation(pending.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MitigationStatus::Active
+    );
+    let retained = ctx
+        .repo
+        .pending_withdrawals(Some("test-pop"))
+        .await
+        .unwrap();
+    assert_eq!(retained.len(), 1);
+    assert_eq!(retained[0].operation_id, request.operation_id);
+    assert!(retained[0].completed_at.is_none());
+    assert_eq!(
+        speaker
+            .list_active()
+            .await
+            .unwrap()
+            .iter()
+            .map(|rule| rule.nlri_hash())
+            .collect::<Vec<_>>(),
+        before
+    );
+    assert!(speaker.announcements.lock().unwrap().is_empty());
+    assert!(speaker.withdrawals.lock().unwrap().is_empty());
+    sqlx::query("UPDATE mitigations SET created_at=$1 WHERE mitigation_id=$2")
+        .bind(corrupt.created_at)
+        .bind(corrupt.mitigation_id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    // The same loop completes the original pending operation and expiry after repair.
+    reconciler.reconcile().await.unwrap();
+    assert_eq!(
+        ctx.repo
+            .get_mitigation(pending.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MitigationStatus::Withdrawn
+    );
+    assert_eq!(
+        ctx.repo
+            .get_mitigation(corrupt.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MitigationStatus::Expired
+    );
+    assert!(speaker.list_active().await.unwrap().is_empty());
+    assert!(speaker.announcements.lock().unwrap().is_empty());
+    let deletes = speaker.withdrawals.lock().unwrap().clone();
+    assert_eq!(deletes.len(), 2);
+    assert!(deletes.contains(&mitigation_rule(&pending).nlri_hash()));
+    assert!(deletes.contains(&mitigation_rule(&corrupt).nlri_hash()));
+    let completed: Vec<(uuid::Uuid, bool)> = sqlx::query_as(
+        "SELECT operation_id, completed_at IS NOT NULL FROM withdrawal_requests WHERE mitigation_id IN ($1, $2)")
+        .bind(pending.mitigation_id).bind(corrupt.mitigation_id).fetch_all(&ctx.pool).await.unwrap();
+    assert_eq!(completed.len(), 2);
+    assert!(completed.iter().all(|(_, done)| *done));
+    assert!(
+        completed
+            .iter()
+            .any(|(operation, _)| *operation == request.operation_id)
+    );
+    let active = inventory_mitigation("192.0.2.203/32", "test-pop", now, MitigationStatus::Active);
+    ctx.repo.insert_mitigation(&active).await.unwrap();
+    reconciler.reconcile().await.unwrap();
+    assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+    assert_eq!(speaker.announcements.lock().unwrap().len(), 1);
+    sqlx::query(
+        "UPDATE mitigations SET created_at='-infinity'::timestamptz WHERE mitigation_id=$1",
+    )
+    .bind(active.mitigation_id)
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+    let error = reconciler.reconcile().await.unwrap_err();
+    assert!(format!("{error:#}").contains("supported finite range"));
+    assert_eq!(speaker.list_active().await.unwrap().len(), 1);
+    assert_eq!(speaker.announcements.lock().unwrap().len(), 1);
+    assert_eq!(speaker.withdrawals.lock().unwrap().len(), 2);
+    sqlx::query("UPDATE mitigations SET created_at=$1 WHERE mitigation_id=$2")
+        .bind(active.created_at)
+        .bind(active.mitigation_id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    reconciler.reconcile().await.unwrap();
+    assert_eq!(speaker.announcements.lock().unwrap().len(), 1);
+    assert_eq!(speaker.withdrawals.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn checked_timestamp_cli_rows_fail_with_database_errors_after_valid_controls() {
+    let ctx = TestContext::new().await;
+    sqlx::query("INSERT INTO operators (username,password_hash,role) VALUES ('timestamp-cli','unused','admin')")
+        .execute(&ctx.pool).await.unwrap();
+    for (args, table, fields) in [
+        (
+            vec!["operators", "list"],
+            "operators",
+            vec!["created_at", "last_login_at"],
+        ),
+        (vec!["migrations"], "schema_migrations", vec!["applied_at"]),
+    ] {
+        for field in fields {
+            for bad in ["infinity", "-infinity", "280000-01-01 00:00:00+00"] {
+                let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixdctl"))
+                    .args(&args)
+                    .env(
+                        "DATABASE_URL",
+                        &ctx.state.settings.storage.connection_string,
+                    )
+                    .output()
+                    .await
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "valid CLI must work before corrupting {table}.{field}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                // Names come only from the fixed fixture cases above, never request input.
+                let update = format!("UPDATE {table} SET {field} = $1::text::timestamptz");
+                sqlx::query(&update)
+                    .bind(bad)
+                    .execute(&ctx.pool)
+                    .await
+                    .unwrap();
+                let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixdctl"))
+                    .args(&args)
+                    .env(
+                        "DATABASE_URL",
+                        &ctx.state.settings.storage.connection_string,
+                    )
+                    .output()
+                    .await
+                    .unwrap();
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(!output.status.success());
+                assert!(stderr.contains("database error"), "{stderr}");
+                assert!(stderr.contains("supported finite range"), "{stderr}");
+                assert!(!stderr.contains("panicked"), "{stderr}");
+                let restore = format!("UPDATE {table} SET {field} = NOW()");
+                sqlx::query(&restore).execute(&ctx.pool).await.unwrap();
+            }
+        }
+    }
+}

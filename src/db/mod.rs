@@ -1,3 +1,7 @@
+mod timestamp;
+#[doc(hidden)]
+pub use timestamp::CheckedTimestamp;
+
 pub mod mock;
 pub mod repository;
 pub mod traits;

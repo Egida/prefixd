@@ -16,13 +16,16 @@ pub struct WithdrawalRequest {
     pub pop: String,
     pub nlri_hash: String,
     pub rule_json: String,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub mitigation_updated_at: DateTime<Utc>,
     pub terminal_status: String,
     pub speaker_delete_required: bool,
     pub actor_type: String,
     pub actor: String,
     pub reason: String,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub requested_at: DateTime<Utc>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub completed_at: Option<DateTime<Utc>>,
     /// NULL only for legacy or explicitly unbound mock/test operations.
     pub target_id: Option<Uuid>,

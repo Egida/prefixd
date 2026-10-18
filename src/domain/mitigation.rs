@@ -149,15 +149,20 @@ pub struct MitigationRow {
     pub action_type: String,
     pub action_params_json: Option<String>,
     pub status: String,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub created_at: DateTime<Utc>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub updated_at: DateTime<Utc>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub expires_at: DateTime<Utc>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub withdrawn_at: Option<DateTime<Utc>>,
     pub triggering_event_id: Uuid,
     pub last_event_id: Uuid,
     pub escalated_from_id: Option<Uuid>,
     pub reason: Option<String>,
     pub rejection_reason: Option<String>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub acknowledged_at: Option<DateTime<Utc>>,
     pub acknowledged_by: Option<String>,
     pub signal_group_id: Option<Uuid>,

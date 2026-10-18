@@ -33,6 +33,7 @@ pub(super) fn check_active_quota(quota_type: &str, current: u32, max: u32) -> Re
 #[derive(Debug, FromRow)]
 struct AuditRow {
     audit_id: Uuid,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     timestamp: DateTime<Utc>,
     schema_version: i32,
     actor_type: String,
@@ -1671,7 +1672,7 @@ impl RepositoryTrait for Repository {
         // the cache for late fan-out is counted once per table; the
         // dashboard treats this as "activity volume" rather than "distinct
         // signals", which is accurate enough for a health indicator.
-        let rows: Vec<(String, Option<DateTime<Utc>>, i64)> = sqlx::query_as(
+        let rows: Vec<(String, crate::db::CheckedTimestamp, i64)> = sqlx::query_as(
             r#"
             SELECT source,
                    MAX(ingested_at) AS last_seen,
@@ -1700,7 +1701,7 @@ impl RepositoryTrait for Repository {
             .map(
                 |(source, last_seen, n)| crate::db::traits::CorroboratorSourceActivity {
                     source,
-                    last_seen,
+                    last_seen: last_seen.into(),
                     count: n.max(0) as u64,
                 },
             )
@@ -1719,7 +1720,9 @@ struct CorroboratingSignalRow {
     interface: Option<String>,
     confidence: Option<f32>,
     weight: f32,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     ingested_at: DateTime<Utc>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     expires_at: DateTime<Utc>,
     raw_details: Option<serde_json::Value>,
     attached_group_ids: Vec<Uuid>,
@@ -1752,7 +1755,9 @@ struct SignalGroupRow {
     group_id: Uuid,
     victim_ip: String,
     vector: String,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     created_at: DateTime<Utc>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     window_expires_at: DateTime<Utc>,
     derived_confidence: f32,
     source_count: i32,
@@ -1793,6 +1798,7 @@ struct SignalGroupEventRow {
     is_corroborating: bool,
     source: Option<String>,
     confidence: Option<f32>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     ingested_at: Option<DateTime<Utc>>,
 }
 
@@ -1820,9 +1826,11 @@ struct NotifPrefRow {
 #[derive(Debug, Clone, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct SafelistEntry {
     pub prefix: String,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub added_at: chrono::DateTime<Utc>,
     pub added_by: String,
     pub reason: Option<String>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub expires_at: Option<chrono::DateTime<Utc>>,
 }
 
@@ -1850,6 +1858,7 @@ pub struct PopStats {
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct TimeseriesBucket {
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub bucket: DateTime<Utc>,
     pub count: i64,
 }
@@ -1860,8 +1869,10 @@ struct OperatorRow {
     username: String,
     password_hash: String,
     role: String,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     created_at: DateTime<Utc>,
     created_by: Option<String>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     last_login_at: Option<DateTime<Utc>>,
 }
 
@@ -1877,5 +1888,161 @@ impl From<OperatorRow> for Operator {
             created_by: row.created_by,
             last_login_at: row.last_login_at,
         }
+    }
+}
+
+#[cfg(all(test, feature = "test-utils"))]
+mod checked_timestamp_rows {
+    use super::*;
+    use chrono::{TimeZone, Timelike};
+    use testcontainers::{ImageExt, runners::AsyncRunner};
+    use testcontainers_modules::postgres::Postgres;
+
+    // Exercise actual FromRow implementations, including rows private to this module.
+    #[tokio::test]
+    async fn every_owned_timestamp_row_checks_binary_values_and_preserves_valid_dates() {
+        let container = Postgres::default()
+            .with_tag("16-alpine")
+            .with_startup_timeout(std::time::Duration::from_secs(60))
+            .with_host_config_modifier(|config| {
+                config.cpuset_cpus = std::env::var("PREFIXD_TEST_CPUSET").ok();
+            })
+            .start()
+            .await
+            .unwrap();
+        let host = container.get_host().await.unwrap();
+        let port = container.get_host_port_ipv4(5432).await.unwrap();
+        let pool = PgPool::connect(&format!(
+            "postgres://postgres:postgres@{host}:{port}/postgres"
+        ))
+        .await
+        .unwrap();
+        let valid = [
+            "1969-12-31T23:59:59.123456Z"
+                .parse::<DateTime<Utc>>()
+                .unwrap(),
+            Utc.with_ymd_and_hms(-4000, 1, 1, 0, 0, 0).single().unwrap(),
+            DateTime::<Utc>::MAX_UTC
+                .with_nanosecond(999_999_000)
+                .unwrap(),
+        ];
+        macro_rules! check_row {
+            ($row:ty, $base:expr, [$($required:ident),*], [$($optional:ident),*]) => {{
+                let fields = [$(stringify!($required),)* $(stringify!($optional),)*];
+                let query = format!("SELECT {}{}", $base,
+                    fields.iter().map(|field| format!(", $1::timestamptz AS {field}")).collect::<String>());
+                for expected in valid {
+                    let row = sqlx::query_as::<_, $row>(&query).bind(expected).fetch_one(&pool).await.unwrap();
+                    $(assert_eq!(row.$required, expected);)*
+                    $(assert_eq!(row.$optional, Some(expected));)*
+                }
+                let required_fields: &[&str] = &[$(stringify!($required),)*];
+                let optional_fields: &[&str] = &[$(stringify!($optional),)*];
+                let null_query = format!("SELECT {}{}{}", $base,
+                    required_fields.iter().map(|field| format!(", TIMESTAMPTZ '2000-01-01' AS {field}")).collect::<String>(),
+                    optional_fields.iter().map(|field| format!(", NULL::timestamptz AS {field}")).collect::<String>());
+                let row = sqlx::query_as::<_, $row>(&null_query).fetch_one(&pool).await.unwrap();
+                $(assert!(row.$optional.is_none());)*
+                let _ = row;
+                for target in fields {
+                    let query = format!("SELECT {}{}", $base,
+                        fields.iter().map(|field| if *field == target {
+                            format!(", $1::text::timestamptz AS {field}")
+                        } else { format!(", TIMESTAMPTZ '2000-01-01' AS {field}") }).collect::<String>());
+                    for bad in ["infinity", "-infinity", "280000-01-01 00:00:00+00"] {
+                        let result = sqlx::query_as::<_, $row>(&query).bind(bad).fetch_one(&pool).await;
+                        assert!(matches!(result, Err(sqlx::Error::ColumnDecode { .. })),
+                            "{}.{target} accepted {bad}: {result:?}", stringify!($row));
+                    }
+                }
+            }};
+        }
+        check_row!(
+            AttackEvent,
+            "gen_random_uuid() AS event_id, NULL::text AS external_event_id, 'test'::text AS source, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, 17::integer AS protocol, NULL::bigint AS bps, NULL::bigint AS pps, '[]'::text AS top_dst_ports_json, NULL::real AS confidence, 'ban'::text AS action, NULL::jsonb AS raw_details",
+            [event_timestamp, ingested_at],
+            []
+        );
+        check_row!(
+            MitigationRow,
+            "gen_random_uuid() AS mitigation_id, 'scope'::text AS scope_hash, 'test'::text AS pop, NULL::text AS customer_id, NULL::text AS service_id, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, '{}'::text AS match_json, 'discard'::text AS action_type, NULL::text AS action_params_json, 'active'::text AS status, gen_random_uuid() AS triggering_event_id, gen_random_uuid() AS last_event_id, NULL::uuid AS escalated_from_id, NULL::text AS reason, NULL::text AS rejection_reason, NULL::text AS acknowledged_by, NULL::uuid AS signal_group_id",
+            [created_at, updated_at, expires_at],
+            [withdrawn_at, acknowledged_at]
+        );
+        check_row!(
+            WithdrawalRequest,
+            "gen_random_uuid() AS operation_id, gen_random_uuid() AS mitigation_id, 'test'::text AS pop, 'hash'::text AS nlri_hash, '{}'::text AS rule_json, 'withdrawn'::text AS terminal_status, true AS speaker_delete_required, 'system'::text AS actor_type, 'test'::text AS actor, 'test'::text AS reason, NULL::uuid AS target_id",
+            [mitigation_updated_at, requested_at],
+            [completed_at]
+        );
+        check_row!(
+            AuditRow,
+            "gen_random_uuid() AS audit_id, 1::integer AS schema_version, 'system'::text AS actor_type, NULL::text AS actor_id, 'test'::text AS action, NULL::text AS target_type, NULL::text AS target_id, '{}'::text AS details_json",
+            [timestamp],
+            []
+        );
+        check_row!(
+            CorroboratingSignalRow,
+            "gen_random_uuid() AS signal_id, 'test'::text AS source, NULL::text AS vector, NULL::text AS customer_id, NULL::text AS pop, NULL::text AS service_id, NULL::text AS interface, NULL::real AS confidence, 1::real AS weight, NULL::jsonb AS raw_details, '{}'::uuid[] AS attached_group_ids",
+            [ingested_at, expires_at],
+            []
+        );
+        check_row!(
+            SignalGroupRow,
+            "gen_random_uuid() AS group_id, '203.0.113.1'::text AS victim_ip, 'udp_flood'::text AS vector, 0.5::real AS derived_confidence, 1::integer AS source_count, 'open'::text AS status, false AS corroboration_met, '{}'::jsonb AS primary_dimensions, NULL::text AS playbook_name",
+            [created_at, window_expires_at],
+            []
+        );
+        check_row!(
+            SignalGroupEventRow,
+            "gen_random_uuid() AS group_id, gen_random_uuid() AS event_id, 1::real AS source_weight, true AS is_corroborating, 'test'::text AS source, NULL::real AS confidence",
+            [],
+            [ingested_at]
+        );
+        check_row!(
+            SafelistEntry,
+            "'203.0.113.1/32'::text AS prefix, 'test'::text AS added_by, NULL::text AS reason",
+            [added_at],
+            [expires_at]
+        );
+        check_row!(TimeseriesBucket, "0::bigint AS count", [bucket], []);
+        check_row!(
+            OperatorRow,
+            "gen_random_uuid() AS operator_id, 'test'::text AS username, 'hash'::text AS password_hash, 'admin'::text AS role, NULL::text AS created_by",
+            [created_at],
+            [last_login_at]
+        );
+        // The MAX tuple is a separate Decode surface from the derived rows.
+        let tuple: (String, crate::db::CheckedTimestamp, i64) = sqlx::query_as(
+            "SELECT 'source'::text, MAX(ts), 1::bigint FROM (VALUES ($1::timestamptz)) AS input(ts)")
+            .bind(valid[0]).fetch_one(&pool).await.unwrap();
+        assert_eq!(Option::<DateTime<Utc>>::from(tuple.1), Some(valid[0]));
+        let tuple: (String, crate::db::CheckedTimestamp, i64) = sqlx::query_as(
+            "SELECT 'source'::text, MAX(ts), 0::bigint FROM (VALUES (NULL::timestamptz)) AS input(ts)")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(Option::<DateTime<Utc>>::from(tuple.1), None);
+        let row = sqlx::raw_sql("SELECT TIMESTAMPTZ '1969-12-31 23:59:59.123456+00' AS ts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let checked: crate::db::CheckedTimestamp = sqlx::Row::try_get(&row, "ts").unwrap();
+        assert_eq!(DateTime::<Utc>::try_from(checked).unwrap(), valid[0]);
+        for bad in ["infinity", "-infinity", "280000-01-01 00:00:00+00"] {
+            let row = sqlx::raw_sql(&format!("SELECT TIMESTAMPTZ '{bad}' AS ts"))
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let result: std::result::Result<crate::db::CheckedTimestamp, _> =
+                sqlx::Row::try_get(&row, "ts");
+            assert!(matches!(result, Err(sqlx::Error::ColumnDecode { .. })));
+        }
+        for bad in ["infinity", "-infinity", "280000-01-01 00:00:00+00"] {
+            let result = sqlx::query_as::<_, (String, crate::db::CheckedTimestamp, i64)>(
+                "SELECT 'source'::text, MAX(ts), 1::bigint FROM (VALUES ($1::text::timestamptz)) AS input(ts)")
+                .bind(bad).fetch_one(&pool).await;
+            assert!(matches!(result, Err(sqlx::Error::ColumnDecode { .. })));
+        }
+        pool.close().await;
+        container.rm().await.unwrap();
     }
 }

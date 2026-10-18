@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Return controlled database decode errors for PostgreSQL timestamps outside
+  Chrono's supported finite range, including infinity, instead of unwinding
+  application-owned reads. Preserve ordinary timestamp precision and nullability.
+
 - Reject non-finite or out-of-range signal confidence before primary event or
   corroborator ingestion changes state. Preserve optional confidence, inclusive
   zero/one boundaries and corrected retries with the same external event ID.
