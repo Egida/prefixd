@@ -74,6 +74,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh cursor encoding to base64 0.23.1 with only its standard-library feature;
+  retain the scalar, unpadded cursor format and strict decoding.
+
 - Put active mitigation intent, signal evidence, expiry and honest router-observation
   limits first in the operator workspace. Refresh the light/dark theme, Geist
   typography and navigation; preserve user zoom and remove decorative pulses,
