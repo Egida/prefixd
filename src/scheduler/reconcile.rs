@@ -26,6 +26,8 @@ pub struct ReconciliationLoop {
     /// on each tick (so hot-reloads propagate without restart). Optional
     /// so test harnesses can construct the loop standalone.
     state: Option<Arc<AppState>>,
+    /// Explicit repository proof for standalone fixtures; real speakers cannot be unbound.
+    speaker_binding: Option<crate::domain::VerifiedSpeakerBinding>,
     /// Set of source labels we last set on
     /// `CORROBORATOR_CACHE_SIZE`. Used to zero-out gauges when a
     /// source's cache drains to empty between ticks (Prometheus would
@@ -48,6 +50,7 @@ impl ReconciliationLoop {
             ws_broadcast: None,
             alerting: None,
             state: None,
+            speaker_binding: None,
             last_cache_sources: tokio::sync::Mutex::new(std::collections::HashSet::new()),
         }
     }
@@ -59,6 +62,43 @@ impl ReconciliationLoop {
     pub fn with_app_state(mut self, state: Arc<AppState>) -> Self {
         self.state = Some(state);
         self
+    }
+
+    pub fn with_speaker_binding(mut self, binding: crate::domain::VerifiedSpeakerBinding) -> Self {
+        self.speaker_binding = Some(binding);
+        self
+    }
+
+    fn verified_speaker_binding(
+        &self,
+    ) -> crate::error::Result<Option<&crate::domain::VerifiedSpeakerBinding>> {
+        if let Some(state) = &self.state {
+            if !Arc::ptr_eq(&self.announcer, &state.announcer)
+                || !Arc::ptr_eq(&self.repo, &state.repo)
+            {
+                return Err(crate::domain::binding_mismatch());
+            }
+            return state.verified_speaker_binding();
+        }
+        match &self.speaker_binding {
+            Some(binding) => {
+                binding.validate_backend(self.announcer.backend())?;
+                Ok(Some(binding))
+            }
+            None if self.announcer.backend() == "mock" => Ok(None),
+            None => Err(crate::domain::binding_mismatch()),
+        }
+    }
+
+    fn owning_pop(&self) -> Option<&str> {
+        self.state
+            .as_ref()
+            .map(|state| state.settings.pop.as_str())
+            .or_else(|| {
+                self.speaker_binding
+                    .as_ref()
+                    .map(crate::domain::VerifiedSpeakerBinding::pop)
+            })
     }
 
     /// Set the WebSocket broadcast sender for real-time notifications
@@ -125,6 +165,7 @@ impl ReconciliationLoop {
 
     /// Run one reconciliation cycle (for testing)
     pub async fn reconcile(&self) -> anyhow::Result<()> {
+        self.verified_speaker_binding()?;
         let mut failure = None;
         // Each stage is independent; a speaker failure must not stop expiry or health updates.
         for (stage, result) in [
@@ -147,7 +188,8 @@ impl ReconciliationLoop {
     }
 
     async fn expire_mitigations(&self) -> anyhow::Result<()> {
-        let pop = self.state.as_ref().map(|state| state.settings.pop.as_str());
+        let binding = self.verified_speaker_binding()?;
+        let pop = self.owning_pop();
         let pending = self.repo.pending_withdrawals(pop).await?;
         let mut candidates: Vec<_> = pending
             .into_iter()
@@ -196,6 +238,7 @@ impl ReconciliationLoop {
                     "scheduler",
                     "TTL expired".into(),
                     !self.dry_run,
+                    binding,
                 )
                 .await
                 {
@@ -211,6 +254,7 @@ impl ReconciliationLoop {
                 self.announcer.as_ref(),
                 self.dry_run,
                 &request,
+                binding,
             )
             .await
             {
@@ -407,8 +451,9 @@ impl ReconciliationLoop {
     }
 
     async fn sync_announcements(&self) -> anyhow::Result<()> {
+        self.verified_speaker_binding()?;
         // An unreadable withdrawal ledger cannot safely authorize a repair.
-        let pop = self.state.as_ref().map(|state| state.settings.pop.as_str());
+        let pop = self.owning_pop();
         let pending = self.repo.pending_withdrawals(pop).await?;
         let pending_keys: std::collections::HashSet<_> = pending
             .iter()
@@ -697,7 +742,7 @@ mod tests {
 
     impl FlowSpecAnnouncer for WriteOnly {
         fn backend(&self) -> &'static str {
-            "write-only-test"
+            "mock"
         }
     }
 
@@ -737,6 +782,7 @@ mod tests {
             "test",
             "cleanup".into(),
             true,
+            None,
         )
         .await
         .unwrap();

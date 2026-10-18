@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Bind each POP to an immutable, credential-free speaker target before connecting.
+  Migration 014 retains target IDs on withdrawal requests; lifecycle guards reject
+  missing or mismatched ownership. Existing speaker history requires the one-shot
+  `prefixd --adopt-legacy-speaker` upgrade, which audits adoption and exits without
+  connecting to the speaker. Credential rotation preserves the binding.
+
 - Split required speaker writes from optional rule and peer observation while
   retaining the selected-speaker facade. Health reports backend/availability;
   CLI and dashboard distinguish unsupported, failed and empty peer reads.

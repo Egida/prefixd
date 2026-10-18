@@ -47,6 +47,37 @@ FRR, BIRD, and OpenBGPD are not selectable backends today. A router accepting a
 FlowSpec route is distinct from a daemon exposing the origination/control API
 prefixd needs. Each proposed adapter needs that evidence before implementation.
 
+## Persistent target ownership
+
+Before constructing a speaker client, startup registers or validates one
+credential-free target identity for the configured POP. Each target may belong to
+only one POP in that database. Lifecycle entrypoints require this verified binding;
+new withdrawal requests retain its immutable target UUID, and retry execution
+checks both the caller and the freshly loaded pending row before any speaker RPC.
+Only explicitly selected mock fixtures can run without a binding.
+
+Existing speaker history needs a one-time, original-target adoption. See the
+[upgrade procedure](../how-to/upgrading.md#speaker-ownership-upgrade) before
+restarting an existing deployment. Reload does not change the running POP, speaker
+configuration or controller mode. Credential rotation preserves identity; target
+changes need an explicit drained transfer. These bindings assume one controller
+per POP and exclusive physical-target use, not process leases or DNS-alias fencing.
+
+External repository implementations can read the normalized identity through
+`SpeakerTarget::{backend, endpoint, namespace}` and issue a binding with the
+public `VerifiedSpeakerBinding::new` constructor; its fields remain private.
+Repositories are trusted issuers. They must serialize ownership registration,
+persist or validate the exclusive POP/target assignment, finish any legacy
+adoption atomically, and commit before constructing the binding. The constructor
+performs no database checks. The result is startup consistency evidence, not an
+authorization token or an interprocess lease. Keep endpoint coordinates out of
+API responses and diagnostics.
+
+`RepositoryTrait::register_speaker_target` defaults to an explicit unsupported
+error so existing repository implementations remain source-compatible. They must
+implement this contract before real-speaker startup can succeed; the default
+never issues a binding or silently disables ownership checks.
+
 ## GoBGP read-back
 
 GoBGP inventory reads both IPv4 and IPv6 FlowSpec GLOBAL tables, including

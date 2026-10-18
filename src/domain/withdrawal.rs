@@ -24,6 +24,8 @@ pub struct WithdrawalRequest {
     pub reason: String,
     pub requested_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// NULL only for legacy or explicitly unbound mock/test operations.
+    pub target_id: Option<Uuid>,
 }
 
 impl WithdrawalRequest {
@@ -50,6 +52,7 @@ impl WithdrawalRequest {
             reason,
             requested_at: Utc::now(),
             completed_at: None,
+            target_id: None,
         })
     }
 
@@ -87,6 +90,7 @@ pub fn mitigation_rule(mitigation: &Mitigation) -> FlowSpecRule {
 }
 
 /// Caller holds the controller's lifecycle mutex through preparation, RPC and finalization.
+#[allow(clippy::too_many_arguments)] // Immutable operation data plus its verified target.
 pub async fn request_withdrawal(
     repo: &dyn RepositoryTrait,
     mitigation: &Mitigation,
@@ -95,8 +99,9 @@ pub async fn request_withdrawal(
     actor: &str,
     reason: String,
     speaker_delete_required: bool,
+    binding: Option<&super::VerifiedSpeakerBinding>,
 ) -> Result<WithdrawalRequest> {
-    let request = WithdrawalRequest::new(
+    let mut request = WithdrawalRequest::new(
         mitigation,
         expired,
         actor_type,
@@ -104,6 +109,10 @@ pub async fn request_withdrawal(
         reason,
         speaker_delete_required,
     )?;
+    request.target_id = binding.map(super::VerifiedSpeakerBinding::target_id);
+    if let Some(binding) = binding {
+        binding.validate_request(&request.pop, request.target_id)?;
+    }
     check_withdrawal_owner(repo, &request).await?;
     repo.begin_withdrawal(&request).await
 }
@@ -195,7 +204,17 @@ pub async fn execute_withdrawal(
     announcer: &dyn FlowSpecAnnouncer,
     dry_run: bool,
     request: &WithdrawalRequest,
+    binding: Option<&super::VerifiedSpeakerBinding>,
 ) -> Result<Mitigation> {
+    let validate_target = |request: &WithdrawalRequest| match binding {
+        Some(binding) => {
+            binding.validate_backend(announcer.backend())?;
+            binding.validate_request(&request.pop, request.target_id)
+        }
+        None if announcer.backend() == "mock" && request.target_id.is_none() => Ok(()),
+        None => Err(super::binding_mismatch()),
+    };
+    validate_target(request)?;
     let request = repo
         .pending_withdrawals(Some(&request.pop))
         .await?
@@ -207,6 +226,8 @@ pub async fn execute_withdrawal(
         .ok_or_else(|| {
             PrefixdError::Conflict("withdrawal operation is no longer pending".into())
         })?;
+    // Do not trust the caller's clone: validate the freshly fetched persisted intent.
+    validate_target(&request)?;
     if request.speaker_delete_required && dry_run {
         return Err(PrefixdError::Conflict(
             "pending withdrawal requires enforced mode".into(),
@@ -292,7 +313,8 @@ mod tests {
                 "operator",
                 "alice",
                 "test".into(),
-                true
+                true,
+                None
             )
             .await,
             Err(PrefixdError::Conflict(_))
@@ -315,6 +337,7 @@ mod tests {
             "alice",
             "test".into(),
             true,
+            None,
         )
         .await
         .unwrap();
@@ -351,6 +374,7 @@ mod tests {
             "alice",
             "enforced".into(),
             true,
+            None,
         )
         .await
         .unwrap();
@@ -362,12 +386,13 @@ mod tests {
             "bob",
             "dry-run retry".into(),
             false,
+            None,
         )
         .await
         .unwrap();
         assert!(retried.speaker_delete_required);
         assert!(
-            execute_withdrawal(&repo, &speaker, true, &retried)
+            execute_withdrawal(&repo, &speaker, true, &retried, None)
                 .await
                 .is_err()
         );
@@ -380,7 +405,7 @@ mod tests {
                 .is_active()
         );
         assert_eq!(repo.pending_withdrawals(None).await.unwrap().len(), 1);
-        execute_withdrawal(&repo, &speaker, false, &request)
+        execute_withdrawal(&repo, &speaker, false, &request, None)
             .await
             .unwrap();
         assert_eq!(speaker.announced_count().await, 0);
@@ -395,12 +420,13 @@ mod tests {
             "alice",
             "simulation".into(),
             false,
+            None,
         )
         .await
         .unwrap();
         assert!(!request.speaker_delete_required);
         assert_eq!(
-            execute_withdrawal(&repo, &speaker, true, &request)
+            execute_withdrawal(&repo, &speaker, true, &request, None)
                 .await
                 .unwrap()
                 .status,
@@ -427,6 +453,7 @@ mod tests {
             "alice",
             "first reason".into(),
             true,
+            None,
         )
         .await
         .unwrap();
@@ -438,6 +465,7 @@ mod tests {
             "scheduler",
             "TTL expired".into(),
             false,
+            None,
         )
         .await
         .unwrap();
@@ -449,7 +477,7 @@ mod tests {
         stale.operation_id = Uuid::new_v4();
         assert!(repo.finish_withdrawal(&stale).await.unwrap().is_none());
         assert!(
-            execute_withdrawal(&repo, &speaker, false, &stale)
+            execute_withdrawal(&repo, &speaker, false, &stale, None)
                 .await
                 .is_err()
         );
@@ -458,7 +486,7 @@ mod tests {
         repo.update_mitigation(&mitigation).await.unwrap();
         assert!(repo.finish_withdrawal(&request).await.unwrap().is_none());
         assert!(
-            execute_withdrawal(&repo, &speaker, false, &request)
+            execute_withdrawal(&repo, &speaker, false, &request, None)
                 .await
                 .is_err()
         );

@@ -91,6 +91,11 @@ async fn run_migrations(pool: &PgPool) -> Result<()> {
             "withdrawal_requests",
             include_str!("../../migrations/013_withdrawal_requests.sql"),
         ),
+        (
+            14,
+            "speaker_targets",
+            include_str!("../../migrations/014_speaker_targets.sql"),
+        ),
     ];
 
     // Bootstrap: run all migrations first (they use IF NOT EXISTS)

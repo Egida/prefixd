@@ -385,6 +385,14 @@ impl E2ETestContext {
         settings.bgp.mode = BgpMode::Sidecar;
         settings.bgp.gobgp_grpc = gobgp_endpoint.clone();
 
+        let binding = repo
+            .register_speaker_target(
+                &settings.pop,
+                &prefixd::domain::SpeakerTarget::from_config(&settings.bgp).unwrap(),
+                false,
+            )
+            .await
+            .unwrap();
         let state = AppState::new(
             settings,
             test_inventory(),
@@ -393,7 +401,9 @@ impl E2ETestContext {
             announcer.clone(),
             std::path::PathBuf::from("."),
         )
-        .expect("Failed to create app state");
+        .expect("Failed to create app state")
+        .with_speaker_binding(binding)
+        .expect("verified fixture target");
 
         Self {
             state,
@@ -510,6 +520,14 @@ impl E2ETestContext {
             ..Default::default()
         };
 
+        let binding = repo
+            .register_speaker_target(
+                &settings.pop,
+                &prefixd::domain::SpeakerTarget::from_config(&settings.bgp).unwrap(),
+                false,
+            )
+            .await
+            .unwrap();
         let state = AppState::new(
             settings,
             test_inventory(),
@@ -518,7 +536,9 @@ impl E2ETestContext {
             announcer.clone(),
             std::path::PathBuf::from("."),
         )
-        .expect("Failed to create app state");
+        .expect("Failed to create app state")
+        .with_speaker_binding(binding)
+        .expect("verified fixture target");
 
         Self {
             state,

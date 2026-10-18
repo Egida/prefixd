@@ -22,6 +22,10 @@ struct Cli {
     /// Override listen address
     #[arg(long)]
     listen: Option<String>,
+
+    /// Adopt legacy state on its original speaker target, audit and exit without connecting
+    #[arg(long)]
+    adopt_legacy_speaker: bool,
 }
 
 #[tokio::main]
@@ -44,8 +48,6 @@ async fn main() -> anyhow::Result<()> {
         "starting prefixd"
     );
 
-    let announcer = speaker_factory(&config.settings.bgp).await?;
-
     // Init database
     // DATABASE_URL env var takes precedence over config file
     let connection_string = std::env::var("DATABASE_URL")
@@ -54,6 +56,17 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init_postgres_pool(&connection_string).await?;
     let repo: Arc<dyn db::RepositoryTrait> = Arc::new(db::Repository::new(pool.clone()));
+
+    // Bind before even connecting: configuration changes must not redirect old intent.
+    let target = prefixd::domain::SpeakerTarget::from_config(&config.settings.bgp)?;
+    let binding = repo
+        .register_speaker_target(&config.settings.pop, &target, cli.adopt_legacy_speaker)
+        .await?;
+    if cli.adopt_legacy_speaker {
+        tracing::info!("speaker ownership adoption complete; no speaker connection attempted");
+        return Ok(());
+    }
+    let announcer = speaker_factory(&config.settings.bgp).await?;
 
     // Init safelist from config
     for prefix in &config.settings.safelist.prefixes {
@@ -78,7 +91,8 @@ async fn main() -> anyhow::Result<()> {
         announcer.clone(),
         cli.config.clone(),
         Some(pool.clone()),
-    )?;
+    )?
+    .with_speaker_binding(binding)?;
 
     // Create auth layer for session-based auth
     // Secure cookies require HTTPS - check if TLS is configured

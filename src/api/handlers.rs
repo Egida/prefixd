@@ -491,6 +491,7 @@ async fn withdraw_and_notify(
     actor: &str,
     reason: String,
 ) -> crate::error::Result<Mitigation> {
+    let binding = state.verified_speaker_binding()?;
     if mitigation.pop != state.settings.pop {
         return Err(PrefixdError::Conflict(
             "mitigation belongs to another POP".into(),
@@ -504,6 +505,7 @@ async fn withdraw_and_notify(
         actor,
         reason,
         !state.is_dry_run(),
+        binding,
     )
     .await?;
     let mitigation = execute_withdrawal(
@@ -511,6 +513,7 @@ async fn withdraw_and_notify(
         state.announcer.as_ref(),
         state.is_dry_run(),
         &request,
+        binding,
     )
     .await?;
     let (message, alert) = if request.is_expiry() {
@@ -570,6 +573,7 @@ async fn handle_unban(
     };
 
     let _mitigation_guard = state.mitigation_lock.lock().await;
+    state.verified_speaker_binding().map_err(AppError)?;
 
     // Find original ban event
     let original_event = match state
@@ -656,6 +660,7 @@ async fn handle_ban(
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
     // shortcut: one controller per speaker; use a leader fence before supporting active-active controllers.
     let _mitigation_guard = state.mitigation_lock.lock().await;
+    state.verified_speaker_binding().map_err(AppError)?;
     // Check for duplicate ban event (only bans are checked, not unbans)
     if let Some(ref ext_id) = input.event_id {
         if let Ok(Some(_)) = state
@@ -1512,6 +1517,9 @@ pub async fn create_mitigation(
     let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
     let operator_id = operator.username.clone();
     let _mitigation_guard = state.mitigation_lock.lock().await;
+    if let Err(error) = state.verified_speaker_binding() {
+        return Ok(AppError(error).into_response());
+    }
 
     // Validate input
     if let Err(e) = validate_ip(&req.victim_ip) {
@@ -1679,6 +1687,9 @@ pub async fn withdraw_mitigation(
     use crate::domain::OperatorRole;
     let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
     let operator_id = operator.username;
+    state
+        .verified_speaker_binding()
+        .map_err(|error| error.status_code())?;
 
     if validate_string_len(&operator_id, "operator_id", MAX_USERNAME_LEN).is_err() {
         return Err(StatusCode::BAD_REQUEST);
@@ -1763,6 +1774,9 @@ pub async fn bulk_withdraw_mitigations(
     use crate::domain::OperatorRole;
     let operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
     let operator_id = operator.username;
+    state
+        .verified_speaker_binding()
+        .map_err(|error| error.status_code())?;
 
     if req.mitigation_ids.is_empty() || req.mitigation_ids.len() > MAX_BULK_WITHDRAW {
         return Err(StatusCode::BAD_REQUEST);
