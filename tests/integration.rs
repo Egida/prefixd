@@ -9997,8 +9997,10 @@ mod anonymous_auth {
         fn clear(&self) {
             self.0.lock().unwrap().clear();
         }
-        fn subscriber(&self) -> tracing::Dispatch {
-            tracing::Dispatch::new(
+        fn subscriber(&self) -> (tracing::Dispatch, tracing::Dispatch) {
+            // Keep callsite registration independent of an uninstrumented test thread's default.
+            let registration = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+            let capture = tracing::Dispatch::new(
                 tracing_subscriber::fmt()
                     .json()
                     .without_time()
@@ -10006,8 +10008,44 @@ mod anonymous_auth {
                     .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
                     .with_writer(self.clone())
                     .finish(),
-            )
+            );
+            (capture, registration)
         }
+    }
+
+    #[test]
+    fn uninstrumented_callsite_registration_preserves_capture() {
+        const USER_ID: &str = "00000000-0000-4000-8000-000000000001";
+        fn emit() {
+            let span = tracing::info_span!("registration_control", user.id = tracing::field::Empty);
+            span.record("user.id", USER_ID);
+        }
+
+        let output = TraceOutput::default();
+        let (dispatch, _registration) = output.subscriber();
+        let (registered, first_registration) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            assert!(tracing::dispatcher::get_default(|dispatch| {
+                dispatch
+                    .downcast_ref::<tracing::subscriber::NoSubscriber>()
+                    .is_some()
+            }));
+            emit();
+            registered.send(()).unwrap();
+        });
+        first_registration
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        worker.join().unwrap();
+        assert!(output.text().is_empty());
+
+        tracing::dispatcher::with_default(&dispatch, emit);
+        assert!(
+            output.text().contains(USER_ID),
+            "registered synthetic span must retain captured user.id; output={}",
+            output.text()
+        );
+        println!("uninstrumented registration followed by exact UUID capture passed");
     }
 
     #[tokio::test]
@@ -10022,7 +10060,7 @@ mod anonymous_auth {
         assert!(store.load(&id).await.unwrap().is_some());
 
         let output = TraceOutput::default();
-        let dispatch = output.subscriber();
+        let (dispatch, _registration) = output.subscriber();
         let response = request(&credentials, "GET", "/v1/auth/me", Some(&cookie), None)
             .with_subscriber(dispatch.clone())
             .await;
@@ -10268,7 +10306,7 @@ mod anonymous_auth {
         let credentials = router(AuthMode::Credentials, repo.clone(), store.clone());
         let cookie = login(&credentials, &operator.username).await;
         let named_output = TraceOutput::default();
-        let named_dispatch = named_output.subscriber();
+        let (named_dispatch, _named_registration) = named_output.subscriber();
         assert!(
             websocket_status(credentials.clone(), None, named_dispatch.clone())
                 .await
@@ -10284,7 +10322,7 @@ mod anonymous_auth {
             "named WebSocket positive control"
         );
         let output = TraceOutput::default();
-        let dispatch = output.subscriber();
+        let (dispatch, _registration) = output.subscriber();
         let anonymous = router(AuthMode::None, repo, store);
         assert!(
             websocket_status(anonymous.clone(), Some(&cookie), dispatch.clone())
