@@ -38,9 +38,10 @@ test-gobgp:
 test-all:
     cargo test --locked --all-features
 
+# Exclude the PostgreSQL row fixture here; full test recipes still run it.
 # Focused library and CLI tests for the optional push hook; no Docker fixtures.
 test-fast:
-    cargo test --locked --all-features --lib --bins
+    cargo test --locked --all-features --lib --bins -- --skip db::repository::checked_timestamp_rows
 
 test:
     just test-gobgp
