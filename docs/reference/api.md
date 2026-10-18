@@ -1639,7 +1639,11 @@ GET /v1/ip/192.0.2.1/history?limit=100
 Authorization: Bearer <token>
 ```
 
-Returns all events and mitigations for a given IP, plus customer/service context from inventory.
+Returns events and mitigations for a given IP, plus customer/service context from
+inventory. Each type is limited to the newest `limit` rows (default 100, maximum
+1000). An undecodable mitigation within that selection returns `500`; the response
+does not silently omit it. Rows for other IPs or outside the selected limit do not
+affect this history request.
 
 **Response:**
 
@@ -2151,6 +2155,10 @@ Generates a markdown incident report for a specific mitigation or all activity f
 
 The report includes: summary table, chronological timeline, events table with peak traffic, mitigations table with durations, and audit trail. Customer and service context is included from inventory when available.
 
+The report selects the newest 100 mitigations for the IP. An undecodable mitigation
+within that selection returns `500` rather than a successful report missing that
+row. Mitigations for other IPs or outside that limit do not affect the selection.
+
 **Response:** `200 OK` with `Content-Type: text/markdown`
 
 The response body is a markdown document suitable for pasting into Slack, email, or Jira.
@@ -2161,6 +2169,7 @@ The response body is a markdown document suitable for pasting into Slack, email,
 | 400 | Missing or invalid parameters (must provide exactly one of mitigation_id or ip) |
 | 401 | Authentication required |
 | 404 | Mitigation not found (when using mitigation_id) |
+| 500 | Report data could not be loaded or decoded |
 
 ---
 

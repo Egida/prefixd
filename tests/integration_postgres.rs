@@ -5818,3 +5818,163 @@ async fn duplicate_acknowledgements_count_entries_and_update_each_postgres_row_o
         );
     }
 }
+
+async fn assert_history_and_incident_ids(app: &axum::Router, uris: &[String], ids: &[uuid::Uuid]) {
+    for uri in uris {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "uri={uri}");
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        if uri.contains("/history") {
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let mut actual: Vec<uuid::Uuid> = value["mitigations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["mitigation_id"].as_str().unwrap().parse().unwrap())
+                .collect();
+            let mut expected = ids.to_vec();
+            actual.sort();
+            expected.sort();
+            assert_eq!(actual, expected);
+        } else {
+            let markdown = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(markdown.contains(&format!("| Total Mitigations | {} |", ids.len())));
+            for id in ids {
+                assert!(
+                    markdown.contains(&id.to_string()),
+                    "missing mitigation {id} in {uri}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_ip_history_and_incident_fail_on_selected_corrupt_mitigations() {
+    let context = TestContext::new().await;
+    let app = context.router().await;
+    let ip = "203.0.113.10";
+    let created_at = chrono::Utc::now() - chrono::Duration::days(1);
+    let mut ids = Vec::new();
+    // Terminal rows allow repeated historical scopes. Distinct timestamps make
+    // the unchanged SQL limit unambiguous without adding a new ordering contract.
+    for offset in 0..100 {
+        let mitigation = inventory_mitigation(
+            "203.0.113.10/32",
+            "test-pop",
+            created_at + chrono::Duration::seconds(offset),
+            MitigationStatus::Expired,
+        );
+        ids.push(mitigation.mitigation_id);
+        context.repo.insert_mitigation(&mitigation).await.unwrap();
+    }
+    let outside_limit = inventory_mitigation(
+        "203.0.113.10/32",
+        "test-pop",
+        created_at - chrono::Duration::seconds(1),
+        MitigationStatus::Expired,
+    );
+    let foreign_ip = inventory_mitigation(
+        "203.0.113.99/32",
+        "test-pop",
+        created_at + chrono::Duration::seconds(101),
+        MitigationStatus::Expired,
+    );
+    for mitigation in [&outside_limit, &foreign_ip] {
+        context.repo.insert_mitigation(mitigation).await.unwrap();
+    }
+    let uris = [
+        format!("/v1/ip/{ip}/history?limit=100"),
+        format!("/v1/reports/incident?ip={ip}"),
+        format!("/v1/reports/incident?mitigation_id={}", ids[99]),
+    ];
+    // Valid controls include every selected ID in both public response formats.
+    assert_history_and_incident_ids(&app, &uris, &ids).await;
+
+    // The oldest selected row is still eligible; silently dropping it would
+    // manufacture a successful partial history/report.
+    let selected = ids[0];
+    let original: (String, String, String) = sqlx::query_as(
+        "SELECT match_json, action_params_json, status FROM mitigations WHERE mitigation_id = $1",
+    )
+    .bind(selected)
+    .fetch_one(&context.pool)
+    .await
+    .unwrap();
+    let original_row: serde_json::Value =
+        sqlx::query_scalar("SELECT to_jsonb(m) FROM mitigations m WHERE mitigation_id = $1")
+            .bind(selected)
+            .fetch_one(&context.pool)
+            .await
+            .unwrap();
+    for (kind, corruption) in [
+        (
+            "match JSON",
+            "UPDATE mitigations SET match_json = '{' WHERE mitigation_id = $1",
+        ),
+        (
+            "action JSON",
+            "UPDATE mitigations SET action_params_json = '{' WHERE mitigation_id = $1",
+        ),
+        (
+            "status",
+            "UPDATE mitigations SET status = 'unknown' WHERE mitigation_id = $1",
+        ),
+    ] {
+        sqlx::query(corruption)
+            .bind(selected)
+            .execute(&context.pool)
+            .await
+            .unwrap();
+        for uri in &uris {
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "corrupt {kind}, uri={uri}"
+            );
+        }
+        sqlx::query("UPDATE mitigations SET match_json = $2, action_params_json = $3, status = $4 WHERE mitigation_id = $1")
+            .bind(selected).bind(&original.0).bind(&original.1).bind(&original.2)
+            .execute(&context.pool).await.unwrap();
+        let restored: serde_json::Value =
+            sqlx::query_scalar("SELECT to_jsonb(m) FROM mitigations m WHERE mitigation_id = $1")
+                .bind(selected)
+                .fetch_one(&context.pool)
+                .await
+                .unwrap();
+        assert_eq!(restored, original_row, "exact restoration after {kind}");
+        assert_history_and_incident_ids(&app, &uris, &ids).await;
+    }
+
+    for excluded in [&foreign_ip, &outside_limit] {
+        sqlx::query("UPDATE mitigations SET match_json = '{' WHERE mitigation_id = $1")
+            .bind(excluded.mitigation_id)
+            .execute(&context.pool)
+            .await
+            .unwrap();
+        assert_history_and_incident_ids(&app, &uris, &ids).await;
+    }
+    // Broadening only the requested history limit makes the same corrupt older
+    // row eligible. The fixed incident-report limit remains 100.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/ip/{ip}/history?limit=101"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
