@@ -40,15 +40,17 @@ export function Sidebar({ onClose, isCollapsed = false, onToggleCollapse }: Side
       {visibleNavItems.map(item => {
         const isActive = item.href === "/" ? pathname === "/" : pathname === item.href || pathname.startsWith(`${item.href}/`)
         const count = item.href === "/mitigations" ? stats?.total_active ?? 0 : item.href === "/correlation" ? openGroupCount : 0
+        const displayCount = count > 99 ? "99+" : count
+        const accessibleLabel = count > 0 ? `${item.label} (${displayCount})` : item.label
         const link = (
-          <Link href={item.href} onClick={onClose} aria-current={isActive ? "page" : undefined} aria-label={collapsed ? item.label : undefined}
+          <Link href={item.href} onClick={onClose} aria-current={isActive ? "page" : undefined} aria-label={collapsed ? accessibleLabel : undefined}
             className={cn("relative flex min-h-10 items-center gap-3 rounded-md px-3 text-sm", collapsed && "justify-center px-0", isActive ? "bg-sidebar-accent font-medium text-primary" : "text-muted-foreground hover:bg-sidebar-accent hover:text-foreground")}>
             <item.icon className="size-4 shrink-0" aria-hidden="true" />
             {!collapsed ? <span className="flex-1">{item.label}</span> : null}
-            {count > 0 ? <span className={cn("rounded-sm bg-muted px-1.5 font-mono text-xs text-foreground", collapsed && "absolute -right-1 -top-1")}>{count > 99 ? "99+" : count}</span> : null}
+            {count > 0 ? <span className={cn("rounded-sm bg-muted px-1.5 font-mono text-xs text-foreground", collapsed && "absolute -right-1 -top-1")}>{displayCount}</span> : null}
           </Link>
         )
-        return collapsed ? <Tooltip key={item.href}><TooltipTrigger asChild>{link}</TooltipTrigger><TooltipContent side="right">{item.label}</TooltipContent></Tooltip> : <div key={item.href}>{link}</div>
+        return collapsed ? <Tooltip key={item.href}><TooltipTrigger asChild>{link}</TooltipTrigger><TooltipContent side="right">{accessibleLabel}</TooltipContent></Tooltip> : <div key={item.href}>{link}</div>
       })}
     </nav>
   )
