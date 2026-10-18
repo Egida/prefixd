@@ -354,7 +354,7 @@ describe local simulation, not a speaker mutation.
 
 ### Configuration
 
-Use the [alerting configuration guide](docs/how-to/deployment.md) and the
+Use the [notification configuration reference](docs/reference/api.md#update-alerting-config) and the
 administrator config API for destination settings, secrets and event filters.
 
 ### Design
