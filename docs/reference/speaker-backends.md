@@ -101,8 +101,7 @@ or extended; startup, reload and playbook edits apply the same rate policy.
 
 Withdrawals use the exact local match and do not depend on its saved action.
 This allows cleanup of historical zero, missing or imprecise policing rates.
-It does not change the exclusive speaker ownership requirement or add action-drift
-reconciliation.
+It does not change the exclusive speaker ownership requirement.
 
 ## GoBGP read-back
 
@@ -357,8 +356,8 @@ Both readable adapters have shared contracts, released-daemon CI, secure
 profiles, restart recovery and durable withdrawal cleanup. Optional observation
 and health availability metadata are implemented.
 
-Action-only drift repair, separately qualified vendor forwarding and a complete
-desired/acknowledged announcement ledger remain open. A write-only backend needs
+Vendor forwarding qualification and a complete desired/acknowledged announcement
+ledger remain open. A write-only backend needs
 verified reconciliation and restart replay before shipping. ExaBGP, a generic
 HTTP shim, exec transport and runtime plugin loading are not supported today.
 
@@ -425,6 +424,9 @@ intent. An explicit lab import policy prefers the GoBGP candidate, so the test
 also checks real selected peer rows against nonselected synthetic local rows
 and the production local reader. It runs through `scripts/test-rustbgpd.sh` for
 each pinned rustbgpd release; source presence alone is not a successful run.
+The peer restart case preserves desired rows and the client endpoint, verifies
+lost local and peer receipt, then checks exact dual-family recovery, a quiet
+subsequent poll and durable withdrawal cleanup.
 
 These tests observe local acceptance and daemon-to-daemon BGP receipt. They do
 not establish router enforcement or vendor forwarding. ExaBGP and other

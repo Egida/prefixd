@@ -831,16 +831,23 @@ groups:
 
 ### Health Checks
 
+`<prefixd-version>` below stands for the running controller's package version.
+The public response reports the configured authentication mode.
+
 ```bash
-# Liveness check (public, lightweight - no DB/GoBGP calls)
+# Liveness check (public, lightweight - no database or speaker calls)
 curl http://localhost/v1/health
-# Returns: {"status":"ok","version":"0.18.1","auth_mode":"none"}
+# Example: {"status":"ok","version":"<prefixd-version>","auth_mode":"credentials"}
 
-# Full operational health (authenticated)
+# Full health in the default credentials mode (cookies saved by session login)
+curl -b cookies.txt http://localhost/v1/health/detail
+
+# Or, when configured for bearer mode
 curl -H "Authorization: Bearer $TOKEN" http://localhost/v1/health/detail
-# Returns: BGP sessions, database status, GoBGP connectivity, uptime, active mitigations
+# Reports database, peer observation, selected speaker/daemon metadata,
+# controller uptime and active mitigations; not router enforcement.
 
-# CLI status (uses /v1/health/detail)
+# CLI status in bearer mode, with PREFIXD_API_TOKEN configured
 prefixdctl status
 prefixdctl peers
 ```
@@ -873,7 +880,7 @@ curl -v http://localhost/v1/health 2>&1 | grep x-request-id
 - [ ] Generate strong API token
 - [ ] Create operators with appropriate roles
 - [ ] Enable TLS (or use reverse proxy)
-- [ ] Network isolation (prefixd ↔ GoBGP on private network)
+- [ ] Private management between prefixd and the selected speaker
 - [ ] Firewall rules (only allow trusted detectors)
 
 ### Reliability

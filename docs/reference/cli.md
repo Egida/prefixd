@@ -41,6 +41,10 @@ prefixdctl -a http://127.0.0.1:8080 -t $TOKEN <command>
 | `-t, --token` | `PREFIXD_API_TOKEN` | Bearer token for authentication |
 | `-f, --format` | - | Output format: `table` (default) or `json` |
 
+HTTP command examples below assume bearer mode with a configured token. The CLI
+does not perform session login; the default Compose credentials mode needs a
+session-capable client such as curl.
+
 ---
 
 ## Daemon startup option
@@ -61,12 +65,22 @@ before using it. This is not a `prefixdctl` command.
 # Overview of daemon status
 prefixdctl status
 
-# Example output:
-# prefixd v0.18.1 (iad1)
+# Illustrative output with rustbgpd:
 # Status: healthy
-# Uptime: 2d 4h 30m
-# Active mitigations: 12
-# BGP sessions: 2/2 established
+# Active Mitigations: 12
+# Speaker: rustbgpd
+#   Daemon version: <rustbgpd-version>
+#   Daemon uptime: 43200s
+#   Daemon ready: true
+#   Observed at: 2026-10-18T12:00:00Z
+#
+# Components:
+#   ● Database: connected
+#   ● Peer observation: connected
+#
+# BGP Sessions:
+#   ● 192.0.2.1 - established
+#   ● 192.0.2.2 - established
 ```
 
 ### Peers
@@ -75,10 +89,11 @@ prefixdctl status
 # BGP session status
 prefixdctl peers
 
-# Example output:
-# PEER              STATE        UPTIME
-# 10.0.0.1          Established  2d 4h
-# 10.0.0.2          Established  2d 4h
+# Illustrative output:
+# PEER                            STATE
+# --------------------------------------------------
+# 192.0.2.1                       established
+# 192.0.2.2                       established
 ```
 
 ---

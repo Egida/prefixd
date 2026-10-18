@@ -1411,7 +1411,7 @@ Content-Type: application/json
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `username` | string | yes | Unique username |
-| `password` | string | yes | Minimum 8 characters |
+| `password` | string | yes | 8–256 UTF-8 bytes |
 | `role` | string | yes | `admin`, `operator`, or `viewer` |
 
 **Response (201 Created):**
@@ -1431,7 +1431,7 @@ Content-Type: application/json
 
 | Status | Reason |
 |--------|--------|
-| 400 | Invalid role or password too short |
+| 400 | Invalid role or password outside 8–256 UTF-8 bytes |
 | 403 | Caller is not admin |
 | 409 | Username already exists |
 
@@ -1472,7 +1472,7 @@ Content-Type: application/json
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `current_password` | string | required for self-change, optional for admin reset | Current password. Must match the operator's existing password when changing own password. Ignored for admin resets of other operators. |
-| `new_password` | string | yes | New password (min 8 chars). |
+| `new_password` | string | yes | New password, 8–256 UTF-8 bytes. |
 
 Admins can change any operator's password without supplying the current password (admin reset). Non-admins can only change their own password and must provide `current_password`, which is verified against the stored hash before the change is applied.
 
@@ -1482,7 +1482,7 @@ Admins can change any operator's password without supplying the current password
 
 | Status | Reason |
 |--------|--------|
-| 400 | Password too short (min 8 chars) or incorrect current password |
+| 400 | New password outside 8–256 UTF-8 bytes or incorrect current password |
 | 401 | Not authenticated |
 | 403 | Insufficient permissions (non-admin attempting to change another operator's password) |
 | 404 | Operator not found |
@@ -1497,14 +1497,16 @@ Admins can change any operator's password without supplying the current password
 GET /v1/health
 ```
 
-Lightweight liveness check. No authentication required. Does not query database or GoBGP.
+Lightweight liveness check. No authentication required. Does not query the
+database or selected speaker. In the examples below, `<prefixd-version>` is the
+running controller's package version; `auth_mode` reflects its configured mode.
 
 **Response:**
 
 ```json
 {
   "status": "ok",
-  "version": "0.18.1",
+  "version": "<prefixd-version>",
   "auth_mode": "none"
 }
 ```
@@ -1522,14 +1524,16 @@ GET /v1/health/detail
 Authorization: Bearer <token>
 ```
 
-Full operational health. Requires authentication.
+Full operational health using the configured authentication mode. The request
+and response below illustrate bearer mode. In credentials mode, send a session
+cookie; native mTLS requires a client certificate. `none` requires no credentials.
 
-**Response:**
+**Illustrative response with rustbgpd:**
 
 ```json
 {
   "status": "healthy",
-  "version": "0.18.1",
+  "version": "<prefixd-version>",
   "pop": "iad1",
   "uptime_seconds": 86400,
   "bgp_sessions": {
@@ -1542,17 +1546,17 @@ Full operational health. Requires authentication.
     "status": "connected"
   },
   "speaker": {
-    "backend": "gobgp",
-    "capabilities": { "rule_reader": true, "peer_observer": true, "daemon_health": false },
+    "backend": "rustbgpd",
+    "capabilities": { "rule_reader": true, "peer_observer": true, "daemon_health": true },
     "daemon": {
-      "status": "unsupported",
-      "version": null,
-      "uptime_seconds": null,
-      "ready": null,
-      "observed_at": null
+      "status": "observed",
+      "version": "<rustbgpd-version>",
+      "uptime_seconds": 43200,
+      "ready": true,
+      "observed_at": "2026-10-18T12:00:00Z"
     }
   },
-  "auth_mode": "none"
+  "auth_mode": "bearer"
 }
 ```
 

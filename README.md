@@ -8,6 +8,8 @@
 
 ![Dashboard Overview](docs/images/dashboard-overview.png)
 
+*Example data; router installation is unobserved.*
+
 ---
 
 ## Why prefixd?
@@ -17,10 +19,10 @@ You have detectors (FastNetMon, Kentik, Prometheus alerts) that know when you're
 | Problem | Without prefixd | With prefixd |
 |---------|-----------------|--------------|
 | **Detector → Router** | Manual CLI or fragile scripts | Automated policy engine |
-| **Response time** | Minutes (operator intervention) | Seconds (API-driven) |
-| **Safety** | Easy to fat-finger, no guardrails | Quotas, safelist, /32-only, TTLs |
+| **Response** | Operator-driven configuration | API-driven policy evaluation |
+| **Safety** | Easy to fat-finger, no guardrails | Quotas, safelist, IPv4/IPv6 host destinations, TTLs |
 | **Visibility** | Scattered logs, no audit trail | Dashboard, metrics, audit log |
-| **Expiry** | Forget to remove rules | Auto-expire via TTL |
+| **Expiry** | Forget to remove rules | Controller-driven TTL cleanup |
 
 **Key idea:** Detectors signal intent, prefixd decides policy. No detector ever speaks BGP directly.
 
@@ -98,7 +100,10 @@ customers:
 
 ### 2. Define playbooks
 
-Edit `configs/playbooks.yaml` to set response policies:
+As an administrator, open **Config → Playbooks** to edit the persisted policies.
+Checkout files seed a new configuration volume; changing them does not replace
+existing volume contents. See [configuration storage](docs/tutorials/quickstart.md#configuration-and-persistence)
+for direct file edits. The initial playbook step selects the action and TTL:
 
 ```yaml
 playbooks:
@@ -109,8 +114,6 @@ playbooks:
       - action: police
         rate_bps: 10000000    # 10 Mbps
         ttl_seconds: 120
-      - action: discard       # Escalate if attack persists
-        ttl_seconds: 300
 ```
 
 ### 3. Connect a detector
@@ -118,6 +121,12 @@ playbooks:
 Point your detector at prefixd's API. Three integration paths:
 
 **Generic events API** (any detector):
+
+This example uses **bearer mode** with the token configured on the controller.
+The default credentials profile requires a logged-in session cookie instead;
+a bearer header does not sign it in. Choose authentication in the
+[deployment guide](docs/how-to/deployment.md#authentication-setup).
+
 ```bash
 curl -X POST http://localhost/v1/events \
   -H "Content-Type: application/json" \
@@ -166,10 +175,10 @@ Configure rustbgpd neighbors in `configs/rustbgpd.toml` (or `configs/gobgp.conf`
 |----------|--------------|
 | **Signal Ingestion** | HTTP API + native Alertmanager and FastNetMon webhooks + configurable generic webhook adapter with JSONPath mapping |
 | **Multi-Signal Correlation** | Time-windowed grouping of events from multiple detectors with source weighting and corroboration |
-| **Policy Engine** | YAML playbooks define per-vector responses with escalation |
-| **Guardrails** | Quotas, safelist, /32-only enforcement, mandatory TTLs |
+| **Policy Engine** | YAML playbooks select an initial per-vector action and TTL |
+| **Guardrails** | Quotas, safelist, IPv4/IPv6 host destinations, mandatory TTLs |
 | **BGP FlowSpec** | Announces through rustbgpd or GoBGP (policing and discard actions) |
-| **Reconciliation** | Auto-expires mitigations, repairs RIB drift every 30s |
+| **Reconciliation** | Retries TTL/withdrawal cleanup and repairs supported local drift at the configured interval |
 | **Dashboard** | Real-time web UI with WebSocket updates and toast notifications |
 | **Manual Mitigation** | "Mitigate Now" form for operator-initiated events |
 | **Authentication** | Three roles (admin, operator, viewer) with mode-aware auth (`none`, `bearer`, `credentials`, `mtls`) |
@@ -215,14 +224,10 @@ semantics.
 
 ## Supported Routers
 
-FlowSpec (RFC 5575, RFC 8955) is supported by:
-
-| Vendor | Platform | Notes |
-|--------|----------|-------|
-| Juniper | MX, PTX, SRX | Full FlowSpec support |
-| Arista | 7xxx | EOS 4.20+ |
-| Cisco | IOS-XR | ASR 9000, NCS |
-| Nokia | SR OS | 19.x+ |
+Support depends on the exact router software, address family and action. See the
+[vendor reference](docs/reference/vendors.md) for recorded environments and
+limitations. Existing router receipts are scoped to GoBGP; rustbgpd's local and
+peer receipt tests do not establish vendor forwarding.
 
 ---
 
@@ -244,7 +249,7 @@ Database migrations run automatically on startup. See **[docs/how-to/upgrading.m
 
 ## Project Status
 
-Current version: **v0.18.1**
+Published versions: [GitHub Releases](https://github.com/lance0/prefixd/releases).
 
 - Core functionality stable and tested
 - Real-time dashboard with WebSocket updates, toast notifications, and mitigation detail views
@@ -258,7 +263,7 @@ Current version: **v0.18.1**
 
 - **Issues:** [GitHub Issues](https://github.com/lance0/prefixd/issues)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md)
-- **Architecture Decision Records:** [docs/adr/](docs/adr/) (25 ADRs)
+- **Architecture Decision Records:** [Decision index](docs/adr/README.md)
 
 ---
 
