@@ -4504,55 +4504,119 @@ async fn wait_quota_lock(pool: &sqlx::PgPool, admission: bool, waiters: i64) {
     }).await.expect("requests must reach the observed quota/insert lock before release");
 }
 
+// These exact counter deltas need a process-local registry, independent of parallel tests.
+async fn quota_metrics_child(test_name: &str) -> Option<String> {
+    const CHILD: &str = "PREFIXD_QUOTA_METRICS_CHILD";
+    let completion = format!("prefixd-quota-metrics-completed:{test_name}");
+    if std::env::var(CHILD).ok().as_deref() == Some(test_name) {
+        return Some(completion);
+    }
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(90),
+        tokio::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--test-threads=1", "--nocapture"])
+            .env(CHILD, test_name)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("quota metrics child exceeded ninety seconds")
+    .expect("quota metrics child output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "quota metrics child failed ({:?})\n{stdout}\n{stderr}",
+        output.status.code()
+    );
+    assert!(
+        stdout.lines().any(|line| line == completion),
+        "quota metrics child must run the selected test to completion"
+    );
+    None
+}
+
 #[tokio::test]
 async fn test_shared_quota_http_serializes_two_pop_admissions() {
+    use prefixd::observability::metrics::{EVENTS_REJECTED, GUARDRAIL_REJECTIONS};
     use std::sync::atomic::Ordering::SeqCst;
+    let Some(completion) =
+        quota_metrics_child("test_shared_quota_http_serializes_two_pop_admissions").await
+    else {
+        return;
+    };
     for quota in ["global", "customer"] {
-        let context = TestContext::new().await;
-        let mut quotas = common::test_settings().quotas;
-        if quota == "global" {
-            quotas.max_active_global = 1;
-        } else {
-            quotas.max_active_per_customer = 1;
-        }
-        let (a, speaker_a) = quota_state(&context, "quota-a", quotas.clone()).await;
-        let (b, speaker_b) = quota_state(&context, "quota-b", quotas).await;
-        let app_a = prefixd::api::create_test_router(a);
-        let app_b = prefixd::api::create_test_router(b);
-        sqlx::raw_sql("CREATE FUNCTION gate_quota_insert() RETURNS trigger AS $$ BEGIN PERFORM pg_advisory_xact_lock(7355, 2362); RETURN NEW; END; $$ LANGUAGE plpgsql; CREATE TRIGGER gate_quota_insert BEFORE INSERT ON mitigations FOR EACH ROW EXECUTE FUNCTION gate_quota_insert();")
+        for (first_kind, second_kind, first_status) in [
+            ("manual", "detector", StatusCode::CREATED),
+            ("detector", "manual", StatusCode::ACCEPTED),
+        ] {
+            let context = TestContext::new().await;
+            let mut quotas = common::test_settings().quotas;
+            if quota == "global" {
+                quotas.max_active_global = 1;
+            } else {
+                quotas.max_active_per_customer = 1;
+            }
+            let (a, speaker_a) = quota_state(&context, "quota-a", quotas.clone()).await;
+            let (b, speaker_b) = quota_state(&context, "quota-b", quotas).await;
+            let app_a = prefixd::api::create_test_router(a);
+            let app_b = prefixd::api::create_test_router(b);
+            let guardrails = GUARDRAIL_REJECTIONS.with_label_values(&["QuotaExceeded"]);
+            let rejected_events =
+                EVENTS_REJECTED.with_label_values(&["creation-test", "guardrail"]);
+            let before = (guardrails.get(), rejected_events.get());
+            sqlx::raw_sql("CREATE FUNCTION gate_quota_insert() RETURNS trigger AS $$ BEGIN PERFORM pg_advisory_xact_lock(7355, 2362); RETURN NEW; END; $$ LANGUAGE plpgsql; CREATE TRIGGER gate_quota_insert BEFORE INSERT ON mitigations FOR EACH ROW EXECUTE FUNCTION gate_quota_insert();")
             .execute(&context.pool).await.unwrap();
-        let mut gate = context.pool.begin().await.unwrap();
-        sqlx::query("SELECT pg_advisory_xact_lock(7355, 2362)")
-            .execute(&mut *gate)
-            .await
-            .unwrap();
-        let first = tokio::spawn(async move {
-            app_a
-                .oneshot(creation_request("manual", "203.0.113.10", "quota-a"))
+            let mut gate = context.pool.begin().await.unwrap();
+            sqlx::query("SELECT pg_advisory_xact_lock(7355, 2362)")
+                .execute(&mut *gate)
                 .await
-                .unwrap()
-        });
-        wait_quota_lock(&context.pool, false, 1).await;
-        let second = tokio::spawn(async move {
-            app_b
-                .oneshot(creation_request("detector", "203.0.113.11", "quota-b"))
-                .await
-                .unwrap()
-        });
-        // The first request holds admission through INSERT; the second has completed
-        // readable preflight and is waiting for its fresh authoritative counts.
-        wait_quota_lock(&context.pool, true, 1).await;
-        assert_eq!(speaker_a.adds.load(SeqCst) + speaker_b.adds.load(SeqCst), 0);
-        gate.commit().await.unwrap();
-        assert_eq!(first.await.unwrap().status(), StatusCode::CREATED);
-        let rejected = second.await.unwrap();
-        assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
-        assert!(creation_json(rejected).await.to_string().contains(quota));
-        assert_eq!(context.repo.count_active_global().await.unwrap(), 1);
-        assert_eq!(speaker_a.adds.load(SeqCst), 1);
-        assert_eq!(speaker_b.adds.load(SeqCst), 0);
-        assert_eq!(speaker_a.owners_at_rpc.lock().unwrap()[0].len(), 1);
+                .unwrap();
+            let first = tokio::spawn(async move {
+                app_a
+                    .oneshot(creation_request(first_kind, "203.0.113.10", "quota-a"))
+                    .await
+                    .unwrap()
+            });
+            wait_quota_lock(&context.pool, false, 1).await;
+            let second = tokio::spawn(async move {
+                app_b
+                    .oneshot(creation_request(second_kind, "203.0.113.11", "quota-b"))
+                    .await
+                    .unwrap()
+            });
+            // The first request holds admission through INSERT; the second has completed
+            // readable preflight and is waiting for its fresh authoritative counts.
+            wait_quota_lock(&context.pool, true, 1).await;
+            assert_eq!(speaker_a.adds.load(SeqCst) + speaker_b.adds.load(SeqCst), 0);
+            assert_eq!(
+                (guardrails.get(), rejected_events.get()),
+                before,
+                "both requests passed preflight without rejection"
+            );
+            gate.commit().await.unwrap();
+            assert_eq!(first.await.unwrap().status(), first_status);
+            let rejected = second.await.unwrap();
+            assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert!(creation_json(rejected).await.to_string().contains(quota));
+            assert_eq!(context.repo.count_active_global().await.unwrap(), 1);
+            assert_eq!(speaker_a.adds.load(SeqCst), 1);
+            assert_eq!(speaker_b.adds.load(SeqCst), 0);
+            assert_eq!(speaker_a.owners_at_rpc.lock().unwrap()[0].len(), 1);
+            assert_eq!(
+                guardrails.get(),
+                before.0 + 1.0,
+                "quota={quota}, loser={second_kind}"
+            );
+            assert_eq!(
+                rejected_events.get(),
+                before.1 + if second_kind == "detector" { 1.0 } else { 0.0 },
+                "only a rejected detector request increments the event counter"
+            );
+        }
     }
+    println!("\n{completion}");
 }
 
 #[tokio::test]
@@ -4877,7 +4941,18 @@ async fn test_shared_quota_pool_wait_uses_whole_deadline() {
 
 #[tokio::test]
 async fn test_shared_quota_lock_wait_times_out_without_rpc_or_blocking_other_pop_withdrawal() {
+    use prefixd::observability::metrics::{EVENTS_REJECTED, GUARDRAIL_REJECTIONS};
     use std::sync::atomic::Ordering::SeqCst;
+    let Some(completion) = quota_metrics_child(
+        "test_shared_quota_lock_wait_times_out_without_rpc_or_blocking_other_pop_withdrawal",
+    )
+    .await
+    else {
+        return;
+    };
+    let guardrails = GUARDRAIL_REJECTIONS.with_label_values(&["QuotaExceeded"]);
+    let rejected_events = EVENTS_REJECTED.with_label_values(&["creation-test", "guardrail"]);
+    let before = (guardrails.get(), rejected_events.get());
     let context = TestContext::new().await;
     let (a, speaker_a) = quota_state(&context, "quota-a", common::test_settings().quotas).await;
     let (b, speaker_b) = quota_state(&context, "quota-b", common::test_settings().quotas).await;
@@ -4901,7 +4976,7 @@ async fn test_shared_quota_lock_wait_times_out_without_rpc_or_blocking_other_pop
     let started = std::time::Instant::now();
     let task = tokio::spawn(async move {
         app_a
-            .oneshot(creation_request("manual", "203.0.113.10", "timeout"))
+            .oneshot(creation_request("detector", "203.0.113.10", "timeout"))
             .await
             .unwrap()
     });
@@ -4948,11 +5023,26 @@ async fn test_shared_quota_lock_wait_times_out_without_rpc_or_blocking_other_pop
         MitigationStatus::Withdrawn
     );
     assert_quota_cleanup(&context, &context.pool, 1).await;
+    assert_eq!(
+        (guardrails.get(), rejected_events.get()),
+        before,
+        "database and timeout failures are not quota or rejected-event metrics"
+    );
+    println!("\n{completion}");
 }
 
 #[tokio::test]
 async fn test_shared_quota_count_failure_after_preflight_sends_no_rpc() {
+    use prefixd::observability::metrics::{EVENTS_REJECTED, GUARDRAIL_REJECTIONS};
     use std::sync::atomic::Ordering::SeqCst;
+    let Some(completion) =
+        quota_metrics_child("test_shared_quota_count_failure_after_preflight_sends_no_rpc").await
+    else {
+        return;
+    };
+    let guardrails = GUARDRAIL_REJECTIONS.with_label_values(&["QuotaExceeded"]);
+    let rejected_events = EVENTS_REJECTED.with_label_values(&["creation-test", "guardrail"]);
+    let before = (guardrails.get(), rejected_events.get());
     let context = TestContext::new().await;
     let (state, speaker) = quota_state(&context, "quota-a", common::test_settings().quotas).await;
     let mut gate = context.pool.begin().await.unwrap();
@@ -4962,9 +5052,13 @@ async fn test_shared_quota_count_failure_after_preflight_sends_no_rpc() {
         .unwrap();
     let app = prefixd::api::create_test_router(state);
     let task = tokio::spawn(async move {
-        app.oneshot(creation_request("manual", "203.0.113.10", "count-failure"))
-            .await
-            .unwrap()
+        app.oneshot(creation_request(
+            "detector",
+            "203.0.113.10",
+            "count-failure",
+        ))
+        .await
+        .unwrap()
     });
     wait_quota_lock(&context.pool, true, 1).await;
     // Preflight has succeeded. Only the authoritative transaction's count fails.
@@ -4983,6 +5077,12 @@ async fn test_shared_quota_count_failure_after_preflight_sends_no_rpc() {
         .unwrap();
     assert_eq!(speaker.adds.load(SeqCst), 0);
     assert_quota_cleanup(&context, &context.pool, 0).await;
+    assert_eq!(
+        (guardrails.get(), rejected_events.get()),
+        before,
+        "database and timeout failures are not quota or rejected-event metrics"
+    );
+    println!("\n{completion}");
 }
 
 #[tokio::test]

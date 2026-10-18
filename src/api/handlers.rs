@@ -626,7 +626,17 @@ async fn persist_new_mitigation(
     state
         .repo
         .admit_mitigation(mitigation, &state.settings.quotas)
-        .await?;
+        .await
+        .inspect_err(|error| {
+            if matches!(
+                error,
+                PrefixdError::GuardrailViolation(GuardrailError::QuotaExceeded { .. })
+            ) {
+                crate::observability::metrics::GUARDRAIL_REJECTIONS
+                    .with_label_values(&["QuotaExceeded"])
+                    .inc();
+            }
+        })?;
     if state.is_dry_run() {
         return Ok(None);
     }
@@ -1314,6 +1324,16 @@ async fn handle_ban(
 
     let announcement_outcome = persist_new_mitigation(&state, &mut mitigation)
         .await
+        .inspect_err(|error| {
+            if matches!(
+                error,
+                PrefixdError::GuardrailViolation(GuardrailError::QuotaExceeded { .. })
+            ) {
+                crate::observability::metrics::EVENTS_REJECTED
+                    .with_label_values(&[event.source.as_str(), "guardrail"])
+                    .inc();
+            }
+        })
         .map_err(AppError)?;
 
     crate::observability::metrics::MITIGATIONS_CREATED
