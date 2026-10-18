@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   use those prefixes to distinguish speaker targets.
   Rust `RustBgpdConfig` literals need the new optional identity fields or
   `..Default::default()`; existing YAML retains its defaults.
+  Bound initial network connections and TLS handshakes to ten seconds.
 
 - Bind each POP to an immutable, credential-free speaker target before connecting.
   Migration 014 retains target IDs on withdrawal requests; lifecycle guards reject

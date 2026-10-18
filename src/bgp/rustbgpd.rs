@@ -122,7 +122,9 @@ impl RustBgpdAnnouncer {
                     token.is_some() || config.client_cert_path.is_some(),
                     "rustbgpd bearer token or client certificate is required"
                 );
-                let mut tls = ClientTlsConfig::new().with_native_roots();
+                let mut tls = ClientTlsConfig::new()
+                    .with_native_roots()
+                    .timeout(Duration::from_secs(10));
                 if let Some(path) = &config.ca_cert_path {
                     tls = tls.ca_certificate(Certificate::from_pem(read_tls_file(path).await?));
                 }
@@ -139,9 +141,9 @@ impl RustBgpdAnnouncer {
             }
             _ => anyhow::bail!("rustbgpd endpoint must use unix, http or https"),
         }
-        let channel = endpoint
-            .connect()
+        let channel = tokio::time::timeout(Duration::from_secs(10), endpoint.connect())
             .await
+            .map_err(|_| anyhow::anyhow!("rustbgpd connection timed out"))?
             .map_err(|_| anyhow::anyhow!("rustbgpd connection failed"))?;
         Ok(Self { channel, token })
     }

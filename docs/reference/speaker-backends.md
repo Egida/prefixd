@@ -177,6 +177,10 @@ container DNS and other hostnames are not a loopback guarantee. TLS fields are
 rejected on plaintext and Unix endpoints. Private key contents and token values
 never belong in YAML or settings API output.
 
+Initial network connection attempts and each TLS handshake have a ten-second
+budget. A peer that accepts TCP but does not finish TLS cannot stall startup
+indefinitely. Complete RPC attempts remain bounded separately.
+
 The relevant vendored controller message fields were checked against rustbgpd
 `v0.77.0`. This is a protocol baseline, not proof that an arbitrary binary
 reporting that version has passed the deployment or router tests.

@@ -575,3 +575,48 @@ async fn native_mtls_presents_the_client_certificate() {
     client.announce(&rule("192.0.2.231/32", 0)).await.unwrap();
     server.abort();
 }
+
+#[tokio::test]
+async fn initial_connection_bounds_a_stalled_tls_handshake() {
+    use tokio::io::AsyncReadExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (hello_sent, hello_seen) = tokio::sync::oneshot::channel();
+    let (release, hold) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut header = [0; 5];
+        stream.read_exact(&mut header).await.unwrap();
+        assert_eq!(header[0], 22, "TLS handshake record");
+        let mut hello = vec![0; u16::from_be_bytes([header[3], header[4]]) as usize];
+        stream.read_exact(&mut hello).await.unwrap();
+        assert_eq!(hello[0], 1, "TLS ClientHello");
+        hello_sent.send(()).unwrap();
+        let _ = hold.await;
+    });
+    let config = RustBgpdConfig {
+        endpoint: format!("https://{address}"),
+        ..Default::default()
+    };
+    let mut connection =
+        tokio::spawn(
+            async move { RustBgpdAnnouncer::connect_with_token(&config, "test-secret").await },
+        );
+    tokio::time::timeout(Duration::from_secs(5), hello_seen)
+        .await
+        .expect("server must receive ClientHello before checking the TLS deadline")
+        .unwrap();
+    assert!(!connection.is_finished());
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(11)).await;
+    let result = tokio::time::timeout(Duration::from_secs(1), &mut connection).await;
+    tokio::time::resume();
+    release.send(()).unwrap();
+    server.await.unwrap();
+    assert!(
+        result.is_ok(),
+        "stalled TLS negotiation exceeded the connection budget"
+    );
+    assert!(result.unwrap().unwrap().is_err());
+}
