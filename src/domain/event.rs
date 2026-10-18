@@ -86,7 +86,9 @@ pub struct AttackEventInput {
     pub pps: Option<i64>,
     #[serde(default)]
     pub top_dst_ports: Option<Vec<u16>>,
+    /// Optional finite detection confidence in the inclusive range 0..=1.
     #[serde(default)]
+    #[schema(minimum = 0, maximum = 1)]
     pub confidence: Option<f32>,
     /// Action type: "ban" (default) or "unban"
     #[serde(default = "default_action")]
@@ -94,6 +96,16 @@ pub struct AttackEventInput {
     /// Raw details from detector for forensics
     #[serde(default)]
     pub raw_details: Option<serde_json::Value>,
+}
+
+/// Validate detector confidence before ingestion changes any state.
+pub(crate) fn validate_confidence(confidence: Option<f32>) -> crate::error::Result<()> {
+    if confidence.is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value)) {
+        return Err(crate::error::PrefixdError::InvalidRequest(
+            "confidence must be finite and between 0 and 1 inclusive".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Internal event representation
@@ -155,6 +167,27 @@ impl AttackEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn confidence_accepts_optional_boundaries_and_rejects_nonfinite_or_outside_values() {
+        for value in [None, Some(0.0), Some(-0.0), Some(1.0), Some(0.5)] {
+            assert!(validate_confidence(value).is_ok(), "{value:?}");
+        }
+        for value in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -f32::EPSILON,
+            1.0 + f32::EPSILON,
+        ] {
+            let error = validate_confidence(Some(value)).unwrap_err();
+            assert!(matches!(
+                error,
+                crate::error::PrefixdError::InvalidRequest(_)
+            ));
+            assert_eq!(error.status_code(), axum::http::StatusCode::BAD_REQUEST);
+        }
+    }
 
     #[test]
     fn event_protocol_tracks_victim_address_family() {

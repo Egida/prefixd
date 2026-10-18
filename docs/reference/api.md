@@ -109,11 +109,16 @@ Content-Type: application/json
 | `vector` | string | yes | Attack type: `udp_flood`, `syn_flood`, `ack_flood`, `icmp_flood`, `unknown` |
 | `bps` | integer | no | Bits per second |
 | `pps` | integer | no | Packets per second |
-| `confidence` | float | no | 0.0-1.0, detection confidence |
+| `confidence` | float | no | Finite 0.0–1.0 inclusive, or null; invalid values return 400 |
 | `top_dst_ports` | array | no | Destination ports involved (max 8) |
 | `action` | string | no | `"ban"` (default) or `"unban"` |
 | `event_id` | string | no | External event ID (for dedup / unban correlation) |
 | `raw_details` | object | no | Raw detector payload for forensics |
+
+Confidence validation applies to ban and unban events, including adapter-mapped
+events after their existing confidence normalization. Generic webhook adapters
+retain their configured scaling and clamping to 0–1. Rejected confidence does not consume the external event ID; corrected
+retries can use the same ID. Batch ingestion keeps per-item rejection results.
 
 Automatic detector mitigation uses a canonical host destination: `/32` for IPv4
 and `/128` for IPv6. `icmp_flood` selects protocol 1 for IPv4 and 58 for IPv6 in
@@ -1092,7 +1097,8 @@ Content-Type: application/json
   only; undeclared fields are ignored even if populated. This prevents
   a source configured for `[pop]` from accidentally attaching to groups
   via a stray `customer_id`.
-- `confidence` *(optional)* — 0.0–1.0. Contributes to the group's
+- `confidence` *(optional)* — Finite 0.0–1.0 inclusive, or null. Invalid values
+  return 400 before events, groups or cached signals change. Contributes to the group's
   `derived_confidence` via the source's configured `weight`.
 
 **Response:**

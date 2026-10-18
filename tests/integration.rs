@@ -10955,3 +10955,220 @@ mod list_filter_validation {
         }
     }
 }
+
+async fn confidence_test_app() -> (axum::Router, Arc<AppState>) {
+    use prefixd::correlation::{MatchDimension, SourceConfig, SourceMode};
+    let mut settings = test_settings_with_correlation(true, 1, 0.5);
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    settings.correlation.sources.insert(
+        "confidence-corrob".into(),
+        SourceConfig {
+            mode: SourceMode::Corroborating,
+            match_dimensions: vec![MatchDimension::Pop],
+            ..Default::default()
+        },
+    );
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        Arc::new(MockRepository::new()),
+        Arc::new(MockAnnouncer::new()),
+        ".".into(),
+    )
+    .unwrap();
+    state.correlation_config.write().await.webhook_adapters =
+        vec![basic_webhook_adapter("confidence")];
+    (create_test_router(state.clone()), state)
+}
+
+async fn confidence_state_snapshot(state: &AppState) -> serde_json::Value {
+    let params = prefixd::db::ListParams {
+        limit: 100,
+        ..Default::default()
+    };
+    serde_json::json!({
+        "events": state.repo.list_events(&params).await.unwrap(),
+        "groups": state.repo.list_signal_groups(&Default::default(), &params).await.unwrap(),
+        "cache": state.repo.list_cached_corroborators(chrono::Utc::now(), 100, None).await.unwrap(),
+        "mitigations": state.repo.list_mitigations(None, None, None, None,
+            &prefixd::db::MitigationListParams { limit: 100, ..Default::default() }).await.unwrap(),
+        "rules": state.announcer.reader().unwrap().list_active().await.unwrap(),
+    })
+}
+
+fn confidence_event(id: &str, value: &str, action: &str) -> String {
+    format!(
+        r#"{{"event_id":"{id}","timestamp":"2026-10-18T00:00:00Z","source":"detector_a","victim_ip":"203.0.113.10","vector":"udp_flood","pps":50000,"top_dst_ports":[53],"confidence":{value},"action":"{action}","raw_details":{{"secret":"private-confidence-payload"}}}}"#
+    )
+}
+
+async fn post_confidence_json(
+    app: &axum::Router,
+    path: &str,
+    body: String,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    (status, serde_json::from_slice(&bytes).unwrap())
+}
+
+#[tokio::test]
+async fn confidence_http_rejections_preserve_state_and_same_id_retry() {
+    let (app, state) = confidence_test_app().await;
+    for (index, value) in ["-0.0000001", "1.0000001", "1e100"].iter().enumerate() {
+        let id = format!("confidence-{index}");
+        let before = confidence_state_snapshot(&state).await;
+        let (status, error) =
+            post_confidence_json(&app, "/v1/events", confidence_event(&id, value, "ban")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{value}: {error}");
+        assert!(error.to_string().contains("confidence must be finite"));
+        assert!(!error.to_string().contains("private-confidence-payload"));
+        assert_eq!(confidence_state_snapshot(&state).await, before);
+        let (status, response) =
+            post_confidence_json(&app, "/v1/events", confidence_event(&id, "0.9", "ban")).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{response}");
+        // The original active rule must survive an invalid unban with the same ID.
+        let before = confidence_state_snapshot(&state).await;
+        let (status, _) =
+            post_confidence_json(&app, "/v1/events", confidence_event(&id, value, "unban")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(confidence_state_snapshot(&state).await, before);
+    }
+    assert!(
+        !state
+            .announcer
+            .reader()
+            .unwrap()
+            .list_active()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn confidence_optional_boundaries_and_mixed_batch_keep_existing_envelopes() {
+    let (app, state) = confidence_test_app().await;
+    for (index, value) in ["null", "0", "-0.0", "1"].iter().enumerate() {
+        let (status, result) = post_confidence_json(
+            &app,
+            "/v1/events",
+            confidence_event(&format!("boundary-{index}"), value, "ban"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{value}: {result}");
+    }
+    let body = format!(
+        r#"{{"events":[{},{},{}]}}"#,
+        confidence_event("batch-invalid", "1e100", "ban"),
+        confidence_event("batch-valid", "1", "ban"),
+        confidence_event("batch-invalid", "0.9", "ban")
+    );
+    let (status, result) = post_confidence_json(&app, "/v1/events/batch", body).await;
+    assert_eq!(status, StatusCode::MULTI_STATUS);
+    assert_eq!(result["accepted"], 2);
+    assert_eq!(result["rejected"], 1);
+    assert_eq!(result["results"][0]["status"], "rejected");
+    assert!(
+        result["results"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("confidence must be finite")
+    );
+    assert!(
+        state
+            .repo
+            .find_ban_event_by_external_id("detector_a", "batch-invalid")
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn confidence_corroborator_rejections_precede_mutations() {
+    let (app, state) = confidence_test_app().await;
+    let (status, _) = post_confidence_json(
+        &app,
+        "/v1/events",
+        confidence_event("open-primary", "0.2", "ban"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(state.repo.count_open_groups().await.unwrap(), 1);
+    let (status, _) = post_confidence_json(
+        &app,
+        "/v1/signals/corroborator",
+        r#"{"source":"confidence-corrob","pop":"no-match","confidence":0.5}"#.into(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        state
+            .repo
+            .count_cached_corroborators(chrono::Utc::now())
+            .await
+            .unwrap(),
+        1
+    );
+    for value in ["1e100", "-0.1", "1.1"] {
+        let before = confidence_state_snapshot(&state).await;
+        let body = format!(
+            r#"{{"source":"confidence-corrob","pop":"test1","confidence":{value},"raw_details":{{"secret":"private-confidence-payload"}}}}"#
+        );
+        let (status, result) = post_confidence_json(&app, "/v1/signals/corroborator", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(result.to_string().contains("confidence must be finite"));
+        assert!(!result.to_string().contains("private-confidence-payload"));
+        assert_eq!(confidence_state_snapshot(&state).await, before);
+    }
+    for value in ["null", "0", "-0.0", "1"] {
+        let body =
+            format!(r#"{{"source":"confidence-corrob","pop":"no-match","confidence":{value}}}"#);
+        let (status, result) = post_confidence_json(&app, "/v1/signals/corroborator", body).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["status"], "cached");
+    }
+}
+
+#[tokio::test]
+async fn confidence_webhook_preserves_normalization_before_shared_validation() {
+    let (app, state) = confidence_test_app().await;
+    state.correlation_config.write().await.webhook_adapters[0].confidence_scale = Some(100.0);
+    for (index, (value, expected)) in [("1e100", 1.0), ("-10", 0.0), ("75", 0.75), ("200", 1.0)]
+        .iter()
+        .enumerate()
+    {
+        let id = format!("normalized-{index}");
+        let body = format!(
+            r#"{{"id":"{id}","ip":"203.0.113.10","vector":"udp_flood","pps":50000,"score":{value}}}"#
+        );
+        let (status, result) =
+            post_confidence_json(&app, "/v1/signals/webhook/confidence", body).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["processed"], 1, "{result}");
+        assert_eq!(result["failed"], 0);
+        let event = state
+            .repo
+            .find_ban_event_by_external_id("confidence", &id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.confidence, Some(*expected));
+    }
+}
