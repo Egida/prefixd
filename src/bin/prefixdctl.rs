@@ -894,7 +894,7 @@ async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<()
             }
 
             let operators: Vec<OperatorRow> = sqlx::query_as(
-                "SELECT id, username, role, created_at, last_login FROM operators ORDER BY created_at"
+                "SELECT operator_id AS id, username, role, created_at, last_login_at AS last_login FROM operators ORDER BY created_at"
             )
             .fetch_all(&pool)
             .await

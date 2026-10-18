@@ -148,6 +148,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fix `prefixdctl operators list` against the shipped operator schema while
+  preserving its JSON fields, table output and exclusion of password hashes.
+
 - Preserve exact untransformed webhook `bps` and `pps` integers and reject
   nonfinite or out-of-range floating-point results instead of rounding or
   saturating them. Fractional rates still truncate toward zero; floating-point
