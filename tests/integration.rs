@@ -9093,6 +9093,271 @@ mod manual_protocol {
     }
 
     #[tokio::test]
+    async fn event_metadata_byte_boundaries_match_single_and_batch() {
+        for batch in [false, true] {
+            for field in ["source", "event_id"] {
+                for unit in ["a", "é"] {
+                    let (state, repo, speaker) = state(AuthMode::None);
+                    let app = create_test_router(state);
+                    let params = prefixd::db::ListParams {
+                        limit: 10,
+                        ..Default::default()
+                    };
+                    let boundary = unit.repeat(1024 / unit.len());
+                    assert_eq!(boundary.len(), 1024);
+                    for oversized in [false, true] {
+                        let before = repo.list_events(&params).await.unwrap();
+                        let value = format!("{boundary}{}", if oversized { "x" } else { "" });
+                        assert_eq!(value.len(), if oversized { 1025 } else { 1024 });
+                        let mut input = serde_json::json!({
+                            "event_id": "metadata-boundary", "timestamp": chrono::Utc::now(),
+                            "source": "metadata", "victim_ip": "203.0.113.10", "vector": "unknown"
+                        });
+                        input[field] = value.clone().into();
+                        let request = if batch {
+                            serde_json::json!({ "events": [input] })
+                        } else {
+                            input
+                        };
+                        let response = app
+                            .clone()
+                            .oneshot(
+                                Request::builder()
+                                    .method("POST")
+                                    .uri(if batch {
+                                        "/v1/events/batch"
+                                    } else {
+                                        "/v1/events"
+                                    })
+                                    .header("content-type", "application/json")
+                                    .body(Body::from(request.to_string()))
+                                    .unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                        let expected = match (batch, oversized) {
+                            (_, false) => StatusCode::ACCEPTED,
+                            (true, true) => StatusCode::MULTI_STATUS,
+                            (false, true) => StatusCode::BAD_REQUEST,
+                        };
+                        assert_eq!(
+                            response.status(),
+                            expected,
+                            "{batch} {field} {unit} {oversized}"
+                        );
+                        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                            .await
+                            .unwrap();
+                        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                        let saved = repo.list_events(&params).await.unwrap();
+                        if oversized {
+                            let error = if batch {
+                                &result["results"][0]["error"]
+                            } else {
+                                &result["error"]
+                            };
+                            assert!(error.as_str().unwrap().contains(field));
+                            assert_eq!(
+                                serde_json::to_value(saved).unwrap(),
+                                serde_json::to_value(before).unwrap()
+                            );
+                        } else {
+                            assert_eq!(saved.len(), 1);
+                            let stored = if field == "source" {
+                                Some(saved[0].source.as_str())
+                            } else {
+                                saved[0].external_event_id.as_deref()
+                            };
+                            assert_eq!(stored, Some(value.as_str()));
+                        }
+                        if batch {
+                            assert_eq!(result["accepted"], if oversized { 0 } else { 1 });
+                            assert_eq!(result["rejected"], if oversized { 1 } else { 0 });
+                        }
+                        assert_no_mutation(repo.as_ref(), speaker.as_ref()).await;
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn event_batch_accepts_exactly_one_hundred_events() {
+        use std::collections::BTreeSet;
+        use uuid::Uuid;
+
+        let (state, repo, speaker) = state(AuthMode::None);
+        let events: Vec<_> = (0..100)
+            .map(|index| {
+                serde_json::json!({
+                    "event_id": format!("batch-boundary-{index}"), "timestamp": chrono::Utc::now(),
+                    "source": "batch-boundary", "victim_ip": "203.0.113.10", "vector": "unknown"
+                })
+            })
+            .collect();
+        let response = create_test_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/events/batch")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "events": events }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["accepted"], 100);
+        assert_eq!(result["rejected"], 0);
+        let results = result["results"].as_array().unwrap();
+        assert_eq!(results.len(), 100);
+        let returned: BTreeSet<_> = results
+            .iter()
+            .map(|item| Uuid::parse_str(item["event_id"].as_str().unwrap()).unwrap())
+            .collect();
+        assert_eq!(returned.len(), 100);
+        let stored = repo
+            .list_events(&prefixd::db::ListParams {
+                limit: 101,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 100);
+        assert_eq!(
+            stored
+                .iter()
+                .map(|event| event.event_id)
+                .collect::<BTreeSet<_>>(),
+            returned
+        );
+        assert_no_mutation(repo.as_ref(), speaker.as_ref()).await;
+    }
+
+    #[tokio::test]
+    async fn u16_port_boundaries_for_event_and_manual_requests() {
+        for manual in [false, true] {
+            let (state, repo, speaker) = state(AuthMode::None);
+            // Both deliberate empty lists leave detector ports unconstrained.
+            state.inventory.write().await.customers[0].services[0].allowed_ports =
+                AllowedPorts::default();
+            let app = create_test_router(state);
+            let params = prefixd::db::MitigationListParams {
+                limit: 10,
+                ..Default::default()
+            };
+            let event_params = prefixd::db::ListParams {
+                limit: 10,
+                ..Default::default()
+            };
+            for (index, (port, expected_port)) in [
+                (serde_json::json!(0), Some(0_u16)),
+                (serde_json::json!(65535), Some(65535)),
+                (serde_json::json!(-1), None),
+                (serde_json::json!(65536), None),
+                (serde_json::json!(1.5), None),
+                (serde_json::json!("53"), None),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let before = repo
+                    .list_mitigations(None, None, None, None, &params)
+                    .await
+                    .unwrap();
+                let before_events = repo.list_events(&event_params).await.unwrap();
+                let mutations = speaker.mutations.load(SeqCst);
+                let mut input = if manual {
+                    payload("203.0.113.10", "udp")
+                } else {
+                    serde_json::json!({
+                        "event_id": format!("port-boundary-{index}"), "timestamp": chrono::Utc::now(),
+                        "source": "port-boundary", "victim_ip": "203.0.113.10", "vector": "udp_flood",
+                        "pps": 50000, "confidence": 0.9
+                    })
+                };
+                input[if manual { "dst_ports" } else { "top_dst_ports" }] =
+                    serde_json::json!([port]);
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(if manual {
+                                "/v1/mitigations"
+                            } else {
+                                "/v1/events"
+                            })
+                            .header("content-type", "application/json")
+                            .body(Body::from(input.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let saved = repo
+                    .list_mitigations(None, None, None, None, &params)
+                    .await
+                    .unwrap();
+                let saved_events = repo.list_events(&event_params).await.unwrap();
+                if let Some(port) = expected_port {
+                    assert_eq!(
+                        response.status(),
+                        if manual {
+                            StatusCode::CREATED
+                        } else {
+                            StatusCode::ACCEPTED
+                        }
+                    );
+                    assert_eq!(saved.len(), before.len() + 1);
+                    assert_eq!(
+                        saved_events.len(),
+                        before_events.len() + usize::from(!manual)
+                    );
+                    if !manual {
+                        assert!(
+                            saved_events
+                                .iter()
+                                .any(|event| event.top_dst_ports() == [port])
+                        );
+                    }
+                    assert!(
+                        saved
+                            .iter()
+                            .any(|mitigation| mitigation.match_criteria.dst_ports == [port])
+                    );
+                    assert!(
+                        speaker
+                            .inner
+                            .list_active()
+                            .await
+                            .unwrap()
+                            .iter()
+                            .any(|rule| rule.nlri.dst_ports == [port])
+                    );
+                    assert_eq!(speaker.mutations.load(SeqCst), mutations + 1);
+                } else {
+                    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+                    assert_eq!(
+                        serde_json::to_value(saved).unwrap(),
+                        serde_json::to_value(before).unwrap()
+                    );
+                    assert_eq!(
+                        serde_json::to_value(saved_events).unwrap(),
+                        serde_json::to_value(before_events).unwrap()
+                    );
+                    assert_eq!(speaker.mutations.load(SeqCst), mutations);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn invalid_actions_create_no_intent_or_speaker_mutation() {
         for ip in ["203.0.113.10", "2001:db8::10"] {
             for (action, rate, error) in [
@@ -10055,6 +10320,613 @@ mod anonymous_auth {
             .next()
             .unwrap()
             .to_owned()
+    }
+
+    mod credential_boundaries {
+        use super::*;
+
+        async fn public_body(
+            response: axum::response::Response,
+            expected: StatusCode,
+            secrets: &[&str],
+        ) -> String {
+            assert_eq!(response.status(), expected);
+            let body = axum::body::to_bytes(response.into_body(), 16_384)
+                .await
+                .unwrap();
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            for secret in ["password_hash", "$argon2"]
+                .into_iter()
+                .chain(secrets.iter().copied())
+            {
+                assert!(
+                    !text.contains(secret),
+                    "credential response exposes a secret"
+                );
+            }
+            text
+        }
+
+        #[tokio::test]
+        async fn create_checks_username_bytes_ascii_policy_and_roles() {
+            let repo = Arc::new(MockRepository::new());
+            let admin = operator(&repo, "credential-create-admin").await;
+            let app = router(AuthMode::Credentials, repo.clone(), MemoryStore::default());
+            let cookie = login(&app, &admin.username).await;
+            for (username, role, accepted) in [
+                ("C".repeat(64), "operator", true),
+                ("C".repeat(65), "operator", false),
+                ("Az_09-".into(), "admin", true),
+                ("credential-viewer".into(), "viewer", true),
+                ("".into(), "operator", false),
+                ("bad space".into(), "operator", false),
+                ("bad/slash".into(), "operator", false),
+                ("bad.dot".into(), "operator", false),
+                ("badé".into(), "operator", false),
+                ("bad\0name".into(), "operator", false),
+                ("unknown-role".into(), "owner", false),
+                ("empty-role".into(), "", false),
+            ] {
+                let response = request(
+                    &app,
+                    "POST",
+                    "/v1/operators",
+                    Some(&cookie),
+                    Some(serde_json::json!({"username":username,"password":PASSWORD,"role":role})),
+                )
+                .await;
+                let body = public_body(
+                    response,
+                    if accepted {
+                        StatusCode::CREATED
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    &[PASSWORD, &admin.password_hash],
+                )
+                .await;
+                let stored = repo.get_operator_by_username(&username).await.unwrap();
+                assert_eq!(stored.is_some(), accepted);
+                if let Some(stored) = stored {
+                    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    assert_eq!(json.as_object().unwrap().len(), 6);
+                    assert_eq!(json["operator_id"], stored.operator_id.to_string());
+                    assert_eq!(json["username"], username);
+                    assert_eq!(json["role"], role);
+                    assert_eq!(json["created_by"], admin.username);
+                    assert!(json["last_login_at"].is_null());
+                    assert!(!body.contains(&stored.password_hash));
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn create_password_boundaries_count_bytes_including_utf8() {
+            let repo = Arc::new(MockRepository::new());
+            let admin = operator(&repo, "credential-password-admin").await;
+            let app = router(AuthMode::Credentials, repo.clone(), MemoryStore::default());
+            let cookie = login(&app, &admin.username).await;
+            for (index, (password, bytes, accepted)) in [
+                ("Ab7!xyz".into(), 7, false),
+                ("Ab8!wxyz".into(), 8, true),
+                ("C9!".repeat(85) + "X", 256, true),
+                ("C9!".repeat(85) + "XY", 257, false),
+                ("é".repeat(3) + "!", 7, false),
+                ("é".repeat(4), 8, true),
+                ("é".repeat(128), 256, true),
+                ("é".repeat(128) + "!", 257, false),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert_eq!(password.len(), bytes);
+                let username = format!("credential-create-byte-{index}");
+                let response = request(&app, "POST", "/v1/operators", Some(&cookie), Some(
+                    serde_json::json!({"username":username,"password":password,"role":"operator"})
+                )).await;
+                public_body(
+                    response,
+                    if accepted {
+                        StatusCode::CREATED
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    &[&password, &admin.password_hash],
+                )
+                .await;
+                let stored = repo.get_operator_by_username(&username).await.unwrap();
+                assert_eq!(stored.is_some(), accepted);
+                if let Some(stored) = stored {
+                    let response = request(
+                        &app,
+                        "POST",
+                        "/v1/auth/login",
+                        None,
+                        Some(serde_json::json!({"username":username,"password":password})),
+                    )
+                    .await;
+                    let body = public_body(
+                        response,
+                        StatusCode::OK,
+                        &[&password, &stored.password_hash],
+                    )
+                    .await;
+                    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+                    assert_eq!(
+                        json,
+                        serde_json::json!({
+                            "operator_id":stored.operator_id,"username":username,"role":"operator"
+                        })
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn login_validates_username_policy_and_password_bytes_without_create_minimum() {
+            let repo = Arc::new(MockRepository::new());
+            let seed = operator(&repo, "credential-login-seed").await;
+            let app = router(AuthMode::Credentials, repo.clone(), MemoryStore::default());
+            for (username, accepted) in [
+                ("L".repeat(64), true),
+                ("L".repeat(65), false),
+                ("Login_09-".into(), true),
+                ("".into(), false),
+                ("login space".into(), false),
+                ("login/slash".into(), false),
+                ("login.dot".into(), false),
+                ("loginé".into(), false),
+                ("login\0name".into(), false),
+            ] {
+                let stored = repo
+                    .create_operator(&username, &seed.password_hash, OperatorRole::Viewer, None)
+                    .await
+                    .unwrap();
+                let response = request(
+                    &app,
+                    "POST",
+                    "/v1/auth/login",
+                    None,
+                    Some(serde_json::json!({"username":username,"password":PASSWORD})),
+                )
+                .await;
+                let body = public_body(
+                    response,
+                    if accepted {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    &[PASSWORD, &seed.password_hash],
+                )
+                .await;
+                if accepted {
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                        serde_json::json!({
+                            "operator_id":stored.operator_id,"username":username,"role":"viewer"
+                        })
+                    );
+                }
+                assert_eq!(
+                    repo.get_operator_by_id(stored.operator_id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .password_hash,
+                    stored.password_hash
+                );
+            }
+            let salt = SaltString::encode_b64(b"credential-boundary-test").unwrap();
+            for (index, (password, bytes, accepted)) in [
+                (String::new(), 0, false),
+                ("!".into(), 1, true),
+                ("Ab7!xyz".into(), 7, true),
+                ("L8!".repeat(85) + "X", 256, true),
+                ("L8!".repeat(85) + "XY", 257, false),
+                ("é".repeat(3) + "!", 7, true),
+                ("é".repeat(128), 256, true),
+                ("é".repeat(128) + "!", 257, false),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                assert_eq!(password.len(), bytes);
+                let hash = Argon2::default()
+                    .hash_password(password.as_bytes(), &salt)
+                    .unwrap()
+                    .to_string();
+                let username = format!("credential-login-byte-{index}");
+                let stored = repo
+                    .create_operator(&username, &hash, OperatorRole::Viewer, None)
+                    .await
+                    .unwrap();
+                let response = request(
+                    &app,
+                    "POST",
+                    "/v1/auth/login",
+                    None,
+                    Some(serde_json::json!({"username":username,"password":password})),
+                )
+                .await;
+                // Exact successful fields exclude plaintext even for the one-byte password.
+                let mut secrets = vec![hash.as_str()];
+                if bytes > 1 {
+                    secrets.push(password.as_str());
+                }
+                let body = public_body(
+                    response,
+                    if accepted {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::BAD_REQUEST
+                    },
+                    &secrets,
+                )
+                .await;
+                if accepted {
+                    assert_eq!(
+                        serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                        serde_json::json!({
+                            "operator_id":stored.operator_id,"username":username,"role":"viewer"
+                        })
+                    );
+                }
+                assert_eq!(
+                    repo.get_operator_by_id(stored.operator_id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .password_hash,
+                    hash
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn operator_management_requires_admin_and_prevents_self_deletion() {
+            let repo = Arc::new(MockRepository::new());
+            let admin = operator(&repo, "credential-management-admin").await;
+            let app = router(AuthMode::Credentials, repo.clone(), MemoryStore::default());
+            let admin_cookie = login(&app, &admin.username).await;
+            let mut callers = vec![(None, StatusCode::UNAUTHORIZED)];
+            for (username, role) in [
+                ("credential-management-operator", OperatorRole::Operator),
+                ("credential-management-viewer", OperatorRole::Viewer),
+            ] {
+                repo.create_operator(username, &admin.password_hash, role, None)
+                    .await
+                    .unwrap();
+                callers.push((Some(login(&app, username).await), StatusCode::FORBIDDEN));
+            }
+            for (cookie, status) in callers {
+                let response = request(&app, "POST", "/v1/operators", cookie.as_deref(), Some(
+                    serde_json::json!({"username":"credential-denied-create","password":PASSWORD,"role":"admin"})
+                )).await;
+                public_body(response, status, &[PASSWORD, &admin.password_hash]).await;
+                assert!(
+                    repo.get_operator_by_username("credential-denied-create")
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                let response = request(
+                    &app,
+                    "DELETE",
+                    &format!("/v1/operators/{}", admin.operator_id),
+                    cookie.as_deref(),
+                    None,
+                )
+                .await;
+                public_body(response, status, &[&admin.password_hash]).await;
+                let response = request(&app, "PUT", &format!("/v1/operators/{}/password", admin.operator_id), cookie.as_deref(), Some(
+                    serde_json::json!({"current_password":PASSWORD,"new_password":"denied-password-marker"})
+                )).await;
+                public_body(
+                    response,
+                    status,
+                    &[PASSWORD, "denied-password-marker", &admin.password_hash],
+                )
+                .await;
+                assert_eq!(
+                    repo.get_operator_by_id(admin.operator_id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .password_hash,
+                    admin.password_hash
+                );
+            }
+            let response = request(
+                &app,
+                "DELETE",
+                &format!("/v1/operators/{}", admin.operator_id),
+                Some(&admin_cookie),
+                None,
+            )
+            .await;
+            public_body(response, StatusCode::BAD_REQUEST, &[&admin.password_hash]).await;
+            login(&app, &admin.username).await;
+            let target = repo
+                .get_operator_by_username("credential-management-viewer")
+                .await
+                .unwrap()
+                .unwrap();
+            let response = request(
+                &app,
+                "DELETE",
+                &format!("/v1/operators/{}", target.operator_id),
+                Some(&admin_cookie),
+                None,
+            )
+            .await;
+            assert!(
+                public_body(response, StatusCode::NO_CONTENT, &[&target.password_hash])
+                    .await
+                    .is_empty()
+            );
+            assert!(
+                repo.get_operator_by_id(target.operator_id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let response = request(
+                &app,
+                "DELETE",
+                &format!("/v1/operators/{}", target.operator_id),
+                Some(&admin_cookie),
+                None,
+            )
+            .await;
+            public_body(response, StatusCode::NOT_FOUND, &[&target.password_hash]).await;
+        }
+
+        #[tokio::test]
+        async fn self_password_changes_require_current_even_for_admin_and_preserve_rejections() {
+            let repo = Arc::new(MockRepository::new());
+            let seed = operator(&repo, "credential-self-seed").await;
+            let app = router(AuthMode::Credentials, repo.clone(), MemoryStore::default());
+            for (username, role) in [
+                ("credential-self-viewer", OperatorRole::Viewer),
+                ("credential-self-admin", OperatorRole::Admin),
+            ] {
+                let target = repo
+                    .create_operator(username, &seed.password_hash, role.clone(), None)
+                    .await
+                    .unwrap();
+                let cookie = login(&app, username).await;
+                let path = format!("/v1/operators/{}/password", target.operator_id);
+                for (current, new) in [
+                    (None, "self-change-marker".to_string()),
+                    (Some(""), "self-change-marker".to_string()),
+                    (
+                        Some("wrong-current-marker"),
+                        "self-change-marker".to_string(),
+                    ),
+                    (Some(PASSWORD), "Ab7!xyz".to_string()),
+                    (Some(PASSWORD), "S9!".repeat(85) + "XY"),
+                    (Some(PASSWORD), "é".repeat(3) + "!"),
+                    (Some(PASSWORD), "é".repeat(128) + "!"),
+                ] {
+                    let mut body = serde_json::json!({"new_password":new});
+                    if let Some(current) = current {
+                        body["current_password"] = current.into();
+                    }
+                    let response = request(&app, "PUT", &path, Some(&cookie), Some(body)).await;
+                    public_body(
+                        response,
+                        StatusCode::BAD_REQUEST,
+                        &[
+                            PASSWORD,
+                            &new,
+                            &target.password_hash,
+                            "wrong-current-marker",
+                        ],
+                    )
+                    .await;
+                    assert_eq!(
+                        repo.get_operator_by_id(target.operator_id)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .password_hash,
+                        target.password_hash
+                    );
+                    login(&app, username).await;
+                }
+                let new = "é".repeat(4);
+                assert_eq!(new.len(), 8);
+                let response = request(
+                    &app,
+                    "PUT",
+                    &path,
+                    Some(&cookie),
+                    Some(serde_json::json!({
+                        "current_password":PASSWORD,"new_password":new
+                    })),
+                )
+                .await;
+                assert!(
+                    public_body(
+                        response,
+                        StatusCode::NO_CONTENT,
+                        &[PASSWORD, &new, &target.password_hash]
+                    )
+                    .await
+                    .is_empty()
+                );
+                let changed = repo
+                    .get_operator_by_id(target.operator_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_ne!(changed.password_hash, target.password_hash);
+                for (password, status) in [
+                    (PASSWORD, StatusCode::UNAUTHORIZED),
+                    (new.as_str(), StatusCode::OK),
+                ] {
+                    let response = request(
+                        &app,
+                        "POST",
+                        "/v1/auth/login",
+                        None,
+                        Some(serde_json::json!({"username":username,"password":password})),
+                    )
+                    .await;
+                    let body = public_body(
+                        response,
+                        status,
+                        &[
+                            PASSWORD,
+                            &new,
+                            &target.password_hash,
+                            &changed.password_hash,
+                        ],
+                    )
+                    .await;
+                    if status == StatusCode::OK {
+                        assert_eq!(
+                            serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                            serde_json::json!({
+                                "operator_id":target.operator_id,"username":username,"role":role.to_string()
+                            })
+                        );
+                    }
+                }
+                let response = request(&app, "GET", "/v1/auth/me", Some(&cookie), None).await;
+                public_body(
+                    response,
+                    StatusCode::UNAUTHORIZED,
+                    &[&target.password_hash, &changed.password_hash],
+                )
+                .await;
+            }
+        }
+
+        #[tokio::test]
+        async fn other_user_password_changes_require_admin_and_missing_reset_is_not_found() {
+            let repo = Arc::new(MockRepository::new());
+            let admin = operator(&repo, "credential-reset-admin").await;
+            let target = repo
+                .create_operator(
+                    "credential-reset-target",
+                    &admin.password_hash,
+                    OperatorRole::Operator,
+                    None,
+                )
+                .await
+                .unwrap();
+            let app = router(AuthMode::Credentials, repo.clone(), MemoryStore::default());
+            let path = format!("/v1/operators/{}/password", target.operator_id);
+            for (username, role) in [
+                ("credential-foreign-viewer", OperatorRole::Viewer),
+                ("credential-foreign-operator", OperatorRole::Operator),
+            ] {
+                repo.create_operator(username, &admin.password_hash, role, None)
+                    .await
+                    .unwrap();
+                let cookie = login(&app, username).await;
+                let response = request(&app, "PUT", &path, Some(&cookie), Some(
+                    serde_json::json!({"current_password":PASSWORD,"new_password":"foreign-change-marker"})
+                )).await;
+                public_body(
+                    response,
+                    StatusCode::FORBIDDEN,
+                    &[PASSWORD, "foreign-change-marker", &target.password_hash],
+                )
+                .await;
+                assert_eq!(
+                    repo.get_operator_by_id(target.operator_id)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .password_hash,
+                    target.password_hash
+                );
+                login(&app, &target.username).await;
+            }
+            let new = "é".repeat(128);
+            assert_eq!(new.len(), 256);
+            let cookie = login(&app, &admin.username).await;
+            let response = request(
+                &app,
+                "PUT",
+                &path,
+                Some(&cookie),
+                Some(serde_json::json!({"new_password":new})),
+            )
+            .await;
+            assert!(
+                public_body(
+                    response,
+                    StatusCode::NO_CONTENT,
+                    &[&new, &target.password_hash]
+                )
+                .await
+                .is_empty()
+            );
+            let changed = repo
+                .get_operator_by_id(target.operator_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(changed.password_hash, target.password_hash);
+            for (password, status) in [
+                (PASSWORD, StatusCode::UNAUTHORIZED),
+                (new.as_str(), StatusCode::OK),
+            ] {
+                let response = request(
+                    &app,
+                    "POST",
+                    "/v1/auth/login",
+                    None,
+                    Some(serde_json::json!({"username":target.username,"password":password})),
+                )
+                .await;
+                public_body(
+                    response,
+                    status,
+                    &[
+                        PASSWORD,
+                        &new,
+                        &target.password_hash,
+                        &changed.password_hash,
+                    ],
+                )
+                .await;
+            }
+            let response = request(
+                &app,
+                "PUT",
+                &format!("/v1/operators/{}/password", uuid::Uuid::new_v4()),
+                Some(&cookie),
+                Some(serde_json::json!({"new_password":"missing-reset-marker"})),
+            )
+            .await;
+            public_body(
+                response,
+                StatusCode::NOT_FOUND,
+                &["missing-reset-marker", &changed.password_hash],
+            )
+            .await;
+            assert_eq!(
+                repo.get_operator_by_id(target.operator_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .password_hash,
+                changed.password_hash
+            );
+            assert_eq!(
+                repo.get_operator_by_id(admin.operator_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .password_hash,
+                admin.password_hash
+            );
+        }
     }
 
     #[derive(Clone, Default)]
@@ -11257,5 +12129,1096 @@ async fn confidence_webhook_preserves_normalization_before_shared_validation() {
             .unwrap()
             .unwrap();
         assert_eq!(event.confidence, Some(*expected));
+    }
+}
+
+mod reason_and_bulk_validation {
+    use super::*;
+    use axum::Router;
+    use prefixd::db::{ListParams, MitigationListParams};
+    use prefixd::domain::{
+        ActionParams, ActionType, FlowSpecRule, MatchCriteria, Mitigation, MitigationIntent,
+        MitigationStatus, mitigation_rule,
+    };
+    use prefixd::observability::ActorType;
+    use serde_json::{Value, json};
+    use uuid::Uuid;
+
+    const OPERATIONS: [&str; 4] = ["manual", "single", "bulk", "safelist"];
+    const TOKEN: &str = "reason-bulk-validation-token";
+
+    struct Fixture {
+        app: Router,
+        repo: Arc<MockRepository>,
+        speaker: Arc<MockAnnouncer>,
+    }
+
+    impl Fixture {
+        fn new(mode: AuthMode) -> Self {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(MockAnnouncer::new());
+            let mut settings = test_settings();
+            settings.mode = prefixd::config::OperationMode::Enforced;
+            let mut state = AppState::new(
+                settings,
+                test_inventory(),
+                test_playbooks(),
+                repo.clone(),
+                speaker.clone(),
+                ".".into(),
+            )
+            .unwrap();
+            // Set this fixture's cached bearer token without touching process environment.
+            let state_mut = Arc::get_mut(&mut state).unwrap();
+            state_mut.settings.http.auth.mode = mode;
+            state_mut.bearer_token = (mode == AuthMode::Bearer).then(|| TOKEN.into());
+            Self {
+                app: create_test_router(state),
+                repo,
+                speaker,
+            }
+        }
+
+        async fn seed(&self, count: u128) -> Vec<Mitigation> {
+            let mut targets = Vec::new();
+            for id in 1..=count {
+                let ip = format!("198.18.0.{id}");
+                let mut row = Mitigation::from_intent(
+                    MitigationIntent {
+                        event_id: Uuid::from_u128(id),
+                        customer_id: None,
+                        service_id: None,
+                        pop: "test1".into(),
+                        match_criteria: MatchCriteria {
+                            dst_prefix: format!("{ip}/32"),
+                            protocol: Some(17),
+                            dst_ports: vec![53],
+                        },
+                        action_type: ActionType::Discard,
+                        action_params: ActionParams { rate_bps: None },
+                        ttl_seconds: 300,
+                        reason: "seed reason".into(),
+                    },
+                    ip,
+                    AttackVector::UdpFlood,
+                );
+                row.mitigation_id = Uuid::from_u128(id);
+                row.activate();
+                self.repo.insert_mitigation(&row).await.unwrap();
+                self.speaker.announce(&mitigation_rule(&row)).await.unwrap();
+                targets.push(row);
+            }
+            targets
+        }
+
+        async fn post(
+            &self,
+            path: &str,
+            payload: &Value,
+            authorized: bool,
+        ) -> axum::response::Response {
+            let mut request = Request::post(path).header("content-type", "application/json");
+            if authorized {
+                request = request.header("authorization", format!("Bearer {TOKEN}"));
+            }
+            self.app
+                .clone()
+                .oneshot(request.body(Body::from(payload.to_string())).unwrap())
+                .await
+                .unwrap()
+        }
+
+        async fn snapshot(&self) -> Value {
+            // Explicit limits observe every seeded row, including the 101-item rejection cases.
+            let mut rows = self
+                .repo
+                .list_mitigations(
+                    None,
+                    None,
+                    None,
+                    None,
+                    &MitigationListParams {
+                        limit: 200,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            rows.sort_by_key(|row| row.mitigation_id);
+            let params = ListParams {
+                limit: 200,
+                ..Default::default()
+            };
+            let pending: Vec<_> = self
+                .repo
+                .pending_withdrawals(None)
+                .await
+                .unwrap()
+                .iter()
+                .map(|request| format!("{request:?}"))
+                .collect();
+            json!({
+                "mitigations": rows,
+                "events": self.repo.list_events(&params).await.unwrap(),
+                "audit": self.repo.list_audit(&params).await.unwrap(),
+                "safelist": self.repo.list_safelist().await.unwrap(),
+                "pending": pending,
+                "rules": rules_value(self.speaker.list_active().await.unwrap()),
+            })
+        }
+    }
+
+    fn rules_value(mut rules: Vec<FlowSpecRule>) -> Value {
+        rules.sort_by_key(FlowSpecRule::nlri_hash);
+        serde_json::to_value(rules).unwrap()
+    }
+
+    fn request(operation: &str, id: Uuid, reason: Option<Value>) -> (String, Value) {
+        let (path, mut payload) = match operation {
+            "manual" => (
+                "/v1/mitigations".into(),
+                json!({
+                    "victim_ip": "203.0.113.10", "protocol": "udp", "dst_ports": [53],
+                    "action": "discard", "ttl_seconds": 120,
+                }),
+            ),
+            "single" => (format!("/v1/mitigations/{id}/withdraw"), json!({})),
+            "bulk" => (
+                "/v1/mitigations/withdraw".into(),
+                json!({"mitigation_ids": [id]}),
+            ),
+            "safelist" => ("/v1/safelist".into(), json!({"prefix": "198.51.100.1/32"})),
+            _ => panic!("unknown test operation"),
+        };
+        payload["operator_id"] = json!("forged-actor");
+        if let Some(reason) = reason {
+            payload["reason"] = reason;
+        }
+        (path, payload)
+    }
+
+    async fn body(response: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn reason_byte_boundaries_preserve_data_and_reject_without_mutation() {
+        let reasons = [
+            (String::new(), 0, true),
+            ("a".repeat(1023), 1023, true),
+            ("a".repeat(1024), 1024, true),
+            (format!("{}a", "é".repeat(511)), 1023, true),
+            ("é".repeat(512), 1024, true),
+            (format!("{}a", "é".repeat(512)), 1025, false),
+            ("a".repeat(1025), 1025, false),
+        ];
+        for operation in OPERATIONS {
+            for (reason, bytes, valid) in &reasons {
+                assert_eq!(
+                    reason.len(),
+                    *bytes,
+                    "fixture must exercise UTF-8 byte bounds"
+                );
+                let fixture = Fixture::new(AuthMode::None);
+                let targets = fixture.seed(2).await;
+                let before = fixture.snapshot().await;
+                assert_eq!(before["mitigations"].as_array().unwrap().len(), 2);
+                assert_eq!(before["rules"].as_array().unwrap().len(), 2);
+                let (path, payload) =
+                    request(operation, targets[0].mitigation_id, Some(json!(reason)));
+                let response = fixture.post(&path, &payload, false).await;
+                let context = format!(
+                    "{operation}, {bytes} UTF-8 bytes, {} Unicode scalars",
+                    reason.chars().count()
+                );
+                if !valid {
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{context}");
+                    if operation == "manual" {
+                        assert_eq!(
+                            body(response).await["error"],
+                            "invalid request: reason exceeds maximum length of 1024 bytes",
+                            "{context}"
+                        );
+                    }
+                    assert_eq!(fixture.snapshot().await, before, "{context}");
+                    continue;
+                }
+                match operation {
+                    "manual" => {
+                        assert_eq!(response.status(), StatusCode::CREATED, "{context}");
+                        let json = body(response).await;
+                        let id = Uuid::parse_str(json["mitigation_id"].as_str().unwrap()).unwrap();
+                        let row = fixture.repo.get_mitigation(id).await.unwrap().unwrap();
+                        assert_eq!(row.reason, *reason);
+                        assert_eq!(row.status, MitigationStatus::Active);
+                        assert_eq!(fixture.speaker.announced_count().await, 3);
+                    }
+                    "single" | "bulk" => {
+                        assert_eq!(response.status(), StatusCode::OK, "{context}");
+                        let json = body(response).await;
+                        if operation == "bulk" {
+                            assert_eq!(json["withdrawn"], 1);
+                            assert_eq!(json["failed"], 0);
+                            assert_eq!(json["results"][0]["status"], "withdrawn");
+                        }
+                        let row = fixture
+                            .repo
+                            .get_mitigation(targets[0].mitigation_id)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(row.status, MitigationStatus::Withdrawn);
+                        assert_eq!(row.reason, format!("anonymous: {reason}"));
+                        let audit = fixture
+                            .repo
+                            .list_audit(&ListParams {
+                                limit: 200,
+                                ..Default::default()
+                            })
+                            .await
+                            .unwrap();
+                        assert_eq!(audit.len(), 1);
+                        assert!(matches!(audit[0].actor_type, ActorType::Operator));
+                        assert_eq!(audit[0].actor_id.as_deref(), Some("anonymous"));
+                        assert_eq!(
+                            audit[0].target_id,
+                            Some(targets[0].mitigation_id.to_string())
+                        );
+                        assert_eq!(audit[0].details["reason"], row.reason);
+                        assert_eq!(audit[0].action, "withdraw");
+                        assert_eq!(
+                            rules_value(fixture.speaker.list_active().await.unwrap()),
+                            rules_value(vec![mitigation_rule(&targets[1])])
+                        );
+                    }
+                    "safelist" => {
+                        assert_eq!(response.status(), StatusCode::CREATED, "{context}");
+                        let entries = fixture.repo.list_safelist().await.unwrap();
+                        assert_eq!(entries.len(), 1);
+                        assert_eq!(entries[0].prefix, "198.51.100.1/32");
+                        assert_eq!(entries[0].added_by, "anonymous");
+                        assert_eq!(entries[0].reason.as_ref(), Some(reason));
+                        assert_eq!(fixture.snapshot().await["rules"], before["rules"]);
+                    }
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    serde_json::to_value(
+                        fixture
+                            .repo
+                            .get_mitigation(targets[1].mitigation_id)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                    )
+                    .unwrap(),
+                    serde_json::to_value(&targets[1]).unwrap()
+                );
+                assert!(
+                    fixture
+                        .repo
+                        .pending_withdrawals(None)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_and_null_reasons_preserve_required_and_optional_json_fields() {
+        for operation in OPERATIONS {
+            for reason in [None, Some(Value::Null)] {
+                let fixture = Fixture::new(AuthMode::None);
+                let targets = fixture.seed(2).await;
+                let before = fixture.snapshot().await;
+                let (path, payload) = request(operation, targets[0].mitigation_id, reason);
+                let response = fixture.post(&path, &payload, false).await;
+                if operation == "safelist" {
+                    assert_eq!(response.status(), StatusCode::CREATED);
+                    let entries = fixture.repo.list_safelist().await.unwrap();
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(entries[0].reason, None);
+                    assert_eq!(entries[0].added_by, "anonymous");
+                    assert_eq!(
+                        fixture.snapshot().await["mitigations"],
+                        before["mitigations"]
+                    );
+                    assert_eq!(fixture.snapshot().await["rules"], before["rules"]);
+                } else {
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "{operation}"
+                    );
+                    assert_eq!(fixture.snapshot().await, before, "{operation}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_list_length_boundaries_preserve_results_actor_and_unrelated_rules() {
+        for operation in ["withdraw", "acknowledge"] {
+            for count in [0, 1, 100, 101] {
+                let fixture = Fixture::new(AuthMode::None);
+                let targets = fixture.seed(101).await;
+                let before = fixture.snapshot().await;
+                assert_eq!(before["mitigations"].as_array().unwrap().len(), 101);
+                assert_eq!(before["rules"].as_array().unwrap().len(), 101);
+                let ids: Vec<_> = targets
+                    .iter()
+                    .take(count)
+                    .map(|row| row.mitigation_id)
+                    .collect();
+                let payload = json!({"mitigation_ids": ids, "operator_id": "forged-actor", "reason": "bulk boundary"});
+                let response = fixture
+                    .post(&format!("/v1/mitigations/{operation}"), &payload, false)
+                    .await;
+                if count == 0 || count == 101 {
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::BAD_REQUEST,
+                        "{operation}: {count}"
+                    );
+                    assert_eq!(fixture.snapshot().await, before, "{operation}: {count}");
+                    continue;
+                }
+                assert_eq!(response.status(), StatusCode::OK, "{operation}: {count}");
+                let json = body(response).await;
+                let (counter, status) = if operation == "withdraw" {
+                    ("withdrawn", "withdrawn")
+                } else {
+                    ("acknowledged", "acknowledged")
+                };
+                assert_eq!(json[counter], count);
+                assert_eq!(json["failed"], 0);
+                let results = json["results"].as_array().unwrap();
+                assert_eq!(results.len(), count);
+                for (result, id) in results.iter().zip(&ids) {
+                    assert_eq!(result["mitigation_id"], id.to_string());
+                    assert_eq!(result["status"], status);
+                    assert!(result.get("error").is_none());
+                }
+                for (index, original) in targets.iter().enumerate() {
+                    let row = fixture
+                        .repo
+                        .get_mitigation(original.mitigation_id)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    if index >= count {
+                        assert_eq!(
+                            serde_json::to_value(row).unwrap(),
+                            serde_json::to_value(original).unwrap()
+                        );
+                    } else if operation == "withdraw" {
+                        assert_eq!(row.status, MitigationStatus::Withdrawn);
+                        assert_eq!(row.reason, "anonymous: bulk boundary");
+                    } else {
+                        assert_eq!(row.status, MitigationStatus::Active);
+                        assert!(row.acknowledged_at.is_some());
+                        assert_eq!(row.acknowledged_by.as_deref(), Some("anonymous"));
+                        assert_eq!(row.reason, original.reason);
+                    }
+                }
+                let remaining = if operation == "withdraw" { count } else { 0 };
+                assert_eq!(
+                    rules_value(fixture.speaker.list_active().await.unwrap()),
+                    rules_value(
+                        targets
+                            .iter()
+                            .skip(remaining)
+                            .map(mitigation_rule)
+                            .collect()
+                    )
+                );
+                if operation == "withdraw" {
+                    let audit = fixture
+                        .repo
+                        .list_audit(&ListParams {
+                            limit: 200,
+                            ..Default::default()
+                        })
+                        .await
+                        .unwrap();
+                    assert_eq!(audit.len(), count);
+                    let mut recorded: Vec<_> = audit
+                        .iter()
+                        .map(|entry| {
+                            assert_eq!(entry.action, "withdraw");
+                            assert!(matches!(entry.actor_type, ActorType::Operator));
+                            assert_eq!(entry.actor_id.as_deref(), Some("anonymous"));
+                            assert_eq!(entry.details["reason"], "anonymous: bulk boundary");
+                            Uuid::parse_str(entry.target_id.as_deref().unwrap()).unwrap()
+                        })
+                        .collect();
+                    recorded.sort();
+                    assert_eq!(recorded, ids);
+                }
+                assert!(
+                    fixture
+                        .repo
+                        .pending_withdrawals(None)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_bulk_uuids_reject_before_any_partial_mutation() {
+        let fixture = Fixture::new(AuthMode::None);
+        let targets = fixture.seed(2).await;
+        let before = fixture.snapshot().await;
+        for operation in ["withdraw", "acknowledge"] {
+            for invalid in [json!(""), json!("not-a-uuid"), json!(42), Value::Null] {
+                let payload = json!({"mitigation_ids": [json!(targets[0].mitigation_id), invalid],
+                    "operator_id": "forged-actor", "reason": "must not partially apply"});
+                let response = fixture
+                    .post(&format!("/v1/mitigations/{operation}"), &payload, false)
+                    .await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "{operation}"
+                );
+                assert_eq!(fixture.snapshot().await, before, "{operation}");
+            }
+        }
+        let response = fixture
+            .post(
+                "/v1/mitigations/not-a-uuid/withdraw",
+                &json!({"reason": "invalid path"}),
+                false,
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(fixture.snapshot().await, before);
+    }
+
+    #[tokio::test]
+    async fn semantic_validation_and_extractor_errors_preserve_auth_precedence() {
+        let fixture = Fixture::new(AuthMode::Bearer);
+        let targets = fixture.seed(2).await;
+        let before = fixture.snapshot().await;
+        for operation in OPERATIONS {
+            let (path, payload) = request(
+                operation,
+                targets[0].mitigation_id,
+                Some(json!("a".repeat(1025))),
+            );
+            assert_eq!(
+                fixture.post(&path, &payload, false).await.status(),
+                StatusCode::UNAUTHORIZED,
+                "{operation}"
+            );
+            let expected = if operation == "safelist" {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            assert_eq!(
+                fixture.post(&path, &payload, true).await.status(),
+                expected,
+                "{operation}"
+            );
+        }
+        for operation in ["withdraw", "acknowledge"] {
+            let path = format!("/v1/mitigations/{operation}");
+            for count in [0, 101] {
+                let ids = vec![targets[0].mitigation_id; count];
+                let payload = json!({"mitigation_ids": ids, "reason": "auth first"});
+                assert_eq!(
+                    fixture.post(&path, &payload, false).await.status(),
+                    StatusCode::UNAUTHORIZED
+                );
+                assert_eq!(
+                    fixture.post(&path, &payload, true).await.status(),
+                    StatusCode::BAD_REQUEST
+                );
+            }
+            let payload = json!({"mitigation_ids": [targets[0].mitigation_id, "invalid"], "reason": "extractor first"});
+            for authorized in [false, true] {
+                assert_eq!(
+                    fixture.post(&path, &payload, authorized).await.status(),
+                    StatusCode::UNPROCESSABLE_ENTITY
+                );
+            }
+        }
+        for authorized in [false, true] {
+            assert_eq!(
+                fixture
+                    .post(
+                        "/v1/mitigations/not-a-uuid/withdraw",
+                        &json!({"reason": "extractor first"}),
+                        authorized
+                    )
+                    .await
+                    .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(fixture.snapshot().await, before);
+    }
+}
+
+mod query_router_validator_boundaries {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use prefixd::correlation::{CorroboratingSignal, engine::CorrelationEngine};
+    use prefixd::domain::{
+        ActionParams, ActionType, AttackEvent, AttackEventInput, MatchCriteria, Mitigation,
+        MitigationIntent,
+    };
+    use prefixd::observability::{ActorType, AuditEntry};
+    use uuid::Uuid;
+
+    async fn response_json(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn get_json(app: &axum::Router, uri: &str) -> serde_json::Value {
+        let response = app
+            .clone()
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        response_json(response).await
+    }
+
+    #[tokio::test]
+    async fn general_list_and_ip_history_limits_use_real_rows() {
+        let (app, repo) = setup_app_correlation_with_repo(1, 0.5).await;
+        let now = Utc::now();
+        for id in 1_u128..=1001 {
+            let mut event = AttackEvent::from_input(AttackEventInput {
+                event_id: None,
+                timestamp: now,
+                source: "query-boundary".into(),
+                victim_ip: "203.0.113.10".into(),
+                vector: AttackVector::UdpFlood,
+                bps: None,
+                pps: None,
+                top_dst_ports: None,
+                confidence: None,
+                action: "ban".into(),
+                raw_details: None,
+            });
+            event.event_id = Uuid::from_u128(id);
+            event.ingested_at = now;
+            repo.insert_event(&event).await.unwrap();
+            let mut mitigation = Mitigation::from_intent(
+                MitigationIntent {
+                    event_id: event.event_id,
+                    customer_id: None,
+                    service_id: None,
+                    pop: "test1".into(),
+                    match_criteria: MatchCriteria {
+                        dst_prefix: "203.0.113.10/32".into(),
+                        protocol: Some(17),
+                        dst_ports: vec![u16::try_from(id).unwrap()],
+                    },
+                    action_type: ActionType::Discard,
+                    action_params: ActionParams { rate_bps: None },
+                    ttl_seconds: 300,
+                    reason: "query boundary fixture".into(),
+                },
+                "203.0.113.10".into(),
+                AttackVector::UdpFlood,
+            );
+            mitigation.mitigation_id = Uuid::from_u128(id);
+            mitigation.created_at = now;
+            repo.insert_mitigation(&mitigation).await.unwrap();
+            // Explicit fixture entries: this test does not assume event ingestion writes audit rows.
+            let mut audit = AuditEntry::new(
+                ActorType::System,
+                None,
+                "query-boundary",
+                None,
+                None,
+                serde_json::json!({}),
+            );
+            audit.audit_id = Uuid::from_u128(id);
+            audit.timestamp = now;
+            repo.insert_audit(&audit).await.unwrap();
+            let mut group = CorrelationEngine::create_group(
+                &format!("198.18.{}.{}", id / 256, id % 256),
+                "udp_flood",
+                3600,
+            );
+            group.group_id = Uuid::from_u128(id);
+            group.created_at = now;
+            assert_eq!(
+                repo.insert_signal_group(&group).await.unwrap().group_id,
+                group.group_id
+            );
+        }
+        for (endpoint, rows_key, id_key, prefix) in [
+            ("mitigations", "mitigations", "mitigation_id", "m1."),
+            ("events", "events", "event_id", "e1."),
+            ("audit", "entries", "audit_id", "a1."),
+            ("signal-groups", "groups", "group_id", "s1."),
+        ] {
+            for (limit, count) in [
+                (None, 100_usize),
+                (Some("0"), 0),
+                (Some("1"), 1),
+                (Some("1000"), 1000),
+                (Some("1001"), 1000),
+                (Some("4294967295"), 1000),
+            ] {
+                let query = limit
+                    .map(|value| format!("?limit={value}"))
+                    .unwrap_or_default();
+                let uri = format!("/v1/{endpoint}{query}");
+                let page = get_json(&app, &uri).await;
+                let rows = page[rows_key].as_array().unwrap();
+                assert_eq!(page["count"], count, "{uri}");
+                assert_eq!(rows.len(), count, "{uri}");
+                assert_eq!(page["has_more"], true, "{uri}");
+                for (index, row) in rows.iter().enumerate() {
+                    assert_eq!(
+                        row[id_key],
+                        Uuid::from_u128(1001 - index as u128).to_string(),
+                        "{uri}"
+                    );
+                }
+                if count == 0 {
+                    // Existing policy preserves zero; there is no last row to encode a cursor.
+                    assert!(page["next_cursor"].is_null(), "{uri}");
+                    continue;
+                }
+                let cursor = page["next_cursor"].as_str().unwrap();
+                assert!(cursor.starts_with(prefix), "{uri}");
+                if count == 1 || count == 1000 {
+                    let next = get_json(
+                        &app,
+                        &format!("/v1/{endpoint}?limit={}&cursor={cursor}", limit.unwrap()),
+                    )
+                    .await;
+                    let remaining = (1001 - count).min(count);
+                    assert_eq!(next["count"], remaining);
+                    assert_eq!(next[rows_key].as_array().unwrap().len(), remaining);
+                    assert_eq!(
+                        next[rows_key][0][id_key],
+                        Uuid::from_u128((1001 - count) as u128).to_string()
+                    );
+                    assert_eq!(next["has_more"], count == 1);
+                    assert_eq!(next["next_cursor"].is_string(), count == 1);
+                }
+            }
+            for invalid in ["", "not-a-number", "-1", "1.5", "4294967296"] {
+                let uri = format!("/v1/{endpoint}?limit={invalid}");
+                let response = app
+                    .clone()
+                    .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            }
+        }
+        for (query, expected) in [
+            ("", 100_usize),
+            ("?limit=0", 0),
+            ("?limit=1", 1),
+            ("?limit=1000", 1000),
+            ("?limit=1001", 1000),
+        ] {
+            let uri = format!("/v1/ip/203.0.113.10/history{query}");
+            let history = get_json(&app, &uri).await;
+            assert_eq!(history["ip"], "203.0.113.10");
+            for (key, id_key) in [("events", "event_id"), ("mitigations", "mitigation_id")] {
+                let rows = history[key].as_array().unwrap();
+                assert_eq!(rows.len(), expected, "{uri}: {key}");
+                let ids: std::collections::BTreeSet<_> = rows
+                    .iter()
+                    .map(|row| {
+                        Uuid::parse_str(row[id_key].as_str().unwrap())
+                            .unwrap()
+                            .as_u128()
+                    })
+                    .collect();
+                assert_eq!(ids, (1..=expected as u128).collect(), "{uri}: {key}");
+            }
+        }
+        for invalid in ["", "not-a-number", "-1", "1.5", "4294967296"] {
+            let uri = format!("/v1/ip/203.0.113.10/history?limit={invalid}");
+            let response = app
+                .clone()
+                .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn preferences_quiet_hour_boundaries_preserve_state_and_extractor_auth_order() {
+        let app = setup_app_with_bearer().await;
+        for (start, end) in [
+            (None, None),
+            (Some(0), Some(23)),
+            (Some(23), Some(0)),
+            (Some(0), Some(0)),
+            (Some(23), Some(23)),
+        ] {
+            let prefs = serde_json::json!({"muted_events": [], "quiet_hours_start": start, "quiet_hours_end": end});
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::put("/v1/preferences")
+                        .header("authorization", "Bearer test-secret-token-123")
+                        .header("content-type", "application/json")
+                        .body(Body::from(prefs.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get("/v1/preferences")
+                        .header("authorization", "Bearer test-secret-token-123")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response_json(response).await, prefs);
+        }
+        for (start, end, expected) in [
+            (
+                serde_json::json!(-1),
+                serde_json::json!(23),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!(24),
+                serde_json::json!(0),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!(0),
+                serde_json::json!(-1),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!(23),
+                serde_json::json!(24),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!(0),
+                serde_json::Value::Null,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::Value::Null,
+                serde_json::json!(0),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!("0"),
+                serde_json::json!(23),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                serde_json::json!(0),
+                serde_json::json!(1.5),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                serde_json::json!(32768),
+                serde_json::json!(23),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            let prefs = serde_json::json!({"muted_events": [], "quiet_hours_start": start, "quiet_hours_end": end});
+            for authenticated in [false, true] {
+                let mut request =
+                    Request::put("/v1/preferences").header("content-type", "application/json");
+                if authenticated {
+                    request = request.header("authorization", "Bearer test-secret-token-123");
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(Body::from(prefs.to_string())).unwrap())
+                    .await
+                    .unwrap();
+                let status = if !authenticated && expected == StatusCode::BAD_REQUEST {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    expected
+                };
+                assert_eq!(
+                    response.status(),
+                    status,
+                    "prefs={prefs}, authenticated={authenticated}"
+                );
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get("/v1/preferences")
+                        .header("authorization", "Bearer test-secret-token-123")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response_json(response).await,
+                serde_json::json!({"muted_events": [], "quiet_hours_start": 23, "quiet_hours_end": 23})
+            );
+        }
+        for authenticated in [false, true] {
+            let mut request =
+                Request::put("/v1/preferences").header("content-type", "application/json");
+            if authenticated {
+                request = request.header("authorization", "Bearer test-secret-token-123");
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::from("{")).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        for method in ["GET", "PUT"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/v1/preferences")
+                        .header("content-type", "application/json")
+                        .body(Body::from("{}"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    #[tokio::test]
+    async fn incident_report_selector_and_query_extractor_boundaries() {
+        let app = setup_app_with_bearer().await;
+        let missing_id = Uuid::new_v4();
+        for (query, expected, extracted) in [
+            ("ip=203.0.113.10".to_owned(), StatusCode::OK, true),
+            (
+                format!("mitigation_id={missing_id}"),
+                StatusCode::NOT_FOUND,
+                true,
+            ),
+            (
+                format!("mitigation_id={missing_id}&ip=203.0.113.10"),
+                StatusCode::BAD_REQUEST,
+                true,
+            ),
+            ("ip=not-an-ip".to_owned(), StatusCode::BAD_REQUEST, true),
+            (
+                "mitigation_id=not-a-uuid".to_owned(),
+                StatusCode::BAD_REQUEST,
+                false,
+            ),
+        ] {
+            for authenticated in [false, true] {
+                let mut request = Request::get(format!("/v1/reports/incident?{query}"));
+                if authenticated {
+                    request = request.header("authorization", "Bearer test-secret-token-123");
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                let status = if !authenticated && extracted {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    expected
+                };
+                assert_eq!(
+                    response.status(),
+                    status,
+                    "{query}, authenticated={authenticated}"
+                );
+                if status == StatusCode::OK {
+                    assert!(
+                        response.headers()["content-type"]
+                            .to_str()
+                            .unwrap()
+                            .contains("text/markdown")
+                    );
+                    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                        .await
+                        .unwrap();
+                    assert!(
+                        String::from_utf8(body.to_vec())
+                            .unwrap()
+                            .contains("203.0.113.10")
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn corroborator_query_clamps_preserve_rows_and_activity_window() {
+        let (app, repo) = setup_app_correlation_with_repo(1, 0.5).await;
+        let now = Utc::now();
+        for id in 1_u128..=1005 {
+            let age = match id {
+                1002 => Duration::minutes(2),
+                1003 => Duration::minutes(90),
+                1004 => Duration::hours(23),
+                1005 => Duration::hours(25),
+                _ => Duration::seconds(30),
+            };
+            repo.insert_corroborating_signal(&CorroboratingSignal {
+                signal_id: Uuid::from_u128(id),
+                source: "router-cpu".into(),
+                vector: None,
+                customer_id: None,
+                pop: Some("test1".into()),
+                service_id: None,
+                interface: None,
+                confidence: Some(0.5),
+                weight: 0.5,
+                ingested_at: now - age,
+                expires_at: now + Duration::hours(1),
+                raw_details: None,
+                attached_group_ids: if id > 1001 {
+                    vec![Uuid::new_v4()]
+                } else {
+                    vec![]
+                },
+            })
+            .await
+            .unwrap();
+        }
+        for (query, expected) in [
+            ("", 100_usize),
+            ("?limit=0", 1),
+            ("?limit=1", 1),
+            ("?limit=1000", 1000),
+            ("?limit=1001", 1000),
+            ("?limit=4294967295", 1000),
+        ] {
+            let page = get_json(&app, &format!("/v1/signals/corroborator/cache{query}")).await;
+            let signals = page["signals"].as_array().unwrap();
+            assert_eq!(signals.len(), expected, "{query}");
+            assert_eq!(page["total"], 1001);
+            assert_eq!(
+                page["by_source"],
+                serde_json::json!([{"source": "router-cpu", "count": 1001}])
+            );
+            for signal in signals {
+                assert!(signal["attached_group_ids"].as_array().unwrap().is_empty());
+                assert_eq!(signal["source"], "router-cpu");
+            }
+        }
+        for (query, minutes, expected) in [
+            ("", 60, 1002),
+            ("?minutes=0", 1, 1001),
+            ("?minutes=1", 1, 1001),
+            ("?minutes=1440", 1440, 1004),
+            ("?minutes=1441", 1440, 1004),
+            ("?minutes=4294967295", 1440, 1004),
+        ] {
+            let before = Utc::now();
+            let activity =
+                get_json(&app, &format!("/v1/signals/corroborator/activity{query}")).await;
+            let after = Utc::now();
+            let since = activity["since"]
+                .as_str()
+                .unwrap()
+                .parse::<chrono::DateTime<Utc>>()
+                .unwrap();
+            let window = Duration::minutes(minutes);
+            assert!(
+                since >= before - window && since <= after - window,
+                "{query}"
+            );
+            assert_eq!(activity["sources"].as_array().unwrap().len(), 1);
+            assert_eq!(activity["sources"][0]["source"], "router-cpu");
+            assert_eq!(activity["sources"][0]["count"], expected, "{query}");
+            assert_eq!(
+                activity["sources"][0]["last_seen"],
+                serde_json::json!(now - Duration::seconds(30))
+            );
+        }
+        for (endpoint, parameter) in [("cache", "limit"), ("activity", "minutes")] {
+            for invalid in ["", "not-a-number", "-1", "1.5", "4294967296"] {
+                let uri = format!("/v1/signals/corroborator/{endpoint}?{parameter}={invalid}");
+                let response = app
+                    .clone()
+                    .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_router_body_limit_accepts_exact_mib_and_rejects_one_more() {
+        let (app, repo) = setup_app_correlation_with_repo(1, 0.5).await;
+        const LIMIT: usize = 1024 * 1024;
+        for declared in [false, true] {
+            for (length, expected) in [
+                (LIMIT, StatusCode::ACCEPTED),
+                (LIMIT + 1, StatusCode::PAYLOAD_TOO_LARGE),
+            ] {
+                let external_id = format!("body-boundary-{declared}-{length}");
+                let payload = serde_json::json!({
+                    "event_id": external_id, "timestamp": Utc::now(), "source": "detector_a",
+                    "victim_ip": "203.0.113.10", "vector": "udp_flood", "confidence": 0.9,
+                    "bps": 100000000, "pps": 50000, "top_dst_ports": [53],
+                });
+                let mut body = payload.to_string();
+                body.push_str(&" ".repeat(length - body.len()));
+                assert_eq!(body.len(), length);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                    payload
+                );
+                let mut request =
+                    Request::post("/v1/events").header("content-type", "application/json");
+                if declared {
+                    request = request.header("content-length", length.to_string());
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(Body::from(body)).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    expected,
+                    "declared={declared}, length={length}"
+                );
+                let persisted = repo
+                    .find_ban_event_by_external_id("detector_a", &external_id)
+                    .await
+                    .unwrap();
+                assert_eq!(persisted.is_some(), expected == StatusCode::ACCEPTED);
+            }
+        }
     }
 }
