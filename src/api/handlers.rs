@@ -16,7 +16,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::db::{ListParams, NotificationPreferences};
+use crate::db::{ListParams, MitigationCursor, MitigationListParams, NotificationPreferences};
 use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackEventInput, AttackVector, FlowSpecAction,
     FlowSpecNlri, FlowSpecRule, MatchCriteria, Mitigation, MitigationIntent, MitigationStatus,
@@ -37,6 +37,37 @@ fn decode_cursor(cursor: &str) -> Option<DateTime<Utc>> {
     let bytes = URL_SAFE_NO_PAD.decode(cursor).ok()?;
     let s = std::str::from_utf8(&bytes).ok()?;
     s.parse::<DateTime<Utc>>().ok()
+}
+
+const MAX_MITIGATION_CURSOR_LEN: usize = 128;
+const MITIGATION_CURSOR_PREFIX: &str = "m1.";
+
+fn encode_mitigation_cursor(mitigation: &Mitigation) -> String {
+    let position = format!(
+        "{}\n{}",
+        mitigation.created_at.to_rfc3339(),
+        mitigation.mitigation_id
+    );
+    format!(
+        "{MITIGATION_CURSOR_PREFIX}{}",
+        URL_SAFE_NO_PAD.encode(position.as_bytes())
+    )
+}
+
+fn decode_mitigation_cursor(value: &str) -> Option<MitigationCursor> {
+    if value.len() > MAX_MITIGATION_CURSOR_LEN || !value.is_ascii() {
+        return None;
+    }
+    let encoded = value.strip_prefix(MITIGATION_CURSOR_PREFIX)?;
+    let bytes = URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    let decoded = std::str::from_utf8(&bytes).ok()?;
+    let (created_at, mitigation_id) = decoded.split_once('\n')?;
+    Some(MitigationCursor {
+        created_at: DateTime::parse_from_rfc3339(created_at)
+            .ok()?
+            .with_timezone(&Utc),
+        mitigation_id: mitigation_id.parse().ok()?,
+    })
 }
 
 // Response types
@@ -1430,12 +1461,13 @@ pub async fn list_audit(
         ("pop" = Option<String>, Query, description = "Filter by POP, use 'all' for cross-POP"),
         ("acknowledged" = Option<bool>, Query, description = "Filter by acknowledged status"),
         ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
-        ("cursor" = Option<String>, Query, description = "Cursor for pagination (from previous response)"),
+        ("cursor" = Option<String>, Query, description = "Opaque m1 continuation from next_cursor (max 128 bytes); superseded timestamp-only cursors are rejected"),
         ("start" = Option<String>, Query, description = "Start of date range (ISO 8601, inclusive)"),
         ("end" = Option<String>, Query, description = "End of date range (ISO 8601, exclusive)"),
     ),
     responses(
-        (status = 200, description = "List of mitigations", body = MitigationsListResponse)
+        (status = 200, description = "List of mitigations", body = MitigationsListResponse),
+        (status = 400, description = "Invalid or superseded mitigation cursor", body = ErrorResponse)
     )
 )]
 pub async fn list_mitigations(
@@ -1443,7 +1475,7 @@ pub async fn list_mitigations(
     auth_session: AuthSession,
     headers: HeaderMap,
     Query(query): Query<ListMitigationsQuery>,
-) -> Result<Json<MitigationsListResponse>, StatusCode> {
+) -> Result<axum::response::Response, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
@@ -1453,8 +1485,16 @@ pub async fn list_mitigations(
         .map(|s| s.split(',').filter_map(|st| st.parse().ok()).collect());
 
     let limit = clamp_limit(query.limit);
-    let cursor = query.cursor.as_deref().and_then(decode_cursor);
-    let params = ListParams {
+    let cursor = match query.cursor.as_deref() {
+        None => None,
+        Some(value) => match decode_mitigation_cursor(value) {
+            Some(cursor) => Some(cursor),
+            None => return Ok(AppError(PrefixdError::InvalidRequest(
+                "invalid mitigation cursor; use next_cursor from a fresh mitigation listing (m1, at most 128 bytes)".into(),
+            )).into_response()),
+        },
+    };
+    let params = MitigationListParams {
         limit: limit + 1,
         cursor,
         start: query.start.as_deref().and_then(parse_datetime),
@@ -1492,7 +1532,7 @@ pub async fn list_mitigations(
         mitigations.truncate(limit as usize);
     }
     let next_cursor = if has_more {
-        mitigations.last().map(|m| encode_cursor(&m.created_at))
+        mitigations.last().map(encode_mitigation_cursor)
     } else {
         None
     };
@@ -1537,7 +1577,8 @@ pub async fn list_mitigations(
         count,
         next_cursor,
         has_more,
-    }))
+    })
+    .into_response())
 }
 
 /// Get a specific mitigation by ID

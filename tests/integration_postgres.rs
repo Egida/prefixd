@@ -96,7 +96,7 @@ async fn test_full_event_to_mitigation_flow() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -148,7 +148,7 @@ async fn test_mitigation_withdrawal() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -701,7 +701,7 @@ async fn test_safelist_blocks_mitigation() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -757,7 +757,7 @@ async fn test_duplicate_event_extends_ttl() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -800,7 +800,7 @@ async fn test_duplicate_event_extends_ttl() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -2510,6 +2510,161 @@ fn inventory_mitigation(
     mitigation.created_at = created_at;
     mitigation.updated_at = created_at;
     mitigation
+}
+
+#[tokio::test]
+async fn test_public_mitigation_cursor_is_complete_filtered_and_strict() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use chrono::{DateTime, Duration, SecondsFormat, Utc};
+    use std::collections::BTreeSet;
+    use uuid::Uuid;
+
+    async fn page(app: &axum::Router, uri: &str) -> serde_json::Value {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    let ctx = TestContext::new().await;
+    let app = ctx.router().await;
+    let empty = page(&app, "/v1/mitigations?limit=2").await;
+    assert_eq!(empty["count"], 0);
+    assert_eq!(empty["has_more"], false);
+    assert!(empty["next_cursor"].is_null());
+
+    let timestamp: DateTime<Utc> = "2026-10-18T12:00:00.123456Z".parse().unwrap();
+    // Seven eligible ties, six independently excluded rows, and shuffled insertion order.
+    for id in [7_u128, 1, 5, 2, 6, 3, 4, 8, 9, 10, 11, 12, 13] {
+        let mut mitigation = inventory_mitigation(
+            "203.0.113.10/32",
+            "test1",
+            timestamp,
+            if id % 2 == 0 {
+                MitigationStatus::Escalated
+            } else {
+                MitigationStatus::Active
+            },
+        );
+        mitigation.mitigation_id = Uuid::from_u128(id);
+        mitigation.customer_id = Some("cursor_customer".into());
+        mitigation.match_criteria.dst_ports = vec![1000 + u16::try_from(id).unwrap()];
+        match id {
+            8 => mitigation.created_at = timestamp - Duration::microseconds(1),
+            9 => mitigation.created_at = timestamp + Duration::seconds(1),
+            10 => mitigation.status = MitigationStatus::Withdrawn,
+            11 => mitigation.customer_id = Some("other_customer".into()),
+            12 => {
+                mitigation.victim_ip = "203.0.113.11".into();
+                mitigation.match_criteria.dst_prefix = "203.0.113.11/32".into();
+            }
+            _ => {}
+        }
+        mitigation.scope_hash = mitigation.match_criteria.compute_scope_hash();
+        ctx.repo.insert_mitigation(&mitigation).await.unwrap();
+    }
+    // Acknowledgement is persisted separately from initial mitigation insertion.
+    let acknowledged_ids: Vec<_> = (1..=12).map(Uuid::from_u128).collect();
+    let acknowledged = ctx
+        .repo
+        .acknowledge_mitigations(&acknowledged_ids, "cursor-operator")
+        .await
+        .unwrap();
+    assert_eq!(
+        acknowledged.into_iter().collect::<BTreeSet<_>>(),
+        acknowledged_ids.into_iter().collect::<BTreeSet<_>>(),
+        "all twelve intended fixture rows must be acknowledged"
+    );
+    let start = timestamp.to_rfc3339_opts(SecondsFormat::Micros, true);
+    let end = (timestamp + Duration::seconds(1)).to_rfc3339_opts(SecondsFormat::Micros, true);
+    let filters = format!(
+        "status=active,escalated&customer_id=cursor_customer&victim_ip=203.0.113.10&acknowledged=true&start={start}&end={end}"
+    );
+    for suffix in ["", "&pop=all"] {
+        let mut cursor = None;
+        let mut ordered = Vec::new();
+        let mut unique = BTreeSet::new();
+        for (page_index, expected_count) in [2, 2, 2, 1].into_iter().enumerate() {
+            let mut uri = format!("/v1/mitigations?limit=2&{filters}{suffix}");
+            if let Some(value) = &cursor {
+                uri.push_str(&format!("&cursor={value}"));
+            }
+            let json = page(&app, &uri).await;
+            assert_eq!(
+                json["count"],
+                expected_count,
+                "page {} cursor_present={} all_pops={}",
+                page_index + 1,
+                cursor.is_some(),
+                !suffix.is_empty()
+            );
+            for row in json["mitigations"].as_array().unwrap() {
+                let id = Uuid::parse_str(row["mitigation_id"].as_str().unwrap()).unwrap();
+                assert!(unique.insert(id), "duplicate mitigation across pages");
+                assert_eq!(row["customer_id"], "cursor_customer");
+                assert_eq!(row["victim_ip"], "203.0.113.10");
+                assert!(row["acknowledged_at"].is_string());
+                ordered.push(id);
+            }
+            cursor = json["next_cursor"].as_str().map(str::to_owned);
+            assert_eq!(json["has_more"], cursor.is_some());
+            if let Some(value) = &cursor {
+                assert!(value.starts_with("m1."));
+                assert!(value.len() <= 128);
+            }
+        }
+        let expected: Vec<_> = (1..=7).rev().map(Uuid::from_u128).collect();
+        assert_eq!(ordered, expected, "descending UUID breaks equal timestamps");
+        assert_eq!(unique, expected.into_iter().collect());
+        assert!(
+            cursor.is_none(),
+            "terminal page must not offer a continuation"
+        );
+
+        // A valid position below the smallest tied UUID returns an empty terminal page.
+        let terminal = format!(
+            "m1.{}",
+            URL_SAFE_NO_PAD.encode(format!("{start}\n{}", Uuid::nil()))
+        );
+        let json = page(
+            &app,
+            &format!("/v1/mitigations?limit=2&{filters}{suffix}&cursor={terminal}"),
+        )
+        .await;
+        assert_eq!(json["count"], 0);
+        assert_eq!(json["has_more"], false);
+        assert!(json["next_cursor"].is_null());
+    }
+
+    // The third eligible row is the lookahead: skipping it would silently truncate has_more.
+    sqlx::query("UPDATE mitigations SET match_json = '{' WHERE mitigation_id = $1")
+        .bind(Uuid::from_u128(5))
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    for suffix in ["", "&pop=all"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/mitigations?limit=2&{filters}{suffix}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "corrupt lookahead must fail the entire page, not masquerade as end of history"
+        );
+    }
 }
 
 #[tokio::test]

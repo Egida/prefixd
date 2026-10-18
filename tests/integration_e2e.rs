@@ -79,7 +79,7 @@ async fn test_e2e_event_creates_flowspec_in_rib() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -156,7 +156,7 @@ async fn test_e2e_withdrawal_removes_from_rib() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -291,7 +291,7 @@ async fn test_e2e_multiple_mitigations() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -341,7 +341,7 @@ async fn test_e2e_duplicate_event_extends_ttl() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -378,7 +378,7 @@ async fn test_e2e_duplicate_event_extends_ttl() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -450,7 +450,7 @@ async fn test_e2e_safelist_blocks_mitigation() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -706,7 +706,7 @@ async fn test_e2e_alertmanager_signal_to_mitigation() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -809,7 +809,7 @@ async fn test_e2e_fastnetmon_signal_to_mitigation() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -897,7 +897,7 @@ async fn test_e2e_multi_source_corroboration() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },
@@ -970,7 +970,7 @@ async fn test_e2e_multi_source_corroboration() {
             None,
             None,
             None,
-            &prefixd::db::ListParams {
+            &prefixd::db::MitigationListParams {
                 limit: 100,
                 ..Default::default()
             },

@@ -117,6 +117,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Breaking:** Use versioned opaque cursors for mitigation listings, ordered by
+  creation time and mitigation ID so timestamp ties do not omit rows. Reject
+  malformed, oversized and superseded timestamp-only mitigation cursors with
+  `400`; restart a listing without a cursor. Fail corrupted mitigation pages
+  rather than silently truncating their results.
+
 - Display confidence fractions consistently as percentages across event, mitigation
   and correlation views. Preserve zero, distinguish missing and invalid values, and
   avoid implying that confidence confirms mitigation or router installation.

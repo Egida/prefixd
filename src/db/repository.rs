@@ -4,7 +4,7 @@ use serde::Serialize;
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
 
-use super::{ListParams, NotificationPreferences, RepositoryTrait};
+use super::{ListParams, MitigationListParams, NotificationPreferences, RepositoryTrait};
 use crate::correlation::engine::{
     CorroboratingSignal, EventDimensions, SignalGroup, SignalGroupEvent, SignalGroupFilter,
     SignalGroupStatus,
@@ -557,7 +557,7 @@ impl RepositoryTrait for Repository {
         customer_id: Option<&str>,
         victim_ip: Option<&str>,
         acknowledged: Option<bool>,
-        params: &ListParams,
+        params: &MitigationListParams,
     ) -> Result<Vec<Mitigation>> {
         let status_strings: Option<Vec<String>> =
             status_filter.map(|statuses| statuses.iter().map(|s| s.as_str().to_string()).collect());
@@ -573,36 +573,34 @@ impl RepositoryTrait for Repository {
             WHERE ($1::text[] IS NULL OR status = ANY($1))
               AND ($2::text IS NULL OR customer_id = $2)
               AND ($3::text IS NULL OR victim_ip = $3)
-              AND ($4::timestamptz IS NULL OR created_at < $4)
+              AND ($4::timestamptz IS NULL OR (created_at, mitigation_id) < ($4, $9::uuid))
               AND ($5::timestamptz IS NULL OR created_at >= $5)
               AND ($6::timestamptz IS NULL OR created_at < $6)
               AND ($7::bool IS NULL OR ($7 = true AND acknowledged_at IS NOT NULL) OR ($7 = false AND acknowledged_at IS NULL))
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, mitigation_id DESC
             LIMIT $8
             "#,
         )
         .bind(status_strings.as_deref())  // $1
         .bind(customer_id)                 // $2
         .bind(victim_ip)                   // $3
-        .bind(params.cursor)               // $4
+        .bind(params.cursor.map(|cursor| cursor.created_at)) // $4
         .bind(params.start)                // $5
         .bind(params.end)                  // $6
         .bind(acknowledged)                // $7
         .bind(params.limit as i64)         // $8
+        .bind(params.cursor.map(|cursor| cursor.mitigation_id)) // $9
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| match Mitigation::from_row(row) {
-                Ok(m) => Some(m),
-                Err(e) => {
+        rows.into_iter()
+            .map(|row| {
+                Mitigation::from_row(row).inspect_err(|error| {
                     ROW_PARSE_ERRORS.with_label_values(&["mitigations"]).inc();
-                    tracing::error!(error = %e, "skipping corrupted mitigation row");
-                    None
-                }
+                    tracing::error!(%error, "rejecting corrupted mitigation page");
+                })
             })
-            .collect())
+            .collect()
     }
 
     async fn acknowledge_mitigations(&self, ids: &[Uuid], operator_id: &str) -> Result<Vec<Uuid>> {
@@ -810,7 +808,7 @@ impl RepositoryTrait for Repository {
         customer_id: Option<&str>,
         victim_ip: Option<&str>,
         acknowledged: Option<bool>,
-        params: &ListParams,
+        params: &MitigationListParams,
     ) -> Result<Vec<Mitigation>> {
         let status_strings: Option<Vec<String>> =
             status_filter.map(|statuses| statuses.iter().map(|s| s.as_str().to_string()).collect());
@@ -826,36 +824,34 @@ impl RepositoryTrait for Repository {
             WHERE ($1::text[] IS NULL OR status = ANY($1))
               AND ($2::text IS NULL OR customer_id = $2)
               AND ($3::text IS NULL OR victim_ip = $3)
-              AND ($4::timestamptz IS NULL OR created_at < $4)
+              AND ($4::timestamptz IS NULL OR (created_at, mitigation_id) < ($4, $9::uuid))
               AND ($5::timestamptz IS NULL OR created_at >= $5)
               AND ($6::timestamptz IS NULL OR created_at < $6)
               AND ($7::bool IS NULL OR ($7 = true AND acknowledged_at IS NOT NULL) OR ($7 = false AND acknowledged_at IS NULL))
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, mitigation_id DESC
             LIMIT $8
             "#,
         )
         .bind(status_strings.as_deref())  // $1
         .bind(customer_id)                 // $2
         .bind(victim_ip)                   // $3
-        .bind(params.cursor)               // $4
+        .bind(params.cursor.map(|cursor| cursor.created_at)) // $4
         .bind(params.start)                // $5
         .bind(params.end)                  // $6
         .bind(acknowledged)                // $7
         .bind(params.limit as i64)         // $8
+        .bind(params.cursor.map(|cursor| cursor.mitigation_id)) // $9
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| match Mitigation::from_row(row) {
-                Ok(m) => Some(m),
-                Err(e) => {
+        rows.into_iter()
+            .map(|row| {
+                Mitigation::from_row(row).inspect_err(|error| {
                     ROW_PARSE_ERRORS.with_label_values(&["mitigations"]).inc();
-                    tracing::error!(error = %e, "skipping corrupted mitigation row");
-                    None
-                }
+                    tracing::error!(%error, "rejecting corrupted mitigation page");
+                })
             })
-            .collect())
+            .collect()
     }
 
     // Timeseries

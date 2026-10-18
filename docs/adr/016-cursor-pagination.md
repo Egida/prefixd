@@ -8,6 +8,16 @@ Accepted
 
 2026-03-18
 
+## Current implementation update (2026-10-18)
+
+Mitigation listings now order by `(created_at, mitigation_id)` descending and use
+a matching tuple continuation predicate. Their versioned opaque `m1` cursors
+replace timestamp-only mitigation cursors, which return `400`; no compatibility
+parser is provided. See the [current API reference](../reference/api.md#list-mitigations).
+The timestamp-only mitigation encoding and SQL below record the original design.
+Events and audit listings retain their existing cursors; this update does not
+qualify their behavior at tied timestamps.
+
 ## Context
 
 All list endpoints (`GET /v1/mitigations`, `GET /v1/events`, `GET /v1/audit`) used offset-based pagination (`?limit=100&offset=200`). This has well-known problems at scale:
@@ -18,7 +28,7 @@ All list endpoints (`GET /v1/mitigations`, `GET /v1/events`, `GET /v1/audit`) us
 
 3. **No stable reference** — Offsets are positional, not stable. A client cannot bookmark "where I left off" across requests if the underlying data changes.
 
-Cursor-based pagination solves all three: the cursor is a stable reference to a specific row's timestamp, the database seeks directly to that position via an indexed `WHERE` clause, and insertions don't affect the cursor's position.
+A cursor identifies an ordering position rather than a row offset. Correct continuation requires a unique ordering key; query cost also depends on the available indexes and query plan.
 
 ## Decision
 
@@ -83,5 +93,5 @@ Supporting both `offset` and `cursor` during a transition period was considered 
 - **Breaking** — Clients sending `?offset=N` will receive an error or have the parameter ignored. Documented in CHANGELOG as a breaking change.
 - **Frontend** — Page number navigation replaced with cursor stack (push on "Next", pop on "Previous"). Selecting a new filter or date range resets the cursor.
 - **prefixdctl** — The `list` subcommands switch from `--offset` to `--cursor` (or omit for first page).
-- **Performance** — Deep pagination cost drops from O(offset + limit) to O(limit). All ordering columns are already indexed.
+- **Performance** — Cursor predicates avoid row offsets, but no page-cost bound is qualified here. The current mitigation schema has no index on `(created_at, mitigation_id)`; index or performance changes require separate evidence.
 - **Consistency** — All new list endpoints must follow this pattern. No future endpoint should use offset.

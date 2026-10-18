@@ -5,8 +5,8 @@ use std::sync::Mutex;
 use uuid::Uuid;
 
 use super::{
-    GlobalStats, ListParams, NotificationPreferences, PopInfo, PopStats, RepositoryTrait,
-    SafelistEntry, TimeseriesBucket,
+    GlobalStats, ListParams, MitigationListParams, NotificationPreferences, PopInfo, PopStats,
+    RepositoryTrait, SafelistEntry, TimeseriesBucket,
 };
 use crate::correlation::engine::{
     CorroboratingSignal, EventDimensions, SignalGroup, SignalGroupEvent, SignalGroupFilter,
@@ -403,12 +403,11 @@ impl RepositoryTrait for MockRepository {
         customer_id: Option<&str>,
         victim_ip: Option<&str>,
         acknowledged: Option<bool>,
-        params: &ListParams,
+        params: &MitigationListParams,
     ) -> Result<Vec<Mitigation>> {
         let mitigations = self.mitigations.lock().unwrap();
-        Ok(mitigations
+        let mut matching: Vec<_> = mitigations
             .iter()
-            .rev()
             .filter(|m| {
                 let status_ok = status_filter
                     .map(|statuses| statuses.contains(&m.status))
@@ -424,11 +423,17 @@ impl RepositoryTrait for MockRepository {
                         m.acknowledged_at.is_none()
                     }
                 });
-                let cursor_ok = params.cursor.is_none_or(|c| m.created_at < c);
+                let cursor_ok = params.cursor.is_none_or(|cursor| {
+                    (m.created_at, m.mitigation_id) < (cursor.created_at, cursor.mitigation_id)
+                });
                 let start_ok = params.start.is_none_or(|s| m.created_at >= s);
                 let end_ok = params.end.is_none_or(|e| m.created_at < e);
                 status_ok && customer_ok && ip_ok && ack_ok && cursor_ok && start_ok && end_ok
             })
+            .collect();
+        matching.sort_unstable_by_key(|m| std::cmp::Reverse((m.created_at, m.mitigation_id)));
+        Ok(matching
+            .into_iter()
             .take(params.limit as usize)
             .cloned()
             .collect())
@@ -642,7 +647,7 @@ impl RepositoryTrait for MockRepository {
         customer_id: Option<&str>,
         victim_ip: Option<&str>,
         acknowledged: Option<bool>,
-        params: &ListParams,
+        params: &MitigationListParams,
     ) -> Result<Vec<Mitigation>> {
         self.list_mitigations(status_filter, customer_id, victim_ip, acknowledged, params)
             .await

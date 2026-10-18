@@ -832,7 +832,7 @@ async fn test_disjoint_detector_ports_reject_without_mutating_mitigations_or_spe
                     existing.activate();
                     repo.insert_mitigation(&existing).await.unwrap();
                 }
-                let params = prefixd::db::ListParams {
+                let params = prefixd::db::MitigationListParams {
                     limit: 10,
                     ..Default::default()
                 };
@@ -2397,6 +2397,176 @@ async fn test_cursor_pagination_mitigations() {
     assert_eq!(json["count"], 1);
     assert_eq!(json["has_more"], false);
     assert!(json["next_cursor"].is_null(), "no more pages");
+}
+
+#[tokio::test]
+async fn test_mitigation_cursor_preserves_ties_and_nanosecond_positions() {
+    use chrono::{DateTime, Duration, Utc};
+    use prefixd::domain::{ActionParams, ActionType, MatchCriteria, Mitigation, MitigationIntent};
+    use uuid::Uuid;
+
+    let (app, repo) = setup_app_correlation_with_repo(1, 0.5).await;
+    let timestamp: DateTime<Utc> = "2026-10-18T12:00:00.123456789Z".parse().unwrap();
+    // Deliberately insert out of both timestamp and UUID order.
+    for (id, created_at) in [
+        (2, timestamp + Duration::nanoseconds(1)),
+        (5, timestamp),
+        (3, timestamp),
+        (4, timestamp),
+        (1, timestamp - Duration::nanoseconds(1)),
+    ] {
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: "test1".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: format!("203.0.113.{id}/32"),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams { rate_bps: None },
+                ttl_seconds: 300,
+                reason: "cursor fixture".into(),
+            },
+            format!("203.0.113.{id}"),
+            AttackVector::UdpFlood,
+        );
+        mitigation.mitigation_id = Uuid::from_u128(id);
+        mitigation.created_at = created_at;
+        mitigation.activate();
+        repo.insert_mitigation(&mitigation).await.unwrap();
+    }
+    for suffix in ["", "&pop=all"] {
+        let mut cursor = None;
+        let mut ids = Vec::new();
+        for expected_count in [2, 2, 1] {
+            let mut uri = format!("/v1/mitigations?limit=2{suffix}");
+            if let Some(value) = &cursor {
+                uri.push_str(&format!("&cursor={value}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["count"], expected_count);
+            ids.extend(
+                json["mitigations"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| Uuid::parse_str(row["mitigation_id"].as_str().unwrap()).unwrap()),
+            );
+            cursor = json["next_cursor"].as_str().map(str::to_owned);
+            assert_eq!(json["has_more"], cursor.is_some());
+            if let Some(value) = &cursor {
+                assert!(value.starts_with("m1."));
+                assert!(value.len() <= 128);
+            }
+        }
+        assert_eq!(ids, [2, 5, 4, 3, 1].map(Uuid::from_u128));
+        assert!(cursor.is_none());
+    }
+}
+
+#[tokio::test]
+async fn test_mitigation_cursor_rejects_invalid_superseded_and_oversized_values() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let app = setup_app().await;
+    let timestamp = "2026-10-18T12:00:00Z";
+    let id = "00000000-0000-0000-0000-000000000001";
+    let encode = |value: &str| URL_SAFE_NO_PAD.encode(value.as_bytes());
+    // Chrono accepts RFC 3339 fractions beyond nanoseconds and ignores the extra zeros.
+    // These otherwise valid payloads isolate the encoded-input length guard.
+    let boundary_timestamp = format!("2026-10-18T12:00:00.{}Z", "0".repeat(35));
+    let oversized_timestamp = format!("2026-10-18T12:00:00.{}Z", "0".repeat(36));
+    for value in [&boundary_timestamp, &oversized_timestamp] {
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(value).unwrap(),
+            chrono::DateTime::parse_from_rfc3339(timestamp).unwrap()
+        );
+    }
+    let boundary_cursor = format!("m1.{}", encode(&format!("{boundary_timestamp}\n{id}")));
+    let oversized_cursor = format!("m1.{}", encode(&format!("{oversized_timestamp}\n{id}")));
+    assert_eq!(boundary_cursor.len(), 127);
+    assert_eq!(oversized_cursor.len(), 129);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/mitigations?cursor={boundary_cursor}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let empty: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(empty["count"], 0);
+    assert_eq!(empty["has_more"], false);
+    assert!(empty["next_cursor"].is_null());
+    let values = [
+        String::new(),
+        "garbage".into(),
+        "m1.".into(),
+        "m1.!".into(),
+        "m1._w".into(),
+        encode(timestamp),
+        format!("m2.{}", encode(&format!("{timestamp}\n{id}"))),
+        format!("m1.{}", encode(timestamp)),
+        format!("m1.{}", encode(&format!("not-a-timestamp\n{id}"))),
+        format!("m1.{}", encode(&format!("{timestamp}\nnot-a-uuid"))),
+        format!("m1.{}", encode(&format!("{timestamp}\n{id}\nextra"))),
+        format!("m1.{}=", encode(&format!("{timestamp}\n{id}"))),
+        format!("m1.{}", "A".repeat(125)), // Exactly the encoded-input bound, but malformed.
+        format!("m1.{}", "A".repeat(126)), // One byte beyond the bound.
+        "m1.%C3%A9".into(),
+        oversized_cursor,
+    ];
+    for value in values {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/mitigations?cursor={value}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "cursor {value:?}"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("invalid mitigation cursor")
+        );
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("fresh mitigation listing")
+        );
+    }
 }
 
 #[tokio::test]
@@ -8467,7 +8637,7 @@ mod manual_protocol {
                 None,
                 None,
                 None,
-                &prefixd::db::ListParams {
+                &prefixd::db::MitigationListParams {
                     limit: 10,
                     ..Default::default()
                 },
@@ -8525,7 +8695,7 @@ mod manual_protocol {
                         None,
                         None,
                         None,
-                        &prefixd::db::ListParams {
+                        &prefixd::db::MitigationListParams {
                             limit: 10,
                             ..Default::default()
                         },
@@ -8563,7 +8733,7 @@ mod manual_protocol {
                         StatusCode::CREATED
                     );
                 }
-                let params = prefixd::db::ListParams {
+                let params = prefixd::db::MitigationListParams {
                     limit: 10,
                     ..Default::default()
                 };
@@ -8624,7 +8794,7 @@ mod manual_protocol {
             post(state.clone(), request).await.status(),
             StatusCode::CREATED
         );
-        let params = prefixd::db::ListParams {
+        let params = prefixd::db::MitigationListParams {
             limit: 10,
             ..Default::default()
         };
@@ -8722,7 +8892,7 @@ mod manual_protocol {
                         None,
                         None,
                         None,
-                        &prefixd::db::ListParams {
+                        &prefixd::db::MitigationListParams {
                             limit: 10,
                             ..Default::default()
                         },
@@ -8782,7 +8952,7 @@ mod manual_protocol {
                     None,
                     None,
                     None,
-                    &prefixd::db::ListParams {
+                    &prefixd::db::MitigationListParams {
                         limit: 10,
                         ..Default::default()
                     },

@@ -53,11 +53,27 @@ pub struct NotificationPreferences {
     pub quiet_hours_end: Option<i16>,
 }
 
-/// Query parameters shared by all list endpoints (cursor pagination + date range)
+/// Timestamp pagination parameters for events, audit entries and signal groups.
 #[derive(Debug, Clone, Default)]
 pub struct ListParams {
     pub limit: u32,
     pub cursor: Option<DateTime<Utc>>,
+    pub start: Option<DateTime<Utc>>,
+    pub end: Option<DateTime<Utc>>,
+}
+
+/// Stable continuation position for public mitigation listings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MitigationCursor {
+    pub created_at: DateTime<Utc>,
+    pub mitigation_id: Uuid,
+}
+
+/// Mitigation pagination uses a unique tiebreaker; other list endpoints retain their parameters.
+#[derive(Debug, Clone, Default)]
+pub struct MitigationListParams {
+    pub limit: u32,
+    pub cursor: Option<MitigationCursor>,
     pub start: Option<DateTime<Utc>>,
     pub end: Option<DateTime<Utc>>,
 }
@@ -110,7 +126,7 @@ pub trait RepositoryTrait: Send + Sync {
         customer_id: Option<&str>,
         victim_ip: Option<&str>,
         acknowledged: Option<bool>,
-        params: &ListParams,
+        params: &MitigationListParams,
     ) -> Result<Vec<Mitigation>>;
     async fn acknowledge_mitigations(&self, ids: &[Uuid], operator_id: &str) -> Result<Vec<Uuid>>;
     async fn count_active_by_customer(&self, customer_id: &str) -> Result<u32>;
@@ -163,7 +179,7 @@ pub trait RepositoryTrait: Send + Sync {
         customer_id: Option<&str>,
         victim_ip: Option<&str>,
         acknowledged: Option<bool>,
-        params: &ListParams,
+        params: &MitigationListParams,
     ) -> Result<Vec<Mitigation>>;
 
     // Timeseries

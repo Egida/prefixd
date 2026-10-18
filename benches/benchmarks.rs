@@ -156,7 +156,7 @@ fn bench_database_operations(c: &mut Criterion) {
                         None,
                         None,
                         None,
-                        &prefixd::db::ListParams {
+                        &prefixd::db::MitigationListParams {
                             limit: 50,
                             ..Default::default()
                         },
@@ -281,7 +281,7 @@ fn bench_db_scaling(c: &mut Criterion) {
                                 None,
                                 None,
                                 None,
-                                &prefixd::db::ListParams {
+                                &prefixd::db::MitigationListParams {
                                     limit: 50,
                                     ..Default::default()
                                 },
