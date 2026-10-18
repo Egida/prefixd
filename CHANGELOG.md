@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add an isolated pinned rustbgpd↔GoBGP FlowSpec peer test for exact dual-family
+  receipt, withdrawal/re-announcement and retained nonselected local intent.
+
 - Share exact readable-speaker lifecycle checks across Mock, rustbgpd and GoBGP; run pinned isolated GoBGP API/peer/restart qualification in CI and retain backend fixture logs.
 
 - Connect to rustbgpd through an owner-only Unix socket or verified native

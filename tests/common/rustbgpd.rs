@@ -1,3 +1,7 @@
+#![allow(
+    dead_code,
+    reason = "owned fixture helpers are reused by independent integration targets"
+)]
 use prefixd::{
     bgp::{RustBgpdAnnouncer, rustbgpd_pb as pb},
     config::RustBgpdConfig,
@@ -9,13 +13,16 @@ use std::{
 };
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
-    core::{AccessMode, ExecCommand, Mount},
+    bollard::models::PortBinding,
+    core::{AccessMode, ExecCommand, IntoContainerPort, Mount},
     runners::AsyncRunner,
 };
 
 pub struct Speaker {
     pub container: ContainerAsync<GenericImage>,
     pub endpoint: String,
+    pub bgp_port: u16,
+    pub peer_address: String,
     pub config: RustBgpdConfig,
     version: String,
     // Keep the owner-only configuration/token mount alive until container removal.
@@ -28,6 +35,19 @@ impl Speaker {
     }
 
     pub async fn start_secure(transport: &str) -> Self {
+        Self::start_configured(transport, None, None).await
+    }
+
+    pub async fn start_peered(network: &str, peer: &str, peer_asn: u32) -> Self {
+        Self::start_configured("bearer", Some((peer, peer_asn)), Some(network)).await
+    }
+
+    async fn start_configured(
+        transport: &str,
+        peer: Option<(&str, u32)>,
+        network: Option<&str>,
+    ) -> Self {
+        let bridged = network.is_some();
         let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.77.0".into());
         let releases: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/rustbgpd/releases.json")).unwrap();
@@ -120,6 +140,41 @@ impl Speaker {
             }
             _ => panic!("unknown secure fixture transport"),
         };
+        let peering = peer
+            .map(|(address, asn)| {
+                format!(
+                    r#"
+[flowspec]
+validation = "off"
+[policy.definitions.lab-import]
+default_action = "permit"
+[[policy.definitions.lab-import.statements]]
+prefix = "0.0.0.0/0"
+ge = 0
+le = 32
+action = "permit"
+set_local_pref = 200
+[[policy.definitions.lab-import.statements]]
+prefix = "::/0"
+ge = 0
+le = 128
+action = "permit"
+set_local_pref = 200
+[policy.definitions.lab-export]
+default_action = "permit"
+[policy]
+import_chain = ["lab-import"]
+export_chain = ["lab-export"]
+[[neighbors]]
+address = "{address}"
+remote_asn = {asn}
+description = "owned GoBGP peer"
+families = ["ipv4_flowspec", "ipv6_flowspec"]
+hold_time = 9
+"#
+                )
+            })
+            .unwrap_or_default();
         std::fs::write(
             files.path().join("config.toml"),
             format!(
@@ -127,7 +182,7 @@ impl Speaker {
 [global]
 asn = 64512
 router_id = "192.0.2.1"
-listen_addresses = ["127.0.0.1"]
+{bgp_listen_addresses}
 listen_port = {}
 runtime_state_dir = "/fixture/runtime"
 worker_threads = 2
@@ -140,33 +195,66 @@ enabled = {}
 mode = 0o600
 access_mode = "read_write"
 [global.telemetry.grpc_tcp]
-address = "127.0.0.1:{}"
+address = "{listen_address}:{}"
 access_mode = "read_write"
 {}
 [security.grpc.roles]
 prefixd-test = "operator"
 "rustbgpd:prefixd-test" = "operator"
+{peering}
 "#,
-                ports[0],
+                if bridged { 179 } else { ports[0] },
                 ports[1],
                 transport == "uds",
                 ports[2],
-                auth
+                auth,
+                bgp_listen_addresses = if bridged {
+                    ""
+                } else {
+                    "listen_addresses = [\"127.0.0.1\"]"
+                },
+                listen_address = if network.is_some() {
+                    "0.0.0.0"
+                } else {
+                    "127.0.0.1"
+                },
             ),
         )
         .unwrap();
         drop(sockets);
-        let container = GenericImage::new(name, tag)
-            .with_host_config_modifier(|host| {
+        let rpc_container_port = ports[2];
+        let image = GenericImage::new(name, tag);
+        let image = if bridged {
+            image.with_exposed_port(ports[2].tcp())
+        } else {
+            image
+        };
+        let image = image
+            .with_host_config_modifier(move |host| {
                 host.cpuset_cpus = std::env::var("PREFIXD_TEST_CPUSET").ok();
+                if bridged {
+                    host.publish_all_ports = Some(false);
+                    host.port_bindings = Some(
+                        [(
+                            format!("{rpc_container_port}/tcp"),
+                            Some(vec![PortBinding {
+                                host_ip: Some("127.0.0.1".into()),
+                                host_port: Some("0".into()),
+                            }]),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    );
+                }
             })
-            .with_network("host")
+            .with_network(network.unwrap_or("host"))
             .with_user(format!("{}:{}", metadata.uid(), metadata.gid()))
             .with_mount(
                 Mount::bind_mount(files.path().to_str().unwrap(), "/fixture")
                     .with_access_mode(AccessMode::ReadWrite),
             )
-            .with_cmd(["rustbgpd", "/fixture/config.toml"])
+            .with_cmd(["rustbgpd", "/fixture/config.toml"]);
+        let container = image
             .start()
             .await
             .expect("start pinned rustbgpd container");
@@ -181,14 +269,16 @@ prefixd-test = "operator"
             .unwrap();
         let output = check.stdout_to_vec().await.unwrap();
         let errors = check.stderr_to_vec().await.unwrap();
-        let status = check.exit_code().await.unwrap();
-        if status != Some(0) {
+        let status = check.exit_code().await;
+        if !matches!(status, Ok(Some(0))) {
             eprintln!(
                 "daemon startup stdout: {}\ndaemon startup stderr: {}",
-                String::from_utf8_lossy(&container.stdout_to_vec().await.unwrap()),
-                String::from_utf8_lossy(&container.stderr_to_vec().await.unwrap())
+                String::from_utf8_lossy(&container.stdout_to_vec().await.unwrap_or_default()),
+                String::from_utf8_lossy(&container.stderr_to_vec().await.unwrap_or_default())
             );
         }
+        let status =
+            status.expect("owned daemon config-check exit status (startup logs printed above)");
         assert_eq!(
             status,
             Some(0),
@@ -196,9 +286,17 @@ prefixd-test = "operator"
             String::from_utf8_lossy(&output),
             String::from_utf8_lossy(&errors)
         );
+        if network.is_some() {
+            config.endpoint = format!(
+                "http://127.0.0.1:{}",
+                container.get_host_port_ipv4(ports[2].tcp()).await.unwrap()
+            );
+        }
         let fixture = Self {
             container,
             endpoint: config.endpoint.clone(),
+            bgp_port: if network.is_some() { 179 } else { ports[0] },
+            peer_address: peer.map_or("127.0.0.1", |(address, _)| address).into(),
             config,
             version,
             _files: files,
@@ -250,6 +348,36 @@ prefixd-test = "operator"
         })
         .await
         .expect("bounded authenticated daemon readiness");
+    }
+
+    /// Raw retained candidate view for the isolated bearer-authenticated peer fixture.
+    pub async fn received_flow_spec(&self, family: i32, peer: &str) -> pb::ListFlowSpecResponse {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let channel = tonic::transport::Endpoint::from_shared(self.endpoint.clone())
+                .unwrap()
+                .connect_timeout(Duration::from_secs(1))
+                .timeout(Duration::from_secs(2))
+                .connect()
+                .await
+                .unwrap();
+            let mut request = tonic::Request::new(pb::ListFlowSpecRequest {
+                afi_safi: family,
+                received_peer_address: peer.into(),
+                advertised_peer_address: String::new(),
+            });
+            request.set_timeout(Duration::from_secs(2));
+            let token = std::env::var("PREFIXD_RUSTBGPD_TEST_TOKEN").unwrap();
+            request
+                .metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            pb::rib_service_client::RibServiceClient::new(channel)
+                .list_flow_spec_routes(request)
+                .await
+                .unwrap()
+                .into_inner()
+        })
+        .await
+        .expect("bounded raw received FlowSpec view")
     }
 
     pub async fn assert_partial_tls_rejected(&self) {

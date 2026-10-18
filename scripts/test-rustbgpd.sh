@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-# Linux host networking keeps authenticated plaintext confined to loopback.
+# Nonpeered fixtures use host loopback; peered fixtures use an owned bridge
+# with only authenticated RPC published to host loopback.
 # PREFIXD_TEST_CPUSET optionally restricts the fixture containers on shared hosts.
 export PREFIXD_RUSTBGPD_TEST_TOKEN="${PREFIXD_RUSTBGPD_TEST_TOKEN:-$(python3 -c 'import secrets; print(secrets.token_hex(32))')}"
-cargo test --locked --features bgp-rustbgpd,test-utils --test integration_rustbgpd -- --ignored --test-threads=1 --nocapture
+cargo test --locked --features bgp-rustbgpd,test-utils --test integration_rustbgpd --test integration_rustbgpd_peer -- --ignored --test-threads=1 --nocapture
