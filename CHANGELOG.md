@@ -29,6 +29,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Show authenticated rustbgpd daemon version, process uptime, readiness and
+  observation time in health detail, CLI status and the existing speaker strip.
+  Keep controller metadata separate and failed, stale or unsupported observations
+  explicit; GoBGP process metadata remains unsupported.
+
 - Include rustbgpd in normal builds and select speakers with `bgp.backend`.
   Add explicit rustbgpd-first and GoBGP Compose profiles in one controller image,
   private owner-authenticated management, UID 999 runtime and persistent writable

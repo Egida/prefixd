@@ -9,7 +9,7 @@ use prefixd::{
     domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule},
 };
 
-use prefixd::bgp::{FlowSpecReader, FlowSpecWriter, PeerObserver};
+use prefixd::bgp::{DaemonHealthObserver, FlowSpecReader, FlowSpecWriter, PeerObserver};
 fn fixture_settings(fixture: &fixture::Speaker, pop: &str) -> prefixd::config::Settings {
     let mut settings = common::test_settings();
     settings.pop = pop.into();
@@ -41,6 +41,10 @@ async fn live_rustbgpd_controller_roundtrip() {
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;
     contract::run_readable_contract(&speaker).await.unwrap();
+    let health = speaker.daemon_health().await.unwrap();
+    let expected = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.77.0".into());
+    assert_eq!(health.version.as_deref(), Some(expected.as_str()));
+    assert!(health.ready);
 }
 
 #[tokio::test]

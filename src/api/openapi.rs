@@ -86,6 +86,8 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
             MitigationsListResponse,
             PublicHealthResponse,
             HealthResponse,
+            super::handlers::SpeakerHealth,
+            super::handlers::DaemonHealthObservation,
             ErrorResponse,
             ReloadResponse,
             GlobalStats,

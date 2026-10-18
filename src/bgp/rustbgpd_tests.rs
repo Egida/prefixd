@@ -10,6 +10,7 @@ struct Fake {
     rules: Arc<Mutex<Vec<pb::AddFlowSpecRequest>>>,
     mode: Arc<AtomicUsize>,
     attempts: Arc<AtomicUsize>,
+    health_calls: Arc<AtomicUsize>,
     families: Arc<Mutex<Vec<i32>>>,
 }
 
@@ -24,6 +25,85 @@ fn auth<T>(request: &Request<T>) -> std::result::Result<(), Status> {
     }
     assert!(request.metadata().contains_key("grpc-timeout"));
     Ok(())
+}
+
+#[tonic::async_trait]
+impl pb::control_service_server::ControlService for Fake {
+    async fn get_health(
+        &self,
+        request: Request<pb::HealthRequest>,
+    ) -> std::result::Result<Response<pb::HealthResponse>, Status> {
+        self.health_calls.fetch_add(1, SeqCst);
+        auth(&request)?;
+        match self.mode.load(SeqCst) {
+            20 => return Err(Status::unavailable("secret upstream diagnostic")),
+            21 => return Err(Status::permission_denied("secret upstream diagnostic")),
+            22 => {
+                return Ok(Response::new(pb::HealthResponse {
+                    healthy: false,
+                    uptime_seconds: 0,
+                    daemon_version: String::new(),
+                    ..Default::default()
+                }));
+            }
+            _ => {}
+        }
+        Ok(Response::new(pb::HealthResponse {
+            healthy: true,
+            uptime_seconds: 123,
+            daemon_version: "observed-daemon-version".into(),
+            ..Default::default()
+        }))
+    }
+}
+
+#[tokio::test]
+async fn authenticated_daemon_metadata_preserves_missing_zero_and_failed_observations() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let fake = Fake::default();
+    let incoming = futures_util::stream::unfold(listener, |listener| async {
+        Some((listener.accept().await.map(|(stream, _)| stream), listener))
+    });
+    let server = tokio::spawn(
+        tonic::transport::Server::builder()
+            .add_service(pb::control_service_server::ControlServiceServer::new(
+                fake.clone(),
+            ))
+            .serve_with_incoming(incoming),
+    );
+    let config = RustBgpdConfig {
+        endpoint: format!("http://{address}"),
+        bearer_token_env: "unused".into(),
+        ..Default::default()
+    };
+    let speaker = RustBgpdAnnouncer::connect_with_token(&config, "test-secret")
+        .await
+        .unwrap();
+    let health = speaker.daemon_health().await.unwrap();
+    assert_eq!(health.version.as_deref(), Some("observed-daemon-version"));
+    assert_eq!(health.uptime_seconds, 123);
+    assert!(health.ready);
+    fake.mode.store(22, SeqCst);
+    let health = speaker.daemon_health().await.unwrap();
+    assert!(health.version.is_none());
+    assert_eq!(health.uptime_seconds, 0);
+    assert!(!health.ready);
+    for (mode, expected_attempts) in [(20, 3), (21, 1)] {
+        fake.mode.store(mode, SeqCst);
+        let before = fake.health_calls.load(SeqCst);
+        let error = speaker.daemon_health().await.unwrap_err().to_string();
+        assert_eq!(fake.health_calls.load(SeqCst), before + expected_attempts);
+        assert!(!error.contains("secret"));
+    }
+    fake.mode.store(0, SeqCst);
+    let rejected = RustBgpdAnnouncer::connect_with_token(&config, "wrong-token")
+        .await
+        .unwrap();
+    let before = fake.health_calls.load(SeqCst);
+    assert!(rejected.daemon_health().await.is_err());
+    assert_eq!(fake.health_calls.load(SeqCst), before + 1);
+    server.abort();
 }
 
 #[tonic::async_trait]
@@ -460,6 +540,9 @@ async fn complete_rpc_deadline_bounds_stalled_response_body() {
             .add_service(pb::injection_service_server::InjectionServiceServer::new(
                 Fake::default(),
             ))
+            .add_service(pb::control_service_server::ControlServiceServer::new(
+                Fake::default(),
+            ))
             .serve_with_incoming(incoming),
     );
     // Omit the transport's header timeout so only the complete-RPC bound can end this call.
@@ -472,17 +555,23 @@ async fn complete_rpc_deadline_bounds_stalled_response_body() {
         token: Some("Bearer test-secret".parse().unwrap()),
     };
     tokio::time::pause();
-    let start = tokio::time::Instant::now();
-    let result = tokio::time::timeout(
-        Duration::from_secs(95),
-        speaker.announce(&rule("192.0.2.231/32", 0)),
-    )
-    .await
-    .expect("a stalled body must not outlive all three RPC deadlines");
-    assert!(result.unwrap_err().to_string().contains("DeadlineExceeded"));
-    assert_eq!(headers_sent.load(SeqCst), 3);
-    assert!(start.elapsed() >= Duration::from_secs(90));
-    assert!(start.elapsed() < Duration::from_secs(91));
+    for daemon in [true, false] {
+        headers_sent.store(0, SeqCst);
+        let start = tokio::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(95), async {
+            if daemon {
+                speaker.daemon_health().await.map(|_| ())
+            } else {
+                speaker.announce(&rule("192.0.2.231/32", 0)).await
+            }
+        })
+        .await
+        .expect("stalled unary body must not outlive all three RPC deadlines");
+        assert!(result.unwrap_err().to_string().contains("DeadlineExceeded"));
+        assert_eq!(headers_sent.load(SeqCst), 3);
+        assert!(start.elapsed() >= Duration::from_secs(90));
+        assert!(start.elapsed() < Duration::from_secs(91));
+    }
     tokio::time::resume();
     server.abort();
 }

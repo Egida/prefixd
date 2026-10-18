@@ -1,6 +1,6 @@
 use super::{
-    FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter, PeerObserver, PeerStatus, SessionState,
-    rustbgpd_pb as pb,
+    DaemonHealth, DaemonHealthObserver, FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter,
+    PeerObserver, PeerStatus, SessionState, rustbgpd_pb as pb,
 };
 use crate::{
     config::RustBgpdConfig,
@@ -387,6 +387,10 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
     fn reader(&self) -> Option<&dyn FlowSpecReader> {
         Some(self)
     }
+    fn daemon_health_observer(&self) -> Option<&dyn DaemonHealthObserver> {
+        Some(self)
+    }
+
     fn peer_observer(&self) -> Option<&dyn PeerObserver> {
         Some(self)
     }
@@ -484,6 +488,28 @@ impl FlowSpecReader for RustBgpdAnnouncer {
         Ok(rules)
     }
 }
+#[async_trait]
+impl DaemonHealthObserver for RustBgpdAnnouncer {
+    async fn daemon_health(&self) -> Result<DaemonHealth> {
+        let response = self
+            .rpc("GetHealth", || async {
+                pb::control_service_client::ControlServiceClient::new(self.channel.clone())
+                    .get_health(self.request(pb::HealthRequest {}))
+                    .await
+            })
+            .await?;
+        Ok(DaemonHealth {
+            version: if response.daemon_version.is_empty() {
+                None
+            } else {
+                Some(response.daemon_version)
+            },
+            uptime_seconds: response.uptime_seconds,
+            ready: response.healthy,
+        })
+    }
+}
+
 #[async_trait]
 impl PeerObserver for RustBgpdAnnouncer {
     async fn session_status(&self) -> Result<Vec<PeerStatus>> {

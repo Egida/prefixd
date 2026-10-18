@@ -15,16 +15,19 @@ export function formatControllerUptime(seconds: number): string {
 }
 
 export function BgpSessionStatus() {
-  const { data: health, error } = useHealthDetail()
+  const { data: health, error, isStale: stale, receiptAge: age } = useHealthDetail()
+  const daemon = error ? undefined : health?.speaker?.daemon
+  const daemonAvailable = daemon?.status === "observed" && !stale
   const status = error ? "ERROR"
+    : stale ? "STALE"
     : !health ? "LOADING"
     : health.speaker?.capabilities.peer_observer === false || health.gobgp.status === "unsupported" ? "UNSUPPORTED"
     : health.gobgp.status !== "connected" ? "ERROR"
     : Object.keys(health.bgp_sessions).length === 0 ? "NO PEERS"
     : health.bgp_session_up ? "UP" : "DOWN"
   const isUp = status === "UP"
-  const isError = status === "ERROR" || status === "DOWN"
-  const observed = error ? undefined : health
+  const isError = status === "ERROR" || status === "DOWN" || status === "STALE"
+  const observed = error || stale ? undefined : health
   const peers = observed ? Object.values(observed.bgp_sessions) : []
   const established = peers.filter(state => state === "established").length
 
@@ -40,11 +43,21 @@ export function BgpSessionStatus() {
         <span role="status" className="text-destructive">Health unavailable. Retrying automatically.</span>
       ) : !health ? (
         <div role="status" className="flex items-center gap-2 text-muted-foreground"><Skeleton className="h-4 w-24" />Loading health…</div>
+      ) : stale ? (
+        <>
+          <span role="status" className="text-destructive">Health observation is stale. Retrying automatically.</span>
+          <span className="text-muted-foreground">Daemon {daemon?.status === "unsupported" ? "unsupported" : daemon?.status === "observed" ? "stale" : "unavailable"}</span>
+        </>
       ) : (
         <>
           <span className="text-muted-foreground">
-            Sessions <span className="font-mono text-foreground">{status === "UNSUPPORTED" || status === "ERROR" ? "unavailable" : `${established}/${peers.length} established`}</span>
+            Sessions <span className="font-mono text-foreground">{status === "UNSUPPORTED" || status === "ERROR" || status === "STALE" ? "unavailable" : `${established}/${peers.length} established`}</span>
           </span>
+          <span className="text-muted-foreground">
+            Daemon <span className={cn("font-mono", daemonAvailable && daemon?.ready === false ? "text-destructive" : "text-foreground")}>{daemonAvailable ? daemon.version ?? "version unavailable" : daemon?.status === "unsupported" ? "unsupported" : "unavailable"}</span>
+            {daemonAvailable && <>{" · up "}<span className="font-mono text-foreground">{daemon.uptime_seconds === null ? "unavailable" : formatControllerUptime(daemon.uptime_seconds)}</span>{" · "}<span className={daemon.ready === false ? "font-medium text-destructive" : undefined}>{daemon.ready === true ? "ready" : daemon.ready === false ? "not ready" : "readiness unavailable"}</span>{daemon.observed_at && <>{" · observed "}<time dateTime={daemon.observed_at} title={daemon.observed_at}>{new Date(daemon.observed_at).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time></>}</>}
+          </span>
+          {!stale && age !== null && <span className="text-muted-foreground">Received {Math.floor(age / 1000)}s ago</span>}
           <span className="text-muted-foreground">Database <span className={cn(health.database === "connected" ? "text-foreground" : "text-destructive")}>{health.database === "connected" ? "connected" : "unavailable"}</span></span>
           <span className="text-muted-foreground sm:ml-auto">Controller <span className="font-mono text-foreground">v{health.version}</span> · up <span className="font-mono">{formatControllerUptime(health.uptime_seconds)}</span></span>
         </>

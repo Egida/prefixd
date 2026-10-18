@@ -117,9 +117,17 @@ export interface HealthResponse {
   auth_mode: string
   speaker?: {
     backend: string
+    daemon?: {
+      status: "observed" | "error" | "unsupported"
+      version: string | null
+      uptime_seconds: number | null
+      ready: boolean | null
+      observed_at: string | null
+    }
     capabilities: {
       rule_reader: boolean
       peer_observer: boolean
+      daemon_health?: boolean
     }
   }
   // True only after successful observation of at least one peer, all established.
