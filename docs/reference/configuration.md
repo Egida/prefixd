@@ -845,6 +845,11 @@ prefixd --config ./configs --check
 RUST_LOG=debug prefixd --config ./configs --check
 ```
 
+Configuration API edits count UTF-8 bytes: playbook names allow up to 128 bytes;
+Slack, Discord and Teams `webhook_url`, PagerDuty `events_url` and generic `url`
+allow up to 1,024 bytes; Telegram `chat_id` allows up to 64 bytes. Playbook edit
+TTLs must be 1–86,400 seconds.
+
 Common validation errors:
 
 - `Invalid prefix length` - Check guardrails.dst_prefix_maxlen

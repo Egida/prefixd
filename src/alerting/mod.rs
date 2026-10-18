@@ -478,7 +478,7 @@ impl AlertingConfig {
                     if webhook_url.is_empty() || webhook_url == REDACTED {
                         errors.push(format!("{}: webhook_url is required", ctx));
                     } else if webhook_url.len() > 1024 {
-                        errors.push(format!("{}: webhook_url exceeds 1024 chars", ctx));
+                        errors.push(format!("{}: webhook_url exceeds 1024 bytes", ctx));
                     } else {
                         validate_destination_url(webhook_url, "webhook_url", &ctx, &mut errors);
                     }
@@ -487,7 +487,7 @@ impl AlertingConfig {
                     if webhook_url.is_empty() || webhook_url == REDACTED {
                         errors.push(format!("{}: webhook_url is required", ctx));
                     } else if webhook_url.len() > 1024 {
-                        errors.push(format!("{}: webhook_url exceeds 1024 chars", ctx));
+                        errors.push(format!("{}: webhook_url exceeds 1024 bytes", ctx));
                     } else {
                         validate_destination_url(webhook_url, "webhook_url", &ctx, &mut errors);
                     }
@@ -496,7 +496,7 @@ impl AlertingConfig {
                     if webhook_url.is_empty() || webhook_url == REDACTED {
                         errors.push(format!("{}: webhook_url is required", ctx));
                     } else if webhook_url.len() > 1024 {
-                        errors.push(format!("{}: webhook_url exceeds 1024 chars", ctx));
+                        errors.push(format!("{}: webhook_url exceeds 1024 bytes", ctx));
                     } else {
                         validate_destination_url(webhook_url, "webhook_url", &ctx, &mut errors);
                     }
@@ -510,7 +510,7 @@ impl AlertingConfig {
                     if chat_id.is_empty() {
                         errors.push(format!("{}: chat_id is required", ctx));
                     } else if chat_id.len() > 64 {
-                        errors.push(format!("{}: chat_id exceeds 64 chars", ctx));
+                        errors.push(format!("{}: chat_id exceeds 64 bytes", ctx));
                     }
                 }
                 DestinationConfig::Pagerduty {
@@ -524,7 +524,7 @@ impl AlertingConfig {
                     if events_url.is_empty() {
                         errors.push(format!("{}: events_url is required", ctx));
                     } else if events_url.len() > 1024 {
-                        errors.push(format!("{}: events_url exceeds 1024 chars", ctx));
+                        errors.push(format!("{}: events_url exceeds 1024 bytes", ctx));
                     } else {
                         validate_destination_url(events_url, "events_url", &ctx, &mut errors);
                     }
@@ -543,7 +543,7 @@ impl AlertingConfig {
                     if url.is_empty() || url == REDACTED {
                         errors.push(format!("{}: url is required", ctx));
                     } else if url.len() > 1024 {
-                        errors.push(format!("{}: url exceeds 1024 chars", ctx));
+                        errors.push(format!("{}: url exceeds 1024 bytes", ctx));
                     } else {
                         validate_destination_url(url, "url", &ctx, &mut errors);
                     }
