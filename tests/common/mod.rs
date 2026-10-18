@@ -221,8 +221,6 @@ pub fn test_settings() -> Settings {
         observability: ObservabilityConfig {
             log_format: prefixd::config::LogFormat::Pretty,
             log_level: "info".to_string(),
-            audit_log_path: "/dev/null".to_string(),
-            metrics_listen: "127.0.0.1:0".to_string(),
         },
         safelist: SafelistConfig { prefixes: vec![] },
         shutdown: ShutdownConfig::default(),

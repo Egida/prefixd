@@ -154,6 +154,9 @@ http:
 ## Dashboard Setup
 
 The Next.js dashboard communicates with the prefixd API through a server-side proxy. This allows the dashboard to work on any host without hardcoded URLs.
+The proxy forwards only normalized `/v1/` API paths; it does not expose the
+private metrics scrape endpoint. The OpenAPI spec remains available directly
+through nginx at `/openapi.json`.
 
 ### Docker Compose
 
@@ -764,6 +767,18 @@ curl "http://localhost/v1/pops"
 ---
 
 ## Monitoring
+
+The API listener serves unauthenticated `/metrics` for trusted-network scrapes;
+it does not bind a second monitoring port. Default Compose does not publish the
+API listener, and both nginx and the dashboard proxy reject metrics requests.
+This is a network boundary, not per-route authentication: anyone with direct
+access to the API listener can scrape it.
+
+Prometheus at `127.0.0.1:9091` and Grafana at `127.0.0.1:3001` are published only
+on host loopback by default. For remote monitoring access, use an
+operator-controlled tunnel or an authenticated reverse proxy rather than
+publishing these management interfaces directly. Keep direct API scrapes on the
+trusted management network when deploying outside Compose.
 
 ### Prometheus
 

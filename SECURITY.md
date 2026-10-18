@@ -80,6 +80,17 @@ Use TLS for credentials, session cookies and bearer tokens. See the
 [security model](docs/explanation/architecture.md#security-model) for deployment
 details.
 
+### Monitoring Network Boundary
+
+`/metrics` is unauthenticated on the API listener. Default Compose leaves that
+listener unpublished and blocks metrics through nginx and the dashboard proxy.
+This does not authenticate scrapes: direct API access must stay on a trusted
+management network.
+
+Prometheus and Grafana publish only on host loopback by default, at ports 9091
+and 3001. Remote access needs an operator-controlled tunnel or authenticated
+proxy. These bindings do not restrict other processes on the host.
+
 ### Dependencies
 
 We use `cargo audit` in CI to check for known vulnerabilities. Current advisories are documented in the CI workflow with justification for any ignores.

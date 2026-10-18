@@ -1616,7 +1616,7 @@ Returns the running daemon configuration with sensitive fields redacted (allowli
     "timers": { "default_ttl_seconds": 120, "reconciliation_interval_seconds": 30 },
     "escalation": { "enabled": true },
     "storage": { "connection_string": "[redacted]" },
-    "observability": { "log_format": "json", "log_level": "info", "metrics_listen": "0.0.0.0:9090" },
+    "observability": { "log_format": "json", "log_level": "info" },
     "safelist": { "count": 3 },
     "shutdown": { "drain_timeout_seconds": 30, "preserve_announcements": true }
   },
@@ -2043,6 +2043,11 @@ Authorization: Bearer <token>
 ```http
 GET /metrics
 ```
+
+This endpoint is unauthenticated on the API listener, for trusted-network
+scrapes. Default Compose does not publish that listener; nginx and the dashboard
+proxy do not forward metrics. Prometheus scrapes `prefixd:8080` internally.
+See [monitoring access](../how-to/deployment.md#monitoring).
 
 Returns Prometheus text format:
 

@@ -1091,8 +1091,6 @@ fn test_settings() -> Settings {
         observability: ObservabilityConfig {
             log_format: prefixd::config::LogFormat::Pretty,
             log_level: "info".to_string(),
-            audit_log_path: "/dev/null".to_string(),
-            metrics_listen: "127.0.0.1:0".to_string(),
         },
         safelist: SafelistConfig { prefixes: vec![] },
         shutdown: ShutdownConfig::default(),
@@ -1488,6 +1486,58 @@ async fn test_config_settings_endpoint() {
         json["settings"]["bgp"]["router_id"].is_null(),
         "router_id should not be in allowlist"
     );
+    assert_eq!(
+        json["settings"]["observability"],
+        serde_json::json!({ "log_format": "pretty", "log_level": "info" }),
+        "observability should expose only the effective logging settings"
+    );
+}
+
+#[tokio::test]
+async fn metrics_remain_unauthenticated_on_the_private_api_listener() {
+    prefixd::observability::init_metrics();
+    let mut state = AppState::new(
+        test_settings(),
+        test_inventory(),
+        test_playbooks(),
+        Arc::new(MockRepository::new()),
+        Arc::new(MockAnnouncer::new()),
+        std::path::PathBuf::from("."),
+    )
+    .unwrap();
+    let config = Arc::get_mut(&mut state).unwrap();
+    config.settings.http.auth.mode = AuthMode::Bearer;
+    config.bearer_token = Some("private-metrics-control-token".into());
+    let app = create_test_router(state);
+
+    let protected = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/mitigations")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let scrape = std::str::from_utf8(&body).unwrap();
+    assert!(scrape.contains("# TYPE prefixd_reconciliation_runs_total counter"));
+    assert!(scrape.contains("prefixd_reconciliation_runs_total{status=\"success\"}"));
 }
 
 #[tokio::test]

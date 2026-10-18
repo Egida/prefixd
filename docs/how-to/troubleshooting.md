@@ -27,9 +27,13 @@ prefixdctl peers
 docker compose logs -f prefixd-rustbgpd
 journalctl -u prefixd -f
 
-# Check metrics (via nginx proxy)
-curl -s localhost/metrics | grep prefixd_
+# Check metrics from the trusted container/management network
+curl -s http://prefixd:8080/metrics | grep prefixd_
 ```
+
+Default Compose does not publish the API listener, and nginx and the dashboard
+proxy block metrics. From the host, use Prometheus at `127.0.0.1:9091` or Grafana
+at `127.0.0.1:3001` instead.
 
 ---
 
@@ -430,7 +434,8 @@ and ingress rather than bypassing the proxy.
 
 **Check metrics:**
 ```bash
-curl -s localhost/metrics | grep prefixd_http_request_duration
+# Run from the trusted container/management network
+curl -s http://prefixd:8080/metrics | grep prefixd_http_request_duration
 ```
 
 **Common causes:**
@@ -608,16 +613,16 @@ ERROR GoBGP announcement failed error="connection refused"
 
 ### Audit Log Queries
 
+Audit entries are stored in PostgreSQL. Use the dashboard Audit Log or
+`GET /v1/audit` with an authorized session or bearer token. For bearer mode:
+
 ```bash
-# All events today
-cat audit.jsonl | jq 'select(.timestamp > "2026-01-18")'
-
-# Withdrawals by operator
-cat audit.jsonl | jq 'select(.action == "mitigation_withdrawn")'
-
-# Events from FastNetMon
-cat audit.jsonl | jq 'select(.details.source == "fastnetmon")'
+curl -fsS -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
+  'http://localhost/v1/audit?limit=100' | jq '.entries[]'
 ```
+
+Use `next_cursor` to retrieve additional pages; see the
+[audit API reference](../reference/api.md#list-audit-entries).
 
 ---
 

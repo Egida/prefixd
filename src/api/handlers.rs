@@ -3275,7 +3275,6 @@ pub async fn get_config_settings(
         "observability": {
             "log_format": s.observability.log_format,
             "log_level": s.observability.log_level,
-            "metrics_listen": s.observability.metrics_listen,
         },
         "safelist": { "count": s.safelist.prefixes.len() },
         "shutdown": s.shutdown,

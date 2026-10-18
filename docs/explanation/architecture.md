@@ -226,9 +226,10 @@ Authentication is selected by deployment mode:
 
 The WebSocket feed requires a browser session unless auth is disabled; a bearer
 token is not a WebSocket login. Account/session and protected handlers enforce
-their own requirements. Public liveness, metrics and OpenAPI access do not imply
-access to operational health or mutations. Configuration exposure uses an explicit
-safe-field allowlist and separate secret redaction.
+their own requirements. Unauthenticated liveness, metrics and OpenAPI handlers do
+not imply access to operational health or mutations. Metrics remain on the
+private API listener and are blocked at the default public proxies. Configuration
+exposure uses an explicit safe-field allowlist and separate secret redaction.
 
 Ingress, PostgreSQL and speaker management access are separate trust boundaries.
 Use authenticated private management transport and review HTTPS/cookie settings

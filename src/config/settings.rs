@@ -401,13 +401,12 @@ pub struct StorageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObservabilityConfig {
     #[serde(default = "default_log_format")]
     pub log_format: LogFormat,
     #[serde(default = "default_log_level")]
     pub log_level: String,
-    pub audit_log_path: String,
-    pub metrics_listen: String,
 }
 
 fn default_log_format() -> LogFormat {
@@ -561,9 +560,38 @@ storage:
 observability:
   log_format: pretty
   log_level: info
-  audit_log_path: "./data/audit.jsonl"
-  metrics_listen: "0.0.0.0:9090"
 "#;
+
+    #[test]
+    fn observability_only_configures_logging() {
+        for (yaml, expected) in [
+            (
+                "{}",
+                serde_json::json!({ "log_format": "json", "log_level": "info" }),
+            ),
+            (
+                "log_format: pretty\nlog_level: debug\n",
+                serde_json::json!({ "log_format": "pretty", "log_level": "debug" }),
+            ),
+        ] {
+            let config: ObservabilityConfig = crate::config::parse_yaml(yaml).unwrap();
+            assert_eq!(serde_json::to_value(config).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn settings_reject_unknown_observability_keys_without_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("prefixd.yaml");
+        for key in ["metrics_listen", "audit_log_path", "log_levle"] {
+            let secret = "private-observability-value-must-not-appear";
+            std::fs::write(&path, format!("{MINIMAL_SETTINGS_YAML}  {key}: {secret}\n")).unwrap();
+            let error = Settings::load(&path).unwrap_err().to_string();
+            assert!(error.contains("unknown field"), "{key}: {error}");
+            assert!(error.contains(key), "{key}: {error}");
+            assert!(!error.contains(secret), "{key}: configuration value leaked");
+        }
+    }
 
     #[test]
     fn test_settings_without_correlation_defaults_to_disabled() {

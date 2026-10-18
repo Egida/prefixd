@@ -67,8 +67,9 @@ speaker ownership binding.
 
 The [quickstart](docs/tutorials/quickstart.md) explains configuration storage,
 ports, login and troubleshooting. PostgreSQL and speaker management remain
-internal; nginx serves the application on port 80, with Prometheus on 9091 and
-Grafana on 3001. Running prefixd enforces TTL expiry; an independently running
+internal; nginx serves the application on port 80. Prometheus binds host loopback
+on 9091 and Grafana on 3001; metrics are not forwarded by the public application.
+Running prefixd enforces TTL expiry; an independently running
 speaker can retain rules while the controller is stopped.
 
 ---

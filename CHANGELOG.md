@@ -85,6 +85,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Remove ineffective `observability.metrics_listen` and
+  `observability.audit_log_path` settings. Remove these keys from existing
+  configurations before restarting; unknown observability keys now reject
+  loading. Keep unauthenticated metrics on the private API listener, block public
+  proxy access, and bind Prometheus/Grafana publications to host loopback by default.
+
 - Remove the unused policy correlation prototype and ineffective
   `timers.correlation_window_seconds` configuration/API-settings field. The active
   multi-signal engine continues to use `correlation.window_seconds`.

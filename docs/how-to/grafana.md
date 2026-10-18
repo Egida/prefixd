@@ -8,6 +8,11 @@ prefixd includes pre-built Grafana dashboards for monitoring operations and secu
 - Prometheus datasource configured
 - prefixd `/metrics` endpoint scraped by Prometheus
 
+Default Compose scrapes `prefixd:8080` on its private network. The API listener is
+not published, and nginx and the dashboard proxy do not expose `/metrics`.
+Prometheus (`127.0.0.1:9091`) and Grafana (`127.0.0.1:3001`) bind host loopback;
+use an operator-controlled tunnel or authenticated proxy for remote access.
+
 ## Import Dashboards
 
 ### Via Grafana UI
@@ -81,7 +86,7 @@ Add prefixd to your `prometheus.yml`:
 scrape_configs:
   - job_name: 'prefixd'
     static_configs:
-      - targets: ['prefixd:9090']
+      - targets: ['prefixd:8080']
     metrics_path: /metrics
     scrape_interval: 15s
 ```

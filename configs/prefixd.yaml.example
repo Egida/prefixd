@@ -67,8 +67,6 @@ storage:
 observability:
   log_format: json
   log_level: info
-  audit_log_path: "/var/log/prefixd/audit.jsonl"
-  metrics_listen: "0.0.0.0:9090"
 
 safelist:
   # Prefixes that should never be mitigated

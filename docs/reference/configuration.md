@@ -300,13 +300,17 @@ observability:
   
   # Log level: trace, debug, info, warn, error
   log_level: info
-  
-  # Audit log path
-  audit_log_path: "/var/log/prefixd/audit.jsonl"
-  
-  # Prometheus metrics listen address
-  metrics_listen: "0.0.0.0:9090"
 ```
+
+Only these logging settings are accepted in `observability`; unknown keys fail
+configuration loading. Audit records are stored in PostgreSQL and available
+through the dashboard or `GET /v1/audit`.
+
+Prometheus scrapes unauthenticated `/metrics` on the same `http.listen` API
+listener. There is no separate metrics listener. Keep that listener on a trusted
+management network. Default Compose leaves it unpublished and blocks metrics
+through both nginx and the dashboard proxy. See
+[monitoring access](../how-to/deployment.md#monitoring).
 
 ### Safelist
 

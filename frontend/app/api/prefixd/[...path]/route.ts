@@ -13,8 +13,6 @@ function upstreamPath(path: string[], search = ""): string {
 }
 
 async function proxyRequest(request: NextRequest, path: string) {
-  const url = `${PREFIXD_API}${path}`
-  
   // Forward headers, excluding host
   const headers = new Headers()
   request.headers.forEach((value, key) => {
@@ -24,6 +22,13 @@ async function proxyRequest(request: NextRequest, path: string) {
   })
 
   try {
+    // Validate the same normalized URL fetch uses: decoded dot segments can
+    // otherwise turn an apparent /v1/ path into /metrics on the private API.
+    const url = new URL(`${PREFIXD_API}${path}`)
+    if (!url.pathname.startsWith("/v1/")) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 })
+    }
+
     const response = await fetch(url, {
       method: request.method,
       headers,
