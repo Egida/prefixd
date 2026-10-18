@@ -7,13 +7,12 @@ use uuid::Uuid;
 use super::{ListParams, MitigationListParams, NotificationPreferences, RepositoryTrait};
 use crate::correlation::engine::{
     CorroboratingSignal, EventDimensions, SignalGroup, SignalGroupEvent, SignalGroupFilter,
-    SignalGroupStatus,
 };
 use crate::domain::{
     AttackEvent, Mitigation, MitigationRow, MitigationStatus, Operator, OperatorRole,
     WithdrawalRequest,
 };
-use crate::error::Result;
+use crate::error::{PrefixdError, Result};
 use crate::observability::{ActorType, AuditEntry, metrics::ROW_PARSE_ERRORS};
 
 #[derive(Debug, FromRow)]
@@ -30,23 +29,30 @@ struct AuditRow {
 }
 
 impl AuditEntry {
-    fn from_row(row: AuditRow) -> Self {
+    fn from_row(row: AuditRow) -> Result<Self> {
         let actor_type = match row.actor_type.as_str() {
             "operator" => ActorType::Operator,
             "detector" => ActorType::Detector,
-            _ => ActorType::System,
+            "system" => ActorType::System,
+            _ => {
+                return Err(PrefixdError::Internal(
+                    "invalid stored audit actor type".into(),
+                ));
+            }
         };
-        Self {
+        Ok(Self {
             audit_id: row.audit_id,
             timestamp: row.timestamp,
-            schema_version: row.schema_version as u32,
+            schema_version: u32::try_from(row.schema_version).map_err(|_| {
+                PrefixdError::Internal("invalid stored audit schema version".into())
+            })?,
             actor_type,
             actor_id: row.actor_id,
             action: row.action,
             target_type: row.target_type,
             target_id: row.target_id,
-            details: serde_json::from_str(&row.details_json).unwrap_or(serde_json::json!({})),
-        }
+            details: serde_json::from_str(&row.details_json)?,
+        })
     }
 }
 
@@ -210,16 +216,17 @@ impl RepositoryTrait for Repository {
                    victim_ip, vector, protocol, bps, pps, top_dst_ports_json, confidence,
                    action, raw_details
             FROM events
-            WHERE ($2::timestamptz IS NULL OR ingested_at < $2)
+            WHERE ($2::timestamptz IS NULL OR (ingested_at, event_id) < ($2, $5))
               AND ($3::timestamptz IS NULL OR ingested_at >= $3)
               AND ($4::timestamptz IS NULL OR ingested_at < $4)
-            ORDER BY ingested_at DESC LIMIT $1
+            ORDER BY ingested_at DESC, event_id DESC LIMIT $1
             "#,
         )
         .bind(params.limit as i64)
-        .bind(params.cursor)
+        .bind(params.cursor.map(|c| c.timestamp))
         .bind(params.start)
         .bind(params.end)
+        .bind(params.cursor.map(|c| c.id))
         .fetch_all(&self.pool)
         .await?;
         Ok(events)
@@ -252,20 +259,21 @@ impl RepositoryTrait for Repository {
             r#"
             SELECT audit_id, timestamp, schema_version, actor_type, actor_id, action, target_type, target_id, details_json
             FROM audit_log
-            WHERE ($2::timestamptz IS NULL OR timestamp < $2)
+            WHERE ($2::timestamptz IS NULL OR (timestamp, audit_id) < ($2, $5))
               AND ($3::timestamptz IS NULL OR timestamp >= $3)
               AND ($4::timestamptz IS NULL OR timestamp < $4)
-            ORDER BY timestamp DESC LIMIT $1
+            ORDER BY timestamp DESC, audit_id DESC LIMIT $1
             "#,
         )
         .bind(params.limit as i64)
-        .bind(params.cursor)
+        .bind(params.cursor.map(|c| c.timestamp))
         .bind(params.start)
         .bind(params.end)
+        .bind(params.cursor.map(|c| c.id))
         .fetch_all(&self.pool)
         .await?;
 
-        Ok(rows.into_iter().map(AuditEntry::from_row).collect())
+        rows.into_iter().map(AuditEntry::from_row).collect()
     }
 
     async fn active_mitigations_for_pop(&self, pop: &str) -> Result<Vec<Mitigation>> {
@@ -1095,7 +1103,7 @@ impl RepositoryTrait for Repository {
         .await;
 
         match result {
-            Ok(row) => Ok(row.into()),
+            Ok(row) => row.try_into(),
             Err(sqlx::Error::Database(ref db_err)) if db_err.code().as_deref() == Some("23505") => {
                 // Unique constraint violation — another concurrent request won the race.
                 // Retry by fetching the existing open group.
@@ -1119,7 +1127,7 @@ impl RepositoryTrait for Repository {
                 .bind(&group.vector)
                 .fetch_one(&self.pool)
                 .await?;
-                Ok(row.into())
+                row.try_into()
             }
             Err(e) => Err(e.into()),
         }
@@ -1162,7 +1170,7 @@ impl RepositoryTrait for Repository {
         .bind(group_id)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(Into::into))
+        row.map(TryInto::try_into).transpose()
     }
 
     async fn find_open_group(&self, victim_ip: &str, vector: &str) -> Result<Option<SignalGroup>> {
@@ -1181,7 +1189,7 @@ impl RepositoryTrait for Repository {
         .bind(vector)
         .fetch_optional(&self.pool)
         .await?;
-        Ok(row.map(Into::into))
+        row.map(TryInto::try_into).transpose()
     }
 
     async fn add_event_to_group(
@@ -1256,8 +1264,8 @@ impl RepositoryTrait for Repository {
               AND ($2::text IS NULL OR vector = $2)
               AND ($3::timestamptz IS NULL OR created_at >= $3)
               AND ($4::timestamptz IS NULL OR created_at < $4)
-              AND ($5::timestamptz IS NULL OR created_at < $5)
-            ORDER BY created_at DESC
+              AND ($5::timestamptz IS NULL OR (created_at, group_id) < ($5, $7))
+            ORDER BY created_at DESC, group_id DESC
             LIMIT $6
             "#,
         )
@@ -1265,11 +1273,12 @@ impl RepositoryTrait for Repository {
         .bind(filter.vector.as_deref()) // $2
         .bind(filter.start) // $3
         .bind(filter.end) // $4
-        .bind(params.cursor) // $5
+        .bind(params.cursor.map(|c| c.timestamp)) // $5
         .bind(params.limit as i64) // $6
+        .bind(params.cursor.map(|c| c.id)) // $7
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(TryInto::try_into).collect()
     }
 
     async fn count_open_groups(&self) -> Result<u32> {
@@ -1292,7 +1301,7 @@ impl RepositoryTrait for Repository {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(TryInto::try_into).collect()
     }
 
     async fn list_open_signal_groups(&self) -> Result<Vec<SignalGroup>> {
@@ -1307,7 +1316,7 @@ impl RepositoryTrait for Repository {
         )
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(Into::into).collect())
+        rows.into_iter().map(TryInto::try_into).collect()
     }
 
     async fn find_open_groups_by_dimensions(
@@ -1348,9 +1357,13 @@ impl RepositoryTrait for Repository {
             interfaces: interfaces.iter().cloned().collect(),
         };
 
-        Ok(rows
+        // Corrupt SQL-selected candidates fail before dimension matching; never invent dimensions.
+        let groups: Vec<SignalGroup> = rows
             .into_iter()
-            .map(SignalGroup::from)
+            .map(TryInto::try_into)
+            .collect::<Result<_>>()?;
+        Ok(groups
+            .into_iter()
             .filter(|g| g.primary_dimensions.matches_probe(&probe))
             .collect())
     }
@@ -1700,9 +1713,11 @@ struct SignalGroupRow {
     playbook_name: Option<String>,
 }
 
-impl From<SignalGroupRow> for SignalGroup {
-    fn from(row: SignalGroupRow) -> Self {
-        Self {
+impl TryFrom<SignalGroupRow> for SignalGroup {
+    type Error = PrefixdError;
+
+    fn try_from(row: SignalGroupRow) -> Result<Self> {
+        Ok(Self {
             group_id: row.group_id,
             victim_ip: row.victim_ip,
             vector: row.vector,
@@ -1710,11 +1725,14 @@ impl From<SignalGroupRow> for SignalGroup {
             window_expires_at: row.window_expires_at,
             derived_confidence: row.derived_confidence,
             source_count: row.source_count,
-            status: row.status.parse().unwrap_or(SignalGroupStatus::Open),
+            status: row
+                .status
+                .parse()
+                .map_err(|_| PrefixdError::Internal("invalid stored signal-group status".into()))?,
             corroboration_met: row.corroboration_met,
-            primary_dimensions: serde_json::from_value(row.primary_dimensions).unwrap_or_default(),
+            primary_dimensions: serde_json::from_value(row.primary_dimensions)?,
             playbook_name: row.playbook_name,
-        }
+        })
     }
 }
 

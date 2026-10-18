@@ -194,12 +194,19 @@ impl RepositoryTrait for MockRepository {
 
     async fn list_events(&self, params: &ListParams) -> Result<Vec<AttackEvent>> {
         let events = self.events.lock().unwrap();
-        Ok(events
+        let mut matching: Vec<_> = events
             .iter()
-            .rev()
-            .filter(|e| params.cursor.is_none_or(|c| e.ingested_at < c))
+            .filter(|e| {
+                params
+                    .cursor
+                    .is_none_or(|c| (e.ingested_at, e.event_id) < (c.timestamp, c.id))
+            })
             .filter(|e| params.start.is_none_or(|s| e.ingested_at >= s))
             .filter(|e| params.end.is_none_or(|end| e.ingested_at < end))
+            .collect();
+        matching.sort_unstable_by_key(|e| std::cmp::Reverse((e.ingested_at, e.event_id)));
+        Ok(matching
+            .into_iter()
             .take(params.limit as usize)
             .cloned()
             .collect())
@@ -212,12 +219,19 @@ impl RepositoryTrait for MockRepository {
 
     async fn list_audit(&self, params: &ListParams) -> Result<Vec<AuditEntry>> {
         let audit = self.audit.lock().unwrap();
-        Ok(audit
+        let mut matching: Vec<_> = audit
             .iter()
-            .rev()
-            .filter(|e| params.cursor.is_none_or(|c| e.timestamp < c))
+            .filter(|e| {
+                params
+                    .cursor
+                    .is_none_or(|c| (e.timestamp, e.audit_id) < (c.timestamp, c.id))
+            })
             .filter(|e| params.start.is_none_or(|s| e.timestamp >= s))
             .filter(|e| params.end.is_none_or(|end| e.timestamp < end))
+            .collect();
+        matching.sort_unstable_by_key(|e| std::cmp::Reverse((e.timestamp, e.audit_id)));
+        Ok(matching
+            .into_iter()
             .take(params.limit as usize)
             .cloned()
             .collect())
@@ -859,14 +873,21 @@ impl RepositoryTrait for MockRepository {
         params: &ListParams,
     ) -> Result<Vec<SignalGroup>> {
         let groups = self.signal_groups.lock().unwrap();
-        Ok(groups
+        let mut matching: Vec<_> = groups
             .iter()
-            .rev()
             .filter(|g| filter.status.is_none_or(|s| g.status == s))
             .filter(|g| filter.vector.as_ref().is_none_or(|v| &g.vector == v))
             .filter(|g| filter.start.is_none_or(|s| g.created_at >= s))
             .filter(|g| filter.end.is_none_or(|e| g.created_at < e))
-            .filter(|g| params.cursor.is_none_or(|c| g.created_at < c))
+            .filter(|g| {
+                params
+                    .cursor
+                    .is_none_or(|c| (g.created_at, g.group_id) < (c.timestamp, c.id))
+            })
+            .collect();
+        matching.sort_unstable_by_key(|g| std::cmp::Reverse((g.created_at, g.group_id)));
+        Ok(matching
+            .into_iter()
             .take(params.limit as usize)
             .cloned()
             .collect())

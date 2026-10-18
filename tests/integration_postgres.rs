@@ -3989,3 +3989,351 @@ async fn test_creation_batch_accepts_unconfirmed_and_dry_run_keeps_its_contract(
     assert_eq!(speaker.adds.load(SeqCst), before);
     assert!(speaker.inner.list_active().await.unwrap().is_empty());
 }
+
+async fn public_list_page(app: &axum::Router, uri: &str) -> serde_json::Value {
+    let response = app
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{uri}");
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    serde_json::from_slice(&body).unwrap()
+}
+
+#[tokio::test]
+async fn test_public_list_cursors_are_complete_filtered_and_strict() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use chrono::{DateTime, Duration, SecondsFormat, Utc};
+    use std::collections::BTreeSet;
+    use uuid::Uuid;
+
+    let ctx = TestContext::new().await;
+    let app = ctx.router().await;
+    let endpoints = [
+        ("events", "events", "event_id", "e1."),
+        ("audit", "entries", "audit_id", "a1."),
+        ("signal-groups", "groups", "group_id", "s1."),
+    ];
+    for (endpoint, _, _, _) in endpoints {
+        let empty = public_list_page(&app, &format!("/v1/{endpoint}?limit=2")).await;
+        assert_eq!(empty["count"], 0);
+        assert_eq!(empty["has_more"], false);
+        assert!(empty["next_cursor"].is_null());
+    }
+
+    let timestamp: DateTime<Utc> = "2026-10-18T12:00:00.123456Z".parse().unwrap();
+    // Seven ties, two eligible neighboring timestamps, and independent date/status/vector exclusions.
+    for id in [7_u128, 1, 8, 5, 9, 2, 6, 3, 4, 10, 11, 12, 13] {
+        let position = match id {
+            8 => timestamp + Duration::microseconds(1),
+            9 => timestamp - Duration::microseconds(1),
+            10 => timestamp - Duration::seconds(2),
+            11 => timestamp + Duration::seconds(2),
+            13 => timestamp - Duration::milliseconds(500),
+            _ => timestamp,
+        };
+        if id <= 11 {
+            sqlx::query("INSERT INTO events (event_id, source, event_timestamp, ingested_at, victim_ip, vector) VALUES ($1, 'cursor', $2, $2, '203.0.113.10', 'udp_flood')")
+                .bind(Uuid::from_u128(id)).bind(position).execute(&ctx.pool).await.unwrap();
+            sqlx::query("INSERT INTO audit_log (audit_id, timestamp, actor_type, action, details_json) VALUES ($1, $2, 'system', 'cursor', '{}')")
+                .bind(Uuid::from_u128(id)).bind(position).execute(&ctx.pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO signal_groups (group_id, victim_ip, vector, created_at, window_expires_at, status) VALUES ($1, $2, $3, $4, $4 + interval '1 hour', $5)")
+            .bind(Uuid::from_u128(id)).bind(format!("203.0.113.{id}"))
+            .bind(if id == 12 { "syn_flood" } else { "udp_flood" }).bind(position)
+            .bind(if id == 13 { "expired" } else { "open" })
+            .execute(&ctx.pool).await.unwrap();
+    }
+    let start = (timestamp - Duration::seconds(1)).to_rfc3339_opts(SecondsFormat::Micros, true);
+    let end = (timestamp + Duration::seconds(2)).to_rfc3339_opts(SecondsFormat::Micros, true);
+    for (endpoint, rows_key, id_key, prefix) in endpoints {
+        let filters = if endpoint == "signal-groups" {
+            format!("start={start}&end={end}&status=open&vector=udp_flood")
+        } else {
+            format!("start={start}&end={end}")
+        };
+        let mut cursor = None;
+        let mut ordered = Vec::new();
+        let mut unique = BTreeSet::new();
+        for expected_count in [2, 2, 2, 2, 1] {
+            let mut uri = format!("/v1/{endpoint}?limit=2&{filters}");
+            if let Some(value) = &cursor {
+                uri.push_str(&format!("&cursor={value}"));
+            }
+            let json = public_list_page(&app, &uri).await;
+            assert_eq!(json["count"], expected_count, "{endpoint}");
+            for row in json[rows_key].as_array().unwrap() {
+                let id = Uuid::parse_str(row[id_key].as_str().unwrap()).unwrap();
+                assert!(unique.insert(id), "duplicate {endpoint} row across pages");
+                ordered.push(id);
+            }
+            cursor = json["next_cursor"].as_str().map(str::to_owned);
+            assert_eq!(json["has_more"], cursor.is_some());
+            if let Some(value) = &cursor {
+                assert!(value.starts_with(prefix));
+                assert!(value.len() <= 128);
+            }
+        }
+        let expected = [8, 7, 6, 5, 4, 3, 2, 1, 9].map(Uuid::from_u128);
+        assert_eq!(ordered, expected, "{endpoint} tuple order");
+        assert_eq!(unique, expected.into_iter().collect());
+        assert!(cursor.is_none());
+        let terminal = format!(
+            "{prefix}{}",
+            URL_SAFE_NO_PAD.encode(format!("{start}\n{}", Uuid::nil()))
+        );
+        let empty = public_list_page(
+            &app,
+            &format!("/v1/{endpoint}?limit=2&{filters}&cursor={terminal}"),
+        )
+        .await;
+        assert_eq!(empty["count"], 0);
+        assert_eq!(empty["has_more"], false);
+        assert!(empty["next_cursor"].is_null());
+    }
+
+    // Each date-excluded row would otherwise fall inside its own requested page.
+    // Event JSONB exceeds serde_json's existing nesting limit; no schema constraints are changed.
+    // Unknown group status is tested without a status filter so it is SQL-eligible.
+    let corruptions = [
+        (
+            "events",
+            "UPDATE events SET raw_details = (repeat('[', 130) || '0' || repeat(']', 130))::jsonb WHERE event_id = $1",
+            "UPDATE events SET raw_details = NULL WHERE event_id = $1",
+            "",
+        ),
+        (
+            "audit",
+            "UPDATE audit_log SET actor_type = 'invalid' WHERE audit_id = $1",
+            "UPDATE audit_log SET actor_type = 'system' WHERE audit_id = $1",
+            "",
+        ),
+        (
+            "audit",
+            "UPDATE audit_log SET schema_version = -1 WHERE audit_id = $1",
+            "UPDATE audit_log SET schema_version = 1 WHERE audit_id = $1",
+            "",
+        ),
+        (
+            "audit",
+            "UPDATE audit_log SET details_json = '{' WHERE audit_id = $1",
+            "UPDATE audit_log SET details_json = '{}' WHERE audit_id = $1",
+            "",
+        ),
+        (
+            "signal-groups",
+            "UPDATE signal_groups SET status = 'invalid' WHERE group_id = $1",
+            "UPDATE signal_groups SET status = 'open' WHERE group_id = $1",
+            "&vector=udp_flood",
+        ),
+        (
+            "signal-groups",
+            "UPDATE signal_groups SET primary_dimensions = '{\"customer_ids\":7}'::jsonb WHERE group_id = $1",
+            "UPDATE signal_groups SET primary_dimensions = '{}'::jsonb WHERE group_id = $1",
+            "&status=open&vector=udp_flood",
+        ),
+    ];
+    for (endpoint, corrupt, restore, suffix) in corruptions {
+        let ids = if corrupt.contains("SET primary_dimensions") {
+            vec![8_u128, 6, 10, 12, 13]
+        } else {
+            vec![8_u128, 6, 10]
+        };
+        for id in ids {
+            sqlx::query(corrupt)
+                .bind(Uuid::from_u128(id))
+                .execute(&ctx.pool)
+                .await
+                .unwrap();
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!(
+                            "/v1/{endpoint}?limit=2&start={start}&end={end}{suffix}"
+                        ))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                if id >= 10 {
+                    StatusCode::OK
+                } else {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                },
+                "{endpoint} corrupt id {id}: {corrupt}"
+            );
+            if id >= 10 {
+                // Removing only the applicable exclusion makes the same corrupt row fail.
+                let included_uri = match id {
+                    10 => format!("/v1/{endpoint}?limit=100&end={end}{suffix}"),
+                    12 => format!("/v1/{endpoint}?limit=100&start={start}&end={end}&status=open"),
+                    13 => {
+                        format!("/v1/{endpoint}?limit=100&start={start}&end={end}&vector=udp_flood")
+                    }
+                    _ => unreachable!(),
+                };
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .uri(included_uri)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            sqlx::query(restore)
+                .bind(Uuid::from_u128(id))
+                .execute(&ctx.pool)
+                .await
+                .unwrap();
+            public_list_page(
+                &app,
+                &format!("/v1/{endpoint}?limit=2&start={start}&end={end}{suffix}"),
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_public_list_cursors_reject_invalid_input() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let ctx = TestContext::new().await;
+    let app = ctx.router().await;
+    let timestamp = "2026-10-18T12:00:00Z";
+    let id = "00000000-0000-0000-0000-000000000001";
+    let encode = |value: &str| URL_SAFE_NO_PAD.encode(value.as_bytes());
+    for (endpoint, prefix, kind) in [
+        ("events", "e1.", "event"),
+        ("audit", "a1.", "audit"),
+        ("signal-groups", "s1.", "signal-group"),
+    ] {
+        let valid = encode(&format!("{timestamp}\n{id}"));
+        let boundary = format!(
+            "{prefix}{}",
+            encode(&format!("2026-10-18T12:00:00.{}Z\n{id}", "0".repeat(35)))
+        );
+        let oversized = format!(
+            "{prefix}{}",
+            encode(&format!("2026-10-18T12:00:00.{}Z\n{id}", "0".repeat(36)))
+        );
+        assert_eq!(boundary.len(), 127);
+        assert_eq!(oversized.len(), 129);
+        public_list_page(&app, &format!("/v1/{endpoint}?cursor={boundary}")).await;
+        let mut values = vec![
+            String::new(),
+            "garbage".into(),
+            prefix.into(),
+            format!("{prefix}!"),
+            format!("{prefix}_w"),
+            encode(timestamp),
+            format!("{}2.{valid}", &prefix[..1]),
+            format!("{prefix}{}", encode(timestamp)),
+            format!("{prefix}{}", encode(&format!("bad-date\n{id}"))),
+            format!("{prefix}{}", encode(&format!("{timestamp}\nbad-uuid"))),
+            format!("{prefix}{}", encode(&format!("{timestamp}\n{id}\nextra"))),
+            format!("{prefix}{valid}="),
+            format!("{prefix}{valid}%0A"),
+            format!("{prefix}{}", "A".repeat(125)),
+            format!("{prefix}{}", "A".repeat(126)),
+            format!("{prefix}%C3%A9"),
+            oversized,
+        ];
+        for wrong in ["m1.", "e1.", "a1.", "s1."] {
+            if wrong != prefix {
+                values.push(format!("{wrong}{valid}"));
+            }
+        }
+        // Alter unused trailing bits while leaving the decoded payload otherwise unchanged.
+        let mut trailing = encode(&format!("2026-10-18T12:00:00+00:00\n{id}")).into_bytes();
+        assert_eq!(trailing.last(), Some(&b'E'));
+        *trailing.last_mut().unwrap() = b'F';
+        values.push(format!("{prefix}{}", String::from_utf8(trailing).unwrap()));
+        for value in values {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/v1/{endpoint}?cursor={value}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "{endpoint}: {value:?}"
+            );
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                json["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("invalid {kind} cursor"))
+            );
+            assert!(
+                json["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("fresh {kind} listing"))
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_signal_group_reads_propagate_corrupt_dimensions() {
+    use prefixd::correlation::engine::{CorrelationEngine, EventDimensions};
+
+    let ctx = TestContext::new().await;
+    let group = CorrelationEngine::create_group("203.0.113.10", "udp_flood", 3600);
+    ctx.repo.insert_signal_group(&group).await.unwrap();
+    sqlx::query("UPDATE signal_groups SET primary_dimensions = 'null'::jsonb WHERE group_id = $1")
+        .bind(group.group_id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    assert!(ctx.repo.get_signal_group(group.group_id).await.is_err());
+    assert!(
+        ctx.repo
+            .find_open_group(&group.victim_ip, &group.vector)
+            .await
+            .is_err()
+    );
+    assert!(ctx.repo.list_open_signal_groups().await.is_err());
+    // SQL-selected candidates must decode before dimension matching, even if the probe is empty.
+    assert!(
+        ctx.repo
+            .find_open_groups_by_dimensions(&None, &EventDimensions::default(), chrono::Utc::now())
+            .await
+            .is_err()
+    );
+    // The existing-group CTE path must not manufacture dimensions while resolving an insert.
+    assert!(ctx.repo.insert_signal_group(&group).await.is_err());
+    sqlx::query("UPDATE signal_groups SET window_expires_at = NOW() - interval '1 second' WHERE group_id = $1")
+        .bind(group.group_id).execute(&ctx.pool).await.unwrap();
+    assert!(ctx.repo.find_expired_signal_groups().await.is_err());
+    sqlx::query("UPDATE signal_groups SET primary_dimensions = '{}'::jsonb WHERE group_id = $1")
+        .bind(group.group_id)
+        .execute(&ctx.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        ctx.repo.find_expired_signal_groups().await.unwrap().len(),
+        1
+    );
+}

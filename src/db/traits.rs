@@ -53,11 +53,18 @@ pub struct NotificationPreferences {
     pub quiet_hours_end: Option<i16>,
 }
 
-/// Timestamp pagination parameters for events, audit entries and signal groups.
+/// Stable continuation position for events, audit entries and signal groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListCursor {
+    pub timestamp: DateTime<Utc>,
+    pub id: Uuid,
+}
+
+/// Tuple pagination parameters for events, audit entries and signal groups.
 #[derive(Debug, Clone, Default)]
 pub struct ListParams {
     pub limit: u32,
-    pub cursor: Option<DateTime<Utc>>,
+    pub cursor: Option<ListCursor>,
     pub start: Option<DateTime<Utc>>,
     pub end: Option<DateTime<Utc>>,
 }
