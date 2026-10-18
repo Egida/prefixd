@@ -376,7 +376,16 @@ Directly create a mitigation (e.g. from the dashboard "Mitigate Now" form). Unli
 | `dst_ports` | array | no | Destination ports (default `[]`) |
 | `action` | string | yes | `"discard"` or `"police"` |
 | `rate_bps` | integer | conditional | Required when action is `"police"` |
-| `ttl_seconds` | integer | yes | Time-to-live in seconds (1-86400) |
+| `ttl_seconds` | integer | yes | Requested time-to-live; subject to configured minimum and maximum |
+| `expires_at_cap` | RFC 3339 timestamp | no | Initial creation's absolute expiry ceiling, for maintenance recreation |
+
+When `expires_at_cap` is supplied, the saved expiry is the earlier of that cap
+and the normal requested TTL deadline. Validation happens after awaited
+preflight, under lifecycle serialization. An expired cap or remaining lifetime
+below the configured minimum returns `422` without saving intent or announcing.
+Remaining time is never rounded upward; the ordinary TTL guardrails still apply.
+The cap applies to initial creation only. Subsequent detector events can extend
+the stored expiry, so pause all creation and extension inputs during maintenance.
 
 **Response (201 Created):**
 
@@ -388,6 +397,12 @@ and adds `"announcement_outcome": "unconfirmed"`. Intent remains Active for
 reconciliation and cleanup; do not blindly recreate it. This outcome belongs to
 the creation request and is not stored or returned by later GET/list requests.
 Neither Active status nor omission of the outcome proves router enforcement.
+If the deadline passes during persistence, enforced creation retains the saved
+intent and returns the same `202`/`unconfirmed` outcome without attempting an
+announcement. Expiry cleanup retires it; reconciliation also rechecks expiry
+after awaited reads before attempting a repair. This prevents starting a new RPC
+after observed expiry, but cannot cancel a mutation already in flight or enforce
+TTL while the controller is stopped.
 
 **Error Responses:**
 
