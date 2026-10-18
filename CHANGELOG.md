@@ -82,6 +82,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Accept explicit `icmpv6` in manual mitigation requests as IPv6 protocol 58.
+  Keep `icmp` as IPv4 protocol 1 and reject cross-family ICMP choices before
+  saving intent or calling the speaker.
+
 - Restore dashboard live cache refresh and notification muting by matching the
   server's WebSocket event names. Label ordinary updates and feed resynchronization
   accurately.

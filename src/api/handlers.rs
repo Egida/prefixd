@@ -415,6 +415,9 @@ pub struct CreateMitigationRequest {
     operator_id: String,
     reason: String,
     victim_ip: String,
+    /// IP protocol: udp, tcp, icmp (IPv4 protocol 1), icmpv6 (IPv6 protocol 58), or any.
+    /// An empty string also selects any protocol. ICMP selectors must match the victim's address family.
+    #[schema(example = "icmpv6")]
     protocol: String,
     #[serde(default)]
     dst_ports: Vec<u16>,
@@ -1563,6 +1566,7 @@ pub async fn get_mitigation(
     responses(
         (status = 201, description = "Mitigation intent created", body = MitigationResponse),
         (status = 202, description = "Intent created; announcement unconfirmed for this request", body = MitigationResponse),
+        (status = 400, description = "Invalid input, including a protocol/address-family mismatch"),
         (status = 409, description = "Conflicting owner or pending withdrawal"),
         (status = 422, description = "Guardrail rejection"),
     )
@@ -1584,9 +1588,10 @@ pub async fn create_mitigation(
     }
 
     // Validate input
-    if let Err(e) = validate_ip(&req.victim_ip) {
-        return Ok(AppError(e).into_response());
-    }
+    let victim_ip = match validate_ip(&req.victim_ip) {
+        Ok(ip) => ip,
+        Err(error) => return Ok(AppError(error).into_response()),
+    };
     if let Err(e) = validate_string_len(&req.reason, "reason", MAX_STRING_LEN) {
         return Ok(AppError(e).into_response());
     }
@@ -1598,11 +1603,19 @@ pub async fn create_mitigation(
     let protocol = match req.protocol.as_str() {
         "udp" => Some(17u8),
         "tcp" => Some(6u8),
-        "icmp" => Some(1u8),
+        "icmp" if victim_ip.is_ipv4() => Some(1u8),
+        "icmpv6" if victim_ip.is_ipv6() => Some(58u8),
+        "icmp" | "icmpv6" => {
+            return Ok(AppError(PrefixdError::InvalidRequest(format!(
+                "protocol '{}' does not match victim IP address family",
+                req.protocol
+            )))
+            .into_response());
+        }
         "any" | "" => None,
         _ => {
             return Ok(AppError(PrefixdError::InvalidRequest(format!(
-                "invalid protocol '{}', expected: udp, tcp, icmp, any",
+                "invalid protocol '{}', expected: udp, tcp, icmp, icmpv6, any",
                 req.protocol
             )))
             .into_response());
@@ -1634,7 +1647,7 @@ pub async fn create_mitigation(
     let inventory = state.inventory.read().await;
     let customer_id = inventory.lookup_ip(&req.victim_ip).map(|c| c.customer_id);
     drop(inventory);
-    let prefix_len = if req.victim_ip.contains(':') { 128 } else { 32 };
+    let prefix_len = if victim_ip.is_ipv6() { 128 } else { 32 };
     let intent = MitigationIntent {
         event_id: Uuid::new_v4(),
         customer_id,

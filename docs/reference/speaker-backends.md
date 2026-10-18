@@ -232,8 +232,9 @@ RPC outcomes, not downstream enforcement or a confirmed restart count.
 
 Automatic detector intent uses IPv4 `/32` and IPv6 `/128` host destinations.
 ICMP floods use protocol 1 for IPv4 and 58 for IPv6 before reaching either
-speaker adapter. The manual mitigation API currently accepts `icmp` as protocol
-1 only; it does not expose an ICMPv6 selector.
+speaker adapter. The manual mitigation API accepts `icmp` for IPv4 protocol 1
+and `icmpv6` for IPv6 protocol 58; cross-family choices return `400` before
+persistence or speaker mutation.
 
 The rustbgpd adapter supports destination prefix, optional protocol, equality
 lists of destination ports, and discard or traffic policing. Components are sent in RFC
