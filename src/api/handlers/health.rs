@@ -150,7 +150,7 @@ async fn check_health_status(
     let (active, db_status, db_error) = match state.repo.count_active_global().await {
         Ok(count) => (count, "connected".to_string(), false),
         Err(e) => {
-            tracing::warn!(target: "prefixd::api::handlers", error = %e, "database health check failed");
+            tracing::warn!(error = %e, "database health check failed");
             (0, format!("error: {}", e), true)
         }
     };
