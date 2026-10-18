@@ -29,7 +29,8 @@ futures-util = "0.3"
 rustls = "0.23"
 
 # Encoding
-base64 = "0.22"
+# Cursor encoding uses the scalar engine; SIMD engines are unused.
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

@@ -90,6 +90,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh cursor encoding to base64 0.23.1 with only its standard-library feature;
+  retain the scalar, unpadded cursor format and strict decoding.
+
 - Isolate integration-test HMAC secrets in bounded child processes, use cached
   bearer-token fixtures and forbid unsafe code in the integration-test crate.
   Cover real bearer startup loading and missing/empty-token rejection in child tests.

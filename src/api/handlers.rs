@@ -3057,7 +3057,36 @@ pub async fn change_password(
 
 #[cfg(test)]
 mod tests {
+    use super::{decode_cursor, encode_cursor};
     use crate::db::PopInfo;
+    use chrono::{DateTime, Utc};
+
+    #[test]
+    fn test_cursor_encoding_known_value() {
+        let timestamp = "2026-10-18T00:00:00+00:00"
+            .parse::<DateTime<Utc>>()
+            .unwrap();
+        let cursor = "MjAyNi0xMC0xOFQwMDowMDowMCswMDowMA";
+
+        assert_eq!(encode_cursor(&timestamp), cursor);
+        assert_eq!(decode_cursor(cursor), Some(timestamp));
+    }
+
+    #[test]
+    fn test_cursor_decode_rejects_invalid_input() {
+        for cursor in [
+            "MjAyNi0xMC0xOFQwMDowMDowMCswMDowMA==", // Padding is not accepted.
+            "MjAyNi0xMC0xOFQwMDowMDowMCswMDowMB",   // Nonzero unused trailing bits.
+            "MjAyNi0xMC0xOFQwMDowMDowMCswMDowMA\n",
+            "*",
+            "a",
+            "_w", // Decodes to invalid UTF-8.
+            "bm90LWEtdGltZXN0YW1w",
+            "",
+        ] {
+            assert_eq!(decode_cursor(cursor), None, "accepted cursor {cursor:?}");
+        }
+    }
 
     #[test]
     fn test_list_pops_includes_current_pop_when_missing() {
