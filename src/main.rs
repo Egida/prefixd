@@ -1,3 +1,6 @@
+#![forbid(unsafe_code)]
+#![deny(clippy::allow_attributes_without_reason)]
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

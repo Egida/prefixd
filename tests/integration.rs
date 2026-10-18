@@ -1,4 +1,7 @@
-#![allow(clippy::field_reassign_with_default)]
+#![allow(
+    clippy::field_reassign_with_default,
+    reason = "Exercise individual settings without duplicating fixture defaults in each test"
+)]
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};

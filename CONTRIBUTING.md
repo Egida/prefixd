@@ -115,6 +115,12 @@ cargo fmt -- --check
 
 ### Linting
 
+The library, daemon and CLI crate roots forbid unsafe code and deny
+`clippy::allow_attributes_without_reason`. Give every handwritten `allow` or
+`expect` a specific `reason = "..."` and place it on the narrowest relevant item.
+Keep any necessary generated-code exceptions inside their protobuf wrapper;
+retain them only for an actual compiler diagnostic.
+
 ```bash
 # Run clippy
 cargo clippy --all-targets --all-features -- -D warnings

@@ -1,4 +1,9 @@
-#![allow(clippy::collapsible_if)]
+#![forbid(unsafe_code)]
+#![deny(clippy::allow_attributes_without_reason)]
+#![allow(
+    clippy::collapsible_if,
+    reason = "Nested authorization and lifecycle guards keep validation boundaries explicit"
+)]
 
 pub mod alerting;
 pub mod api;
