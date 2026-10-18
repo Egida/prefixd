@@ -394,6 +394,10 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
 
 #[async_trait]
 impl FlowSpecWriter for RustBgpdAnnouncer {
+    fn matches_nlri(&self, left: &FlowSpecNlri, right: &FlowSpecNlri) -> Result<bool> {
+        Ok(encode_match(left)? == encode_match(right)?)
+    }
+
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
         let payload = encode(rule)?;
         let response = self
@@ -527,6 +531,35 @@ impl PeerObserver for RustBgpdAnnouncer {
 mod tests {
     use super::*;
     use crate::domain::ActionType;
+
+    #[tokio::test]
+    async fn match_identity_uses_the_same_canonicalization_as_add_and_delete() {
+        let writer = RustBgpdAnnouncer {
+            channel: Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            token: None,
+        };
+        for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
+            let left = FlowSpecNlri {
+                dst_prefix: prefix.into(),
+                protocol: Some(17),
+                dst_ports: vec![443, 53],
+            };
+            let mut right = left.clone();
+            right.dst_ports.reverse();
+            if prefix.contains(':') {
+                right.dst_prefix = "2001:0DB8:0:0:0:0:0:1/128".into();
+            }
+            assert!(writer.matches_nlri(&left, &right).unwrap());
+            right.dst_ports = vec![443, 53, 53];
+            assert!(!writer.matches_nlri(&left, &right).unwrap());
+            right.dst_ports = left.dst_ports.clone();
+            right.protocol = Some(6);
+            assert!(!writer.matches_nlri(&left, &right).unwrap());
+            right.dst_prefix = "invalid".into();
+            assert!(writer.matches_nlri(&left, &right).is_err());
+            assert!(writer.matches_nlri(&right, &left).is_err());
+        }
+    }
 
     #[test]
     fn action_boundaries_preserve_exact_rates_in_both_families() {

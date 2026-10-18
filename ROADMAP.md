@@ -21,14 +21,19 @@ the existing authentication modes and the repository boundary remain the runtime
 baseline. The operator overview puts active mitigations, signals, observation
 limits and expiry ahead of historical activity.
 
+Polling reconciliation repairs missing rules and supported discard/policing action
+drift for uniquely owned intent. This assumes one running controller per POP and
+exclusive administration of its physical speaker target.
+
 These controller and peer results do not establish vendor forwarding. TTL expiry
 requires the running controller; a separate speaker can continue advertising
 after prefixd stops.
 
 ## Near-term work
 
-- Repair action-only drift as well as missing NLRI, with explicit ownership and
-  acknowledgement semantics. Current reconciliation compares NLRI identity.
+- Add stronger announcement acknowledgements and a complete desired/acknowledged
+  ledger. Shared targets also need ownership evidence that distinguishes another
+  controller's local rule with the same match.
 - Qualify router receipt and traffic enforcement separately for each tested
   backend, vendor, software version and topology. Preserve historical GoBGP
   results; qualify rustbgpd against FRR/Juniper and Arista/Cisco independently.
