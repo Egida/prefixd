@@ -230,6 +230,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- Replace the historical roadmap checklist with current remaining work and
+  reconcile speaker/framework decisions with shipped defaults, transports and
+  durable intent. Remove the unusable duplicate PostgreSQL example; use the
+  maintained rustbgpd or GoBGP configuration instead.
+
 - Organize guides, references, explanations and historical evidence with a
   documentation index and local-stack tutorial; retain ADR identifiers.
 

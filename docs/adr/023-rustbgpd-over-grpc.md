@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted; refreshed 2026-10-17. Updates [ADR 001](001-gobgp-sidecar.md).
+Accepted; refreshed 2026-10-18. Updates [ADR 001](001-gobgp-sidecar.md).
 GoBGP remains supported under [ADR 025](025-pluggable-speaker-backends.md).
 
 ## Date
@@ -18,8 +18,8 @@ controlling the separate daemon through its gRPC API (Shape A).
 
 The existing `FlowSpecAnnouncer` boundary isolates policy callers. Backend
 selection, configuration, health naming, CLI/frontend consumers, deployment
-assets and tests still have compatibility surfaces that need deliberate
-migration. Changing the adapter does not erase them.
+assets and tests must agree on the selected backend. Changing the adapter does
+not erase those callers.
 
 Controller and speaker failures are independent. A separate speaker can keep
 advertising after prefixd exits. Application TTL enforcement needs running
@@ -30,9 +30,9 @@ See the corrected [ADR 003](003-fail-open-ttl.md).
 ## Decision
 
 Add a rustbgpd daemon adapter over gRPC behind `FlowSpecAnnouncer`. rustbgpd is
-the preferred integration target; GoBGP remains a maintained choice. Keep
-existing deployment defaults until transport, restart, migration and router
-qualification pass. Do not embed private runtime crates or remove GoBGP code.
+the preferred integration target; GoBGP remains a maintained choice. Normal
+builds and example deployment now prefer rustbgpd, with GoBGP selectable in the
+same controller image. Do not embed private runtime crates or remove GoBGP code.
 
 The relevant controller message fields were checked against `v0.77.0`:
 
@@ -57,7 +57,7 @@ Reconciliation remains polling-based (ADR 011). Pushed event subscriptions and
 batch injection are not prerequisites. Generic write-only speakers require the
 capability and durable-ledger work in ADR 025 before they can be enabled safely.
 
-## Compatibility and rollout
+## Controller contract and qualification
 
 rustbgpd's ADR 0139 inventories the scoped IPv4/IPv6 controller boundary:
 Add/DeleteFlowSpec and selected, retained local-intent and committed advertised
@@ -69,29 +69,32 @@ The release gate for the controller promotion is resolved: v0.76.0 and v0.77.0
 both contain ADR 0139. The minimum controller version is v0.76.0; the current
 qualification pin is v0.77.0. Immutable image identities live in
 [the release fixture](../../tests/fixtures/rustbgpd/releases.json), and CI runs
-local lifecycle/TTL/restart checks on both releases. This does not qualify router
-enforcement or the still-separate deployment transport work.
+local lifecycle/TTL/restart checks on both releases. Owner-only UDS and verified
+client-certificate mTLS are implemented. Both secure deployment profiles have
+[dated qualification](../reference/qualification/speaker-profiles-2026-10-18.md).
+This does not qualify router enforcement.
 
 Pin the exact released daemon used for deployment qualification and review its
 contract and changelog on upgrade. The proto, generated clients, tonic/prost,
 GoBGP tests and public compatibility exports remain maintained while both
 backends are supported.
 
-Qualification requires real-daemon lifecycle, TTL withdrawal, restart recovery,
-and separately attributed router evidence. Unit/fake-RPC tests do not establish
-router enforcement. UDS, bearer/TLS and client-certificate mTLS support must be
-stated per implemented transport, not inferred from daemon capabilities.
+Qualification requires real-daemon lifecycle, TTL withdrawal and restart recovery.
+Router evidence is separately attributed. Unit/fake-RPC tests do not establish
+router enforcement. Supported transports and their bounds are documented in
+[speaker backends](../reference/speaker-backends.md).
 
 ## Consequences
 
 prefixd gains another speaker without taking ownership of a BGP runtime. It
-also takes on a second adapter and protocol pin to maintain. A future default
-switch is an explicit migration milestone, not removal of operator choice.
+also takes on a second adapter and protocol pin to maintain. Preferring rustbgpd
+preserves operator choice.
 
-Framework migration stays staged under ADR 024; it must not obscure the first
-adapter's qualification or change authentication/configuration behavior here.
+Framework migration is deferred under
+[ADR 026](026-facelift-framework-scope.md); it must not obscure adapter
+qualification or change authentication/configuration behavior here.
 
 ## Follow-ups
 
-The [roadmap](../../ROADMAP.md) separates adapter, API compatibility and support
-policy work from deployment, restart, router and generic-backend qualification.
+The [roadmap](../../ROADMAP.md) retains action-aware reconciliation, separately
+qualified router enforcement and durable write-only recovery as remaining work.

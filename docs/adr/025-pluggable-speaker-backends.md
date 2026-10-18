@@ -2,7 +2,9 @@
 
 ## Status
 
-Accepted. Backend rollout remains gated on the validation below.
+Accepted; implementation status refreshed 2026-10-18. Rust-first deployment
+qualification is recorded below; additional adapters and vendor enforcement
+need their own evidence.
 
 Extends [ADR 023](023-rustbgpd-over-grpc.md) and updates
 [ADR 001](001-gobgp-sidecar.md) and [ADR 007](007-trait-based-bgp-abstraction.md).
@@ -33,29 +35,36 @@ for that class of backend.
 - Keep the BGP daemon in a separate process, controlled through an adapter.
   Peer configuration and routing policy remain the daemon's responsibility.
 - Develop rustbgpd as the preferred backend. Keep GoBGP as a maintained,
-  supported alternative, with its existing configuration and public protobuf
-  export preserved during migration. Mock remains the test backend.
-- Add rustbgpd behind `bgp-rustbgpd` and explicit runtime selection first.
-  Existing defaults stay on GoBGP until deployment, restart, migration, and
-  router interoperability checks pass. Preference does not establish parity.
+  supported alternative, preserving its configuration and public protobuf export.
+  Mock remains the test backend.
+- Include `bgp-rustbgpd` in normal builds and select the backend explicitly in
+  configuration. Canonical examples and deployment prefer rustbgpd; an explicit
+  GoBGP profile uses the same controller image. Preference does not establish
+  router parity.
 - Reconcile rustbgpd against its retained **locally injected** rules, using
   `received_peer_address = "0.0.0.0"` and checking `received_view`. The selected
   Loc-RIB can hide a local rule behind a received candidate.
-- Require authenticated, bounded daemon calls. The first transport is bearer
-  TCP with verified server TLS for remote endpoints; plaintext is restricted to
-  literal loopback addresses. UDS and client-certificate mTLS follow separately.
+- Require authenticated, bounded daemon calls. rustbgpd supports owner-only UDS,
+  bearer TCP with verified server TLS, and client-certificate mTLS. Plaintext TCP
+  is restricted to literal loopback addresses. The GoBGP profile isolates its
+  loopback management endpoint in a shared controller/speaker network namespace.
 - Preserve the distinction between local mutation acceptance, committed
   advertisement, and remote installation. A successful RPC proves only the
   documented local mutation stage.
-- Add optional reader/peer capabilities and durable reconciliation before
-  enabling generic adapters. Report unsupported capabilities explicitly.
+- Optional reader/peer capabilities are implemented. Require durable confirmed
+  announcement state before enabling generic write-only adapters; pending
+  withdrawal cleanup alone is insufficient. Report unsupported capabilities
+  explicitly.
   Neither ledger state nor missing observation proves the daemon's actual RIB.
 
 prefixd maintainers own the bundled rustbgpd and GoBGP adapters, their tests,
 and security fixes. A community adapter needs a named maintainer and passing
-conformance coverage before being described as supported. Implementation and qualification are separate: GoBGP is the existing backend,
-rustbgpd is the preferred integration target, and generic/community adapters
-require their own evidence. Vendor receipts apply only to the backend tested.
+conformance coverage before being described as supported. Both bundled adapters
+have released-daemon CI and shared readable-backend contracts; secure profiles
+have [dated qualification](../reference/qualification/speaker-profiles-2026-10-18.md).
+See [speaker backends](../reference/speaker-backends.md) for peer and lifecycle
+evidence. Generic/community adapters require their own evidence. Vendor receipts
+apply only to the backend tested.
 
 ## Validation and rollout
 
