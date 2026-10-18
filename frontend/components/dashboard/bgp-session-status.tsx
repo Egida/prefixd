@@ -1,71 +1,54 @@
 "use client"
 
-import { motion } from "motion/react"
-import { useHealthDetail, usePops } from "@/hooks/use-api"
+import { useHealthDetail } from "@/hooks/use-api"
 import { cn } from "@/lib/utils"
-import { useReducedMotion } from "@/hooks/use-reduced-motion"
+import { Skeleton } from "@/components/ui/skeleton"
+
+export function formatControllerUptime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "unavailable"
+  const minutes = Math.floor(seconds / 60)
+  if (minutes === 0) return `${Math.floor(seconds)}s`
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ${minutes % 60}m`
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`
+}
 
 export function BgpSessionStatus() {
   const { data: health, error } = useHealthDetail()
-  const { data: pops } = usePops()
-  const reducedMotion = useReducedMotion()
-
   const status = error ? "ERROR"
     : !health ? "LOADING"
-    : health.gobgp.status === "unsupported" ? "UNSUPPORTED"
+    : health.speaker?.capabilities.peer_observer === false || health.gobgp.status === "unsupported" ? "UNSUPPORTED"
     : health.gobgp.status !== "connected" ? "ERROR"
     : Object.keys(health.bgp_sessions).length === 0 ? "NO PEERS"
     : health.bgp_session_up ? "UP" : "DOWN"
   const isUp = status === "UP"
   const isError = status === "ERROR" || status === "DOWN"
-  const shouldAnimate = isUp && !reducedMotion
+  const observed = error ? undefined : health
+  const peers = observed ? Object.values(observed.bgp_sessions) : []
+  const established = peers.filter(state => state === "established").length
 
   return (
-    <div className="border border-border bg-card p-4">
-      <h3 className="text-xs font-mono uppercase tracking-wide text-muted-foreground mb-3">System Status</h3>
-      <div className="flex flex-wrap gap-2">
-        <div className="group relative flex items-center gap-2 bg-secondary px-3 py-2 border border-border">
-          {shouldAnimate ? (
-            <motion.span
-              className="size-1.5 bg-primary"
-              animate={{ opacity: [1, 0.4, 1] }}
-              transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
-            />
-          ) : (
-            <span className={cn("size-1.5", isUp ? "bg-primary" : isError ? "bg-destructive" : "bg-muted-foreground")} />
-          )}
-          <span className="font-mono text-xs text-foreground">BGP</span>
-          <span className={cn("text-[10px] font-mono uppercase", isUp ? "text-primary" : isError ? "text-destructive" : "text-muted-foreground")}>
-            {status}
-          </span>
-        </div>
-
-        {health && (
-          <div className="group relative flex items-center gap-2 bg-secondary px-3 py-2 border border-border">
-            <span className="size-1.5 bg-primary" />
-            <span className="font-mono text-xs text-foreground">DB</span>
-            <span className="text-[10px] font-mono uppercase text-primary">
-              {health.database === "connected" ? "OK" : "ERR"}
-            </span>
-          </div>
-        )}
-
-        {health && (
-          <div className="group relative flex items-center gap-2 bg-secondary px-3 py-2 border border-border">
-            <span className="font-mono text-xs text-muted-foreground tabular-nums">
-              {health.active_mitigations} active
-            </span>
-          </div>
-        )}
-
-        {pops && pops.length > 1 && (
-          <div className="flex items-center gap-2 bg-secondary px-3 py-2 border border-border">
-            <span className="font-mono text-xs text-muted-foreground">
-              {pops.length} POPs
-            </span>
-          </div>
-        )}
+    <section aria-label="Speaker and controller health" className="flex flex-wrap items-center gap-x-6 gap-y-3 rounded-lg border bg-card px-4 py-3 text-[13px]">
+      <div className="flex items-center gap-2">
+        <span aria-hidden="true" className={cn("size-2 rounded-full", isUp ? "bg-primary" : isError ? "bg-destructive" : "bg-muted-foreground")} />
+        <span className="text-muted-foreground">Backend</span>
+        <span className="font-medium">{observed ? observed.speaker?.backend ?? "Unknown backend" : "Unavailable"}</span>
+        <span className="text-muted-foreground">Peers <span className={cn("font-mono text-xs", isUp ? "text-primary" : isError ? "text-destructive" : "text-muted-foreground")}>{status}</span></span>
       </div>
-    </div>
+      {error ? (
+        <span role="status" className="text-destructive">Health unavailable. Retrying automatically.</span>
+      ) : !health ? (
+        <div role="status" className="flex items-center gap-2 text-muted-foreground"><Skeleton className="h-4 w-24" />Loading health…</div>
+      ) : (
+        <>
+          <span className="text-muted-foreground">
+            Sessions <span className="font-mono text-foreground">{status === "UNSUPPORTED" || status === "ERROR" ? "unavailable" : `${established}/${peers.length} established`}</span>
+          </span>
+          <span className="text-muted-foreground">Database <span className={cn(health.database === "connected" ? "text-foreground" : "text-destructive")}>{health.database === "connected" ? "connected" : "unavailable"}</span></span>
+          <span className="text-muted-foreground sm:ml-auto">Controller <span className="font-mono text-foreground">v{health.version}</span> · up <span className="font-mono">{formatControllerUptime(health.uptime_seconds)}</span></span>
+        </>
+      )}
+    </section>
   )
 }

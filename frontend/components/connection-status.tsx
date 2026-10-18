@@ -1,6 +1,6 @@
 "use client"
 
-import { Wifi, WifiOff, Loader2 } from "lucide-react"
+import { Wifi, WifiOff, Clock3 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { type ConnectionState } from "@/hooks/use-websocket"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -16,17 +16,16 @@ export function ConnectionStatus({ state, className }: ConnectionStatusProps) {
       case "connected":
         return {
           icon: Wifi,
-          color: "text-green-500",
+          color: "text-primary",
           label: "Connected",
           description: "Real-time updates active",
         }
       case "connecting":
         return {
-          icon: Loader2,
-          color: "text-yellow-500",
+          icon: Clock3,
+          color: "text-warning",
           label: "Connecting...",
           description: "Establishing connection",
-          animate: true,
         }
       case "disconnected":
         return {
@@ -52,14 +51,8 @@ export function ConnectionStatus({ state, className }: ConnectionStatusProps) {
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger asChild>
-          <div className={cn("flex items-center gap-1.5", className)}>
-            <Icon
-              className={cn(
-                "h-4 w-4",
-                config.color,
-                config.animate && "animate-spin"
-              )}
-            />
+          <div role="status" aria-label={config.description} className={cn("flex items-center gap-1.5", className)}>
+            <Icon className={cn("size-4", config.color)} aria-hidden="true" />
             <span className="text-xs text-muted-foreground hidden sm:inline">
               {config.label}
             </span>

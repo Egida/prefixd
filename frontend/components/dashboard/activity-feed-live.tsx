@@ -1,11 +1,10 @@
 "use client"
 
 import Link from "next/link"
-import { motion } from "motion/react"
-import { Shield, AlertTriangle, User, FileText, RefreshCw, AlertCircle } from "lucide-react"
+import { Shield, AlertTriangle, User, FileText, AlertCircle } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useEvents, useAuditLog } from "@/hooks/use-api"
-import { useReducedMotion } from "@/hooks/use-reduced-motion"
+import { Skeleton } from "@/components/ui/skeleton"
 
 interface ActivityItem {
   id: string
@@ -52,7 +51,6 @@ export function ActivityFeedLive() {
   const { data: auditResp, error: auditError, isLoading: auditLoading } = useAuditLog({ limit: 10 })
   const events = eventsResp?.events
   const audit = auditResp?.entries
-  const reducedMotion = useReducedMotion()
 
   const isLoading = eventsLoading || auditLoading
   const hasError = eventsError || auditError
@@ -105,11 +103,11 @@ export function ActivityFeedLive() {
 
   if (hasError) {
     return (
-      <div className="border border-border bg-card p-4 h-full">
-        <h3 className="text-xs font-mono uppercase tracking-wide text-muted-foreground mb-3">Recent Activity</h3>
+      <div className="min-w-0">
+        <h3 className="font-medium mb-3 text-balance">Recent Activity</h3>
         <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
           <AlertCircle className="h-6 w-6 mb-2 text-destructive" />
-          <p className="text-xs">Failed to load activity</p>
+          <p className="text-sm">Failed to load activity</p>
         </div>
       </div>
     )
@@ -117,11 +115,11 @@ export function ActivityFeedLive() {
 
   if (isLoading && displayActivities.length === 0) {
     return (
-      <div className="border border-border bg-card p-4 h-full">
-        <h3 className="text-xs font-mono uppercase tracking-wide text-muted-foreground mb-3">Recent Activity</h3>
+      <div className="min-w-0">
+        <h3 className="font-medium mb-3 text-balance">Recent Activity</h3>
         <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-          <RefreshCw className="h-5 w-5 animate-spin mb-2" />
-          <p className="text-xs">Loading...</p>
+          <Skeleton className="mb-3 h-8 w-full" />
+          <p role="status" className="text-sm">Loading activity…</p>
         </div>
       </div>
     )
@@ -129,26 +127,24 @@ export function ActivityFeedLive() {
 
   if (displayActivities.length === 0) {
     return (
-      <div className="border border-border bg-card p-4 h-full">
-        <h3 className="text-xs font-mono uppercase tracking-wide text-muted-foreground mb-3">Recent Activity</h3>
+      <div className="min-w-0">
+        <h3 className="font-medium mb-3 text-balance">Recent Activity</h3>
         <div className="flex flex-col items-center justify-center py-8 text-muted-foreground">
-          <p className="text-xs">No recent activity</p>
+          <p className="text-sm">No recent activity</p>
+          <Link href="/audit-log" className="mt-2 rounded-sm text-primary hover:underline">View audit log</Link>
         </div>
       </div>
     )
   }
 
   return (
-    <div className="border border-border bg-card p-4 h-full">
-      <h3 className="text-xs font-mono uppercase tracking-wide text-muted-foreground mb-3">Recent Activity</h3>
+    <div className="min-w-0">
+      <h3 className="font-medium mb-3 text-balance">Recent Activity</h3>
       <div className="space-y-0">
         {displayActivities.map((activity, index) => {
           const content = (
-            <motion.div
+            <div
               key={activity.id}
-              initial={reducedMotion ? false : { opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.15, ease: "easeOut", delay: reducedMotion ? 0 : index * 0.03 }}
               className={cn(
                 "flex items-start gap-3 py-2 hover:bg-secondary/50",
                 index !== displayActivities.length - 1 && "border-b border-border/50",
@@ -157,19 +153,19 @@ export function ActivityFeedLive() {
             >
               <div className="mt-0.5 opacity-60">{getActivityIcon(activity.type)}</div>
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="font-mono text-[10px] text-muted-foreground whitespace-nowrap tabular-nums">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px]">
+                  <span className="font-mono text-xs text-muted-foreground whitespace-nowrap tabular-nums">
                     {formatTimestamp(activity.timestamp)}
                   </span>
-                  <span className="text-foreground truncate">{activity.description}</span>
+                  <span className="text-foreground text-pretty">{activity.description}</span>
                 </div>
-                {activity.ip && <span className="font-mono text-[10px] text-primary">{activity.ip}</span>}
+                {activity.ip && <span className="font-mono text-xs text-primary">{activity.ip}</span>}
               </div>
-            </motion.div>
+            </div>
           )
 
           return activity.href ? (
-            <Link key={activity.id} href={activity.href} className="block">
+            <Link key={activity.id} href={activity.href} className="block rounded-sm">
               {content}
             </Link>
           ) : (

@@ -74,6 +74,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Put active mitigation intent, signal evidence, expiry and honest router-observation
+  limits first in the operator workspace. Refresh the light/dark theme, Geist
+  typography and navigation; preserve user zoom and remove decorative pulses,
+  hardcoded quota caps and sampled action totals presented as global counts.
+
 - Refresh the security support policy, authentication and audit guidance, and
   release checklist to match the maintained release series and CI artifacts.
 
@@ -92,6 +97,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binaries. Current stable tests and lints remain required.
 
 ### Fixed
+
+- Restore immediate dashboard retries after failed GET requests while continuing
+  to share requests that are still pending.
 
 - Reject non-finite correlation confidence thresholds and source/default weights
   on YAML loading and API edits, including numeric overflow.

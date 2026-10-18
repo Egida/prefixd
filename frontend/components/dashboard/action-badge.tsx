@@ -19,8 +19,8 @@ export function ActionBadge({ actionType, rateBps, size = "default" }: ActionBad
   return (
     <span
       className={cn(
-        "inline-flex items-center font-mono uppercase tracking-wide border",
-        size === "sm" ? "px-1.5 py-0.5 text-[9px]" : "px-2 py-0.5 text-[10px]",
+        "inline-flex items-center rounded-sm border font-medium tabular-nums",
+        size === "sm" ? "px-1.5 py-0.5 text-xs" : "px-2 py-0.5 text-[13px]",
         isPolice
           ? "bg-primary/5 text-primary border-primary/30"
           : "bg-destructive/5 text-destructive border-destructive/30",
