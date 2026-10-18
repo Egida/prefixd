@@ -1,6 +1,9 @@
 "use client"
 
 import { useMemo, useState } from "react"
+import Link from "next/link"
+import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid } from "recharts"
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart"
 import { useTimeseries } from "@/hooks/use-api"
@@ -32,8 +35,8 @@ function formatHour(bucket: string) {
 export function MitigationActivityChart() {
   const [rangeIdx, setRangeIdx] = useState(2) // default 24h
   const selectedRange = RANGE_OPTIONS[rangeIdx]
-  const { data: mitigationData, error: mitigationError } = useTimeseries("mitigations", selectedRange.range, selectedRange.bucket)
-  const { data: eventData, error: eventError } = useTimeseries("events", selectedRange.range, selectedRange.bucket)
+  const { data: mitigationData, error: mitigationError, mutate: retryMitigations } = useTimeseries("mitigations", selectedRange.range, selectedRange.bucket)
+  const { data: eventData, error: eventError, mutate: retryEvents } = useTimeseries("events", selectedRange.range, selectedRange.bucket)
 
   const chartData = useMemo(() => {
     const bucketMap = new Map<string, { bucket: string; mitigations: number; events: number }>()
@@ -67,123 +70,46 @@ export function MitigationActivityChart() {
   const isLoading = !mitigationData || !eventData
   const hasError = Boolean(mitigationError || eventError)
 
-  if (isLoading) {
-    return (
-      <div className="border border-border bg-card p-4">
-        <h3 className="text-xs font-mono uppercase text-muted-foreground mb-3">
-          Activity ({selectedRange.label})
-        </h3>
-        <div className="flex items-center justify-center h-32 text-muted-foreground text-xs">
-          Loading...
-        </div>
-      </div>
-    )
-  }
-
-  if (hasError) {
-    return (
-      <div className="border border-border bg-card p-4">
-        <h3 className="text-xs font-mono uppercase text-muted-foreground mb-3">
-          Activity ({selectedRange.label})
-        </h3>
-        <div className="flex items-center justify-center h-32 text-xs text-destructive">
-          Unable to load activity chart
-        </div>
-      </div>
-    )
-  }
-
-  if (chartData.length === 0) {
-    return (
-      <div className="border border-border bg-card p-4">
-        <h3 className="text-xs font-mono uppercase text-muted-foreground mb-3">
-          Activity ({selectedRange.label})
-        </h3>
-        <div className="flex items-center justify-center h-32 text-muted-foreground text-xs">
-          No activity in the last {selectedRange.label}
-        </div>
-      </div>
-    )
-  }
-
   return (
-    <div className="border border-border bg-card p-4">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-xs font-mono uppercase text-muted-foreground">
-          Activity ({selectedRange.label})
-        </h3>
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-0.5 bg-secondary p-0.5">
-            {RANGE_OPTIONS.map((opt, i) => (
-              <button
-                key={opt.label}
-                onClick={() => setRangeIdx(i)}
-                className={cn(
-                  "px-2 py-0.5 text-[10px] font-mono transition-colors",
-                  i === rangeIdx
-                    ? "bg-background text-foreground"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="size-2 rounded-full" style={{ backgroundColor: "var(--color-chart-1)" }} />
-            <span className="text-[10px] text-muted-foreground">Mitigations</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <span className="size-2 rounded-full" style={{ backgroundColor: "var(--color-chart-2)" }} />
-            <span className="text-[10px] text-muted-foreground">Events</span>
-          </div>
+    <section aria-label="Activity chart" className="min-w-0">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="font-medium text-balance">Activity <span className="text-muted-foreground">({selectedRange.label})</span></h2>
+        <div className="flex rounded-md bg-muted p-0.5" aria-label="Activity range">
+          {RANGE_OPTIONS.map((opt, i) => (
+            <button key={opt.label} onClick={() => setRangeIdx(i)} aria-pressed={i === rangeIdx}
+              className={cn("min-h-8 rounded-sm px-2.5 font-mono text-xs", i === rangeIdx ? "bg-background text-foreground shadow-xs" : "text-muted-foreground hover:text-foreground")}>
+              {opt.label}
+            </button>
+          ))}
         </div>
       </div>
-      <ChartContainer config={chartConfig} className="h-[140px] w-full">
-        <AreaChart data={chartData} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
-          <defs>
-            <linearGradient id="fillMitigations" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="var(--color-chart-1)" stopOpacity={0.3} />
-              <stop offset="95%" stopColor="var(--color-chart-1)" stopOpacity={0} />
-            </linearGradient>
-            <linearGradient id="fillEvents" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="var(--color-chart-2)" stopOpacity={0.2} />
-              <stop offset="95%" stopColor="var(--color-chart-2)" stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" className="stroke-border" />
-          <XAxis
-            dataKey="time"
-            tickLine={false}
-            axisLine={false}
-            tick={{ fontSize: 10 }}
-            className="fill-muted-foreground"
-            interval="preserveStartEnd"
-          />
-          <YAxis
-            tickLine={false}
-            axisLine={false}
-            tick={{ fontSize: 10 }}
-            className="fill-muted-foreground"
-            allowDecimals={false}
-          />
-          <ChartTooltip content={<ChartTooltipContent />} />
-          <Area
-            type="monotone"
-            dataKey="mitigations"
-            stroke="var(--color-chart-1)"
-            fill="url(#fillMitigations)"
-            strokeWidth={1.5}
-          />
-          <Area
-            type="monotone"
-            dataKey="events"
-            stroke="var(--color-chart-2)"
-            fill="url(#fillEvents)"
-            strokeWidth={1.5}
-          />
-        </AreaChart>
-      </ChartContainer>
-    </div>
+      {hasError ? (
+        <div role="alert" className="space-y-3 py-8">
+          <p className="text-muted-foreground">Unable to load activity chart</p>
+          <Button size="sm" variant="outline" onClick={() => { void Promise.allSettled([retryMitigations(), retryEvents()]) }}>Retry activity</Button>
+        </div>
+      ) : isLoading ? (
+        <div role="status" className="space-y-3 py-4"><Skeleton className="h-28 w-full" /><p className="text-muted-foreground">Loading activity…</p></div>
+      ) : chartData.length === 0 ? (
+        <div className="space-y-2 py-8"><p className="text-muted-foreground">No activity in the last {selectedRange.label}</p><Link href="/events" className="rounded-sm text-primary hover:underline">Review events</Link></div>
+      ) : (
+        <>
+          <div className="mb-3 flex gap-4 text-xs text-muted-foreground">
+            <span className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-chart-1" />Mitigations</span>
+            <span className="flex items-center gap-1.5"><span className="size-2 rounded-full bg-chart-2" />Events</span>
+          </div>
+          <ChartContainer config={chartConfig} className="h-40 w-full">
+            <AreaChart data={chartData} margin={{ top: 4, right: 4, bottom: 0, left: -20 }}>
+              <CartesianGrid vertical={false} className="stroke-border" />
+              <XAxis dataKey="time" tickLine={false} axisLine={false} tick={{ fontSize: 11 }} className="fill-muted-foreground" interval="preserveStartEnd" />
+              <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 11 }} className="fill-muted-foreground" allowDecimals={false} />
+              <ChartTooltip content={<ChartTooltipContent />} />
+              <Area type="monotone" dataKey="mitigations" stroke="var(--color-chart-1)" fill="var(--color-chart-1)" fillOpacity={0.08} strokeWidth={1.5} isAnimationActive={false} />
+              <Area type="monotone" dataKey="events" stroke="var(--color-chart-2)" fill="var(--color-chart-2)" fillOpacity={0.04} strokeWidth={1.5} isAnimationActive={false} />
+            </AreaChart>
+          </ChartContainer>
+        </>
+      )}
+    </section>
   )
 }

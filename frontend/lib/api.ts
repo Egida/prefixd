@@ -150,7 +150,7 @@ async function fetchApi<T>(endpoint: string, options?: RequestInit): Promise<T> 
     if (cached) return cached as Promise<T>
     
     const promise = doFetch<T>(url, { ...options, headers }).finally(() => {
-      setTimeout(() => requestCache.delete(cacheKey), 100)
+      requestCache.delete(cacheKey)
     })
     requestCache.set(cacheKey, promise)
     

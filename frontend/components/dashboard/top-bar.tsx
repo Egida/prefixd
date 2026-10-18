@@ -2,99 +2,49 @@
 
 import { useEffect, useState } from "react"
 import { Menu, Search, Sun, Moon } from "lucide-react"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Button } from "@/components/ui/button"
+import { DialogTrigger } from "@/components/ui/dialog"
 import { ConnectionStatus } from "@/components/connection-status"
 import { UserMenu } from "@/components/user-menu"
 import { useWebSocket } from "@/hooks/use-websocket"
-import { usePops, useHealthDetail } from "@/hooks/use-api"
+import { useHealthDetail } from "@/hooks/use-api"
 import { useTheme } from "next-themes"
 
 interface TopBarProps {
-  onMenuClick?: () => void
   onSearchClick?: () => void
 }
 
-export function TopBar({ onMenuClick, onSearchClick }: TopBarProps) {
-  const [time, setTime] = useState<string>("")
+export function TopBar({ onSearchClick }: TopBarProps) {
+  const [time, setTime] = useState("")
   const [mounted, setMounted] = useState(false)
   const { connectionState } = useWebSocket()
-  const { data: popsData } = usePops()
-  const { theme, setTheme } = useTheme()
+  const { data: health, error } = useHealthDetail()
+  const { resolvedTheme, setTheme } = useTheme()
+  const currentPop = !error ? health?.pop?.toUpperCase() : undefined
 
   useEffect(() => { setMounted(true) }, [])
-  const { data: health } = useHealthDetail()
-
-  const currentPop = health?.pop?.toUpperCase()
-  const pops = popsData?.map((p) => p.pop.toUpperCase()) ?? (currentPop ? [currentPop] : [])
-
   useEffect(() => {
-    const updateTime = () => {
-      const now = new Date()
-      setTime(
-        now.toLocaleTimeString("en-US", {
-          timeZone: "UTC",
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-          hour12: false,
-        }) + " UTC",
-      )
-    }
+    const updateTime = () => setTime(new Date().toLocaleTimeString("en-GB", { timeZone: "UTC", hour12: false }) + " UTC")
     updateTime()
     const interval = setInterval(updateTime, 1000)
     return () => clearInterval(interval)
   }, [])
 
   return (
-    <header className="sticky top-0 z-30 flex h-12 items-center justify-between border-b border-border bg-background/95 px-3 sm:px-4 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="flex items-center gap-3">
-        <button
-          onClick={onMenuClick}
-          className="lg:hidden p-2 -ml-2 text-muted-foreground hover:text-foreground min-h-[44px] min-w-[44px] flex items-center justify-center"
-        >
-          <Menu className="h-4 w-4" />
-        </button>
-
-        <div className="flex lg:hidden items-center gap-2">
-          <div className="flex h-6 w-6 items-center justify-center bg-primary">
-            <span className="font-mono text-[10px] font-bold text-primary-foreground">P</span>
-          </div>
-        </div>
-
-        <Select defaultValue={currentPop}>
-          <SelectTrigger className="w-20 h-7 bg-secondary border-border text-xs font-mono">
-            <SelectValue placeholder={currentPop ?? "..."} />
-          </SelectTrigger>
-          <SelectContent>
-            {pops.map((pop) => (
-              <SelectItem key={pop} value={pop} className="text-xs font-mono">
-                {pop}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-
-        <button
-          onClick={onSearchClick}
-          className="hidden sm:flex items-center gap-2 h-7 px-2 border border-border bg-secondary/50 text-xs text-muted-foreground hover:bg-secondary hover:text-foreground transition-colors"
-        >
-          <Search className="h-3 w-3" />
-          <span className="hidden md:inline font-mono">Search</span>
-          <kbd className="kbd">⌘K</kbd>
-        </button>
+    <header className="sticky top-0 z-30 flex h-14 min-w-0 items-center justify-between gap-2 border-b bg-background px-4 sm:px-6">
+      <div className="flex min-w-0 items-center gap-2 sm:gap-4">
+        <DialogTrigger asChild><Button variant="ghost" className="size-11 shrink-0 p-0 lg:hidden" aria-label="Open navigation"><Menu className="size-4" /></Button></DialogTrigger>
+        <span className="whitespace-nowrap text-xs text-muted-foreground">POP <span className="font-mono font-medium text-foreground">{currentPop ?? "unknown"}</span></span>
+        <Button variant="outline" size="sm" onClick={onSearchClick} aria-label="Search workspace" className="hidden gap-2 text-muted-foreground sm:inline-flex">
+          <Search className="size-3.5" aria-hidden="true" />Search<kbd className="kbd ml-3">⌘K</kbd>
+        </Button>
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex shrink-0 items-center gap-1.5 sm:gap-4">
         <ConnectionStatus state={connectionState} />
-        <div className="text-[10px] font-mono text-muted-foreground tabular-nums">{time}</div>
-        {mounted && (
-          <button
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
-            className="p-1.5 text-muted-foreground hover:text-foreground transition-colors"
-            title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
-          >
-            {theme === "dark" ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
-          </button>
-        )}
+        <time className="hidden font-mono text-xs text-muted-foreground tabular-nums xl:block">{time}</time>
+        {mounted ? <Button variant="ghost" className="size-11 p-0 sm:size-9" onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")} aria-label={`Switch to ${resolvedTheme === "dark" ? "light" : "dark"} mode`}>
+          {resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
+        </Button> : null}
         <UserMenu />
       </div>
     </header>
