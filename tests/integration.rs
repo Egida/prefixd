@@ -8169,6 +8169,269 @@ async fn test_remove_safelist_not_found() {
 
 // ─── Manual mitigate ───────────────────────────────────────────────────
 
+mod manual_protocol {
+    use super::*;
+    use prefixd::domain::{ActionType, MitigationStatus, mitigation_rule};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    #[derive(Default)]
+    struct Speaker {
+        inner: MockAnnouncer,
+        mutations: AtomicUsize,
+    }
+
+    impl prefixd::bgp::FlowSpecAnnouncer for Speaker {
+        fn backend(&self) -> &'static str {
+            "mock"
+        }
+        fn reader(&self) -> Option<&dyn FlowSpecReader> {
+            Some(&self.inner)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for Speaker {
+        async fn announce(
+            &self,
+            rule: &prefixd::domain::FlowSpecRule,
+        ) -> prefixd::error::Result<()> {
+            self.mutations.fetch_add(1, SeqCst);
+            self.inner.announce(rule).await
+        }
+        async fn withdraw(
+            &self,
+            rule: &prefixd::domain::FlowSpecRule,
+        ) -> prefixd::error::Result<()> {
+            self.mutations.fetch_add(1, SeqCst);
+            self.inner.withdraw(rule).await
+        }
+    }
+
+    fn state(auth: AuthMode) -> (Arc<AppState>, Arc<MockRepository>, Arc<Speaker>) {
+        let mut settings = test_settings();
+        settings.mode = prefixd::config::OperationMode::Enforced;
+        settings.http.auth.mode = auth;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(Speaker::default());
+        let state = AppState::new(
+            settings,
+            test_inventory(),
+            test_playbooks(),
+            repo.clone(),
+            speaker.clone(),
+            ".".into(),
+        )
+        .unwrap();
+        (state, repo, speaker)
+    }
+
+    fn payload(ip: &str, protocol: &str) -> serde_json::Value {
+        serde_json::json!({
+            "victim_ip": ip, "protocol": protocol, "action": "discard",
+            "ttl_seconds": 120, "reason": "manual protocol test"
+        })
+    }
+
+    async fn post(state: Arc<AppState>, payload: serde_json::Value) -> axum::response::Response {
+        create_test_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/mitigations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    async fn assert_no_mutation(repo: &MockRepository, speaker: &Speaker) {
+        assert!(
+            repo.list_mitigations(
+                None,
+                None,
+                None,
+                None,
+                &prefixd::db::ListParams {
+                    limit: 10,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(speaker.mutations.load(SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn protocols_preserve_exact_intent_and_announcement() {
+        let cases: &[(&str, &str, Option<u8>, &[u16])] = &[
+            ("203.0.113.10", "icmp", Some(1), &[]),
+            ("2001:db8::10", "icmpv6", Some(58), &[]),
+            ("::ffff:203.0.113.10", "icmpv6", Some(58), &[]),
+            (
+                "203.0.113.10",
+                "udp",
+                Some(17),
+                &[53, 80, 123, 443, 853, 5353, 8080, 9000],
+            ),
+            (
+                "2001:db8::10",
+                "udp",
+                Some(17),
+                &[53, 80, 123, 443, 853, 5353, 8080, 9000],
+            ),
+            ("203.0.113.10", "tcp", Some(6), &[80, 443]),
+            ("2001:db8::10", "tcp", Some(6), &[80, 443]),
+            ("203.0.113.10", "any", None, &[]),
+            ("2001:db8::10", "any", None, &[]),
+            ("203.0.113.10", "", None, &[]),
+            ("2001:db8::10", "", None, &[]),
+        ];
+        for &(ip, protocol, expected_protocol, ports) in cases {
+            for action in [ActionType::Discard, ActionType::Police] {
+                let (state, repo, speaker) = state(AuthMode::None);
+                let cap = chrono::Utc::now() + chrono::Duration::seconds(60);
+                let ttl = match protocol {
+                    "any" => 30,
+                    "" => 1800,
+                    _ => 120,
+                };
+                let mut request = payload(ip, protocol);
+                request["dst_ports"] = serde_json::json!(ports);
+                request["action"] = serde_json::json!(action);
+                request["ttl_seconds"] = ttl.into();
+                request["expires_at_cap"] = serde_json::json!(cap);
+                let rate_bps = (action == ActionType::Police).then_some(10_000_000);
+                if let Some(rate) = rate_bps {
+                    request["rate_bps"] = rate.into();
+                }
+                let response = post(state, request).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::CREATED,
+                    "{ip} {protocol} {action}"
+                );
+                let rows = repo
+                    .list_mitigations(
+                        None,
+                        None,
+                        None,
+                        None,
+                        &prefixd::db::ListParams {
+                            limit: 10,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(rows.len(), 1);
+                let saved = &rows[0];
+                assert_eq!(saved.victim_ip, ip);
+                assert_eq!(
+                    saved.match_criteria.dst_prefix,
+                    format!("{ip}/{}", if ip.contains(':') { 128 } else { 32 })
+                );
+                assert_eq!(saved.match_criteria.protocol, expected_protocol);
+                assert_eq!(saved.match_criteria.dst_ports, ports);
+                assert_eq!(saved.action_type, action);
+                assert_eq!(saved.action_params.rate_bps, rate_bps);
+                assert_eq!(saved.status, MitigationStatus::Active);
+                assert_eq!(
+                    saved.expires_at,
+                    cap.min(saved.created_at + chrono::Duration::seconds(ttl))
+                );
+                assert_eq!(speaker.mutations.load(SeqCst), 1);
+                assert_eq!(
+                    serde_json::to_value(speaker.inner.list_active().await.unwrap()).unwrap(),
+                    serde_json::json!([mitigation_rule(saved)])
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_protocols_and_families_cause_no_mutation() {
+        for (ip, protocol, error) in [
+            ("2001:db8::10", "icmp", "address family"),
+            ("203.0.113.10", "icmpv6", "address family"),
+            ("::ffff:203.0.113.10", "icmp", "address family"),
+            ("2001:db8::10", "icmp6", "invalid protocol"),
+            ("2001:db8::10", "ICMPv6", "invalid protocol"),
+            ("203.0.113.10", "gre", "invalid protocol"),
+            ("2001:db8::10", "58", "invalid protocol"),
+            ("203.0.113.10", "1", "invalid protocol"),
+            ("not-an-ip", "icmpv6", "invalid IP address"),
+            ("2001:db8::10/128", "icmpv6", "invalid IP address"),
+            ("[2001:db8::10]", "icmpv6", "invalid IP address"),
+        ] {
+            let (state, repo, speaker) = state(AuthMode::None);
+            let response = post(state, payload(ip, protocol)).await;
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let rows = repo
+                .list_mitigations(
+                    None,
+                    None,
+                    None,
+                    None,
+                    &prefixd::db::ListParams {
+                        limit: 10,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{ip} {protocol}: response={json}, rows={rows:?}, mutations={}",
+                speaker.mutations.load(SeqCst)
+            );
+            assert!(json["error"].as_str().unwrap().contains(error), "{json}");
+            assert_no_mutation(repo.as_ref(), speaker.as_ref()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn icmp_selectors_preserve_ttl_and_auth_guardrails() {
+        for (ip, protocol) in [("203.0.113.10", "icmp"), ("2001:db8::10", "icmpv6")] {
+            for ttl in [0, 29, 1801] {
+                let (state, repo, speaker) = state(AuthMode::None);
+                let mut request = payload(ip, protocol);
+                request["ttl_seconds"] = ttl.into();
+                assert_eq!(
+                    post(state, request).await.status(),
+                    StatusCode::UNPROCESSABLE_ENTITY
+                );
+                assert_no_mutation(repo.as_ref(), speaker.as_ref()).await;
+            }
+            for remaining in [-1, 29] {
+                let (state, repo, speaker) = state(AuthMode::None);
+                let mut request = payload(ip, protocol);
+                request["expires_at_cap"] =
+                    serde_json::json!(chrono::Utc::now() + chrono::Duration::seconds(remaining));
+                assert_eq!(
+                    post(state, request).await.status(),
+                    StatusCode::UNPROCESSABLE_ENTITY
+                );
+                assert_no_mutation(repo.as_ref(), speaker.as_ref()).await;
+            }
+            let (state, repo, speaker) = state(AuthMode::Credentials);
+            assert_eq!(
+                post(state, payload(ip, protocol)).await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert_no_mutation(repo.as_ref(), speaker.as_ref()).await;
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_create_mitigation() {
     let app = setup_app().await;
@@ -8653,6 +8916,14 @@ async fn test_openapi_creation_outcome_is_optional_and_manual_accepted_is_docume
     let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert!(document["paths"]["/v1/mitigations"]["post"]["responses"]["201"].is_object());
     assert!(document["paths"]["/v1/mitigations"]["post"]["responses"]["202"].is_object());
+    assert!(document["paths"]["/v1/mitigations"]["post"]["responses"]["400"].is_object());
+    let protocol =
+        &document["components"]["schemas"]["CreateMitigationRequest"]["properties"]["protocol"];
+    assert_eq!(protocol["example"], "icmpv6");
+    let description = protocol["description"].as_str().unwrap();
+    assert!(description.contains("IPv4 protocol 1"));
+    assert!(description.contains("IPv6 protocol 58"));
+    assert!(description.contains("address family"));
     assert_eq!(
         document["components"]["schemas"]["AnnouncementOutcome"]["enum"],
         serde_json::json!(["unconfirmed"])

@@ -348,7 +348,9 @@ Authorization: Bearer <token>
 Content-Type: application/json
 ```
 
-Directly create a mitigation (e.g. from the dashboard "Mitigate Now" form). Unlike `POST /v1/events`, this skips playbook evaluation and creates the mitigation with the exact parameters provided.
+Directly create a mitigation with the exact parameters provided, skipping playbook
+evaluation. The dashboard's "Mitigate Now" form instead submits an attack event
+through `POST /v1/events`, which applies playbooks.
 
 **Request:**
 
@@ -371,13 +373,27 @@ Directly create a mitigation (e.g. from the dashboard "Mitigate Now" form). Unli
 |-------|------|----------|-------------|
 | `operator_id` | string | no | Legacy field, ignored; authenticated operator identity is authoritative |
 | `reason` | string | yes | Reason for the mitigation |
-| `victim_ip` | string | yes | IPv4 address to protect |
-| `protocol` | string | yes | `"udp"`, `"tcp"`, `"icmp"` (protocol 1), or `"any"`; manual ICMPv6 protocol 58 is not supported |
+| `victim_ip` | string | yes | IPv4 or IPv6 host address to protect (`/32` or `/128` scope) |
+| `protocol` | string | yes | `"udp"`, `"tcp"`, `"icmp"` (IPv4 protocol 1), `"icmpv6"` (IPv6 protocol 58), or `"any"`; `""` also selects any protocol |
 | `dst_ports` | array | no | Destination ports (default `[]`) |
 | `action` | string | yes | `"discard"` or `"police"` |
 | `rate_bps` | integer | conditional | Required when action is `"police"` |
 | `ttl_seconds` | integer | yes | Requested time-to-live; subject to configured minimum and maximum |
 | `expires_at_cap` | RFC 3339 timestamp | no | Initial creation's absolute expiry ceiling, for maintenance recreation |
+
+ICMP selectors must match the victim's address family: use `"icmp"` for IPv4
+and `"icmpv6"` for IPv6. A mismatch returns `400` before intent is saved or the
+speaker is called. For example, an IPv6 ICMP discard request is:
+
+```json
+{
+  "reason": "Manual ICMPv6 mitigation",
+  "victim_ip": "2001:db8::10",
+  "protocol": "icmpv6",
+  "action": "discard",
+  "ttl_seconds": 120
+}
+```
 
 When `expires_at_cap` is supplied, the saved expiry is the earlier of that cap
 and the normal requested TTL deadline. Validation happens after awaited
@@ -408,7 +424,7 @@ TTL while the controller is stopped.
 
 | Status | Reason |
 |--------|--------|
-| 400 | Invalid request (bad IP, invalid protocol, police without rate_bps, etc.) |
+| 400 | Invalid request (bad IP, invalid protocol or protocol/address-family mismatch, police without rate_bps, etc.) |
 | 401 | Authentication required |
 | 409 | Scope already has an active canonical owner or pending withdrawal |
 | 422 | Guardrail rejection (safelist, quotas, prefix length, etc.) |
