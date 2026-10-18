@@ -596,6 +596,7 @@ http:
   tls:
     cert_path: "/etc/prefixd/server.crt"
     key_path: "/etc/prefixd/server.key"
+    ca_path: "/etc/prefixd/ca.crt"  # Required for auth.mode: mtls
   auth:
     mode: mtls
 ```
@@ -682,6 +683,15 @@ http:
     key_path: "/etc/prefixd/server.key"
     ca_path: "/etc/prefixd/ca.crt"  # Client CA
 ```
+
+All three paths must be nonempty. Missing native TLS or missing/blank certificate,
+key or client-CA paths stop startup before database or speaker connections. The
+TLS listener requires a client certificate trusted by this CA; trusted clients
+retain administrator access.
+
+Do not select `mtls` when nginx terminates client TLS and forwards plaintext to
+prefixd: proxy identity headers are not authentication. Use bearer or credentials
+authentication for that internal connection, or configure native mTLS on prefixd.
 
 ---
 

@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Reject `http.auth.mode: mtls` without native TLS and nonempty server certificate,
+  key and client-CA paths before database, speaker or listener startup. Programmatic
+  application-state construction enforces the same validation. Configure all three
+  TLS paths, or use bearer/credentials authentication when a proxy forwards
+  plaintext to prefixd; forwarded identity headers do not authenticate mTLS clients.
+
 - Hide interactive operator-password entry in `prefixdctl` and restore terminal
   echo after input. Fail explicitly when a controlling terminal is unavailable.
 - Refresh the October audit baseline: `rustls` 0.23.46, `quinn-proto` 0.11.18, `h2` 0.4.19 and non-yanked `chacha20` 0.10.2 address current lockfile findings. Patch both `rand` branches to 0.8.6/0.9.3 and remove the now-obsolete RUSTSEC-2026-0097 exception. The only remaining vulnerability exception is `rsa` (RUSTSEC-2023-0071), present through sqlx's optional, uncompiled MySQL driver with no patched release. The unmaintained YAML dependency warning remains visible and tracked separately.

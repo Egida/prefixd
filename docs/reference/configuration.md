@@ -118,9 +118,20 @@ http:
     cert_path: "/etc/prefixd/server.crt"
     key_path: "/etc/prefixd/server.key"
     
-    # Client CA for mTLS (optional)
+    # Client CA: required when auth.mode is mtls
     ca_path: "/etc/prefixd/ca.crt"
 ```
+
+`http.auth.mode: mtls` requires native `http.tls` with nonempty `cert_path`,
+`key_path` and `ca_path`. Omitted, empty or whitespace-only values fail
+configuration loading before database, speaker or listener startup. The same
+validation applies when constructing application state programmatically.
+
+The native TLS listener verifies client certificates against `ca_path`; a trusted
+client retains administrator access. TLS termination at a reverse proxy and
+forwarded identity headers do not satisfy this mode. Use the appropriate bearer
+or credentials mode when the proxy connects to prefixd over plaintext. Other
+authentication modes may use TLS without a client CA.
 
 ### Rate Limiting
 

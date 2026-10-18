@@ -57,6 +57,30 @@ pub struct TlsConfig {
     pub ca_path: Option<String>,
 }
 
+impl HttpConfig {
+    /// mTLS authorization trusts the native listener to verify client certificates.
+    pub(crate) fn validate_auth_transport(&self) -> crate::error::Result<()> {
+        if self.auth.mode != AuthMode::Mtls {
+            return Ok(());
+        }
+        let tls = self.tls.as_ref().ok_or_else(|| {
+            crate::error::PrefixdError::Config("auth.mode=mtls requires native http.tls".into())
+        })?;
+        for (field, path) in [
+            ("cert_path", Some(tls.cert_path.as_str())),
+            ("key_path", Some(tls.key_path.as_str())),
+            ("ca_path", tls.ca_path.as_deref()),
+        ] {
+            if path.is_none_or(|path| path.trim().is_empty()) {
+                return Err(crate::error::PrefixdError::Config(format!(
+                    "auth.mode=mtls requires nonempty http.tls.{field}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthConfig {
     pub mode: AuthMode,
@@ -393,6 +417,7 @@ impl Settings {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let settings: Settings = serde_yaml::from_str(&content)?;
+        settings.http.validate_auth_transport()?;
         let correlation_errors = settings.correlation.validate();
         if !correlation_errors.is_empty() {
             return Err(anyhow::anyhow!(
