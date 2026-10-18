@@ -152,6 +152,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fail IP history and incident reports when a selected mitigation cannot be decoded,
+  instead of returning successful partial history. Preserve existing IP filters
+  and SQL limits.
+
 - Count successful entries in bulk acknowledgement responses so duplicate IDs
   agree with the ordered per-entry results while each stored row is updated once.
 

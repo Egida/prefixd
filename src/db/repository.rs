@@ -957,17 +957,15 @@ impl RepositoryTrait for Repository {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| match Mitigation::from_row(row) {
-                Ok(m) => Some(m),
-                Err(e) => {
+        rows.into_iter()
+            .map(|row| {
+                Mitigation::from_row(row).map_err(|e| {
                     ROW_PARSE_ERRORS.with_label_values(&["mitigations"]).inc();
-                    tracing::error!(error = %e, "skipping corrupted mitigation row");
-                    None
-                }
+                    tracing::error!(error = %e, "failed to parse mitigation history row");
+                    e
+                })
             })
-            .collect())
+            .collect()
     }
 
     // Operator methods
