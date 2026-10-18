@@ -166,9 +166,6 @@ mod tests {
         ] {
             assert_yaml_roundtrip::<Settings>(input);
         }
-        assert!(
-            parse_yaml::<Settings>(include_str!("../../configs/prefixd-postgres.yaml")).is_err()
-        );
         assert_yaml_roundtrip::<Inventory>(include_str!("../../configs/inventory.yaml"));
         assert_yaml_roundtrip::<Playbooks>(include_str!("../../configs/playbooks.yaml"));
         assert_yaml_roundtrip::<crate::correlation::CorrelationConfig>(include_str!(

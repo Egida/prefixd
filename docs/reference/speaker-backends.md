@@ -308,21 +308,16 @@ This is a fixed-target, single-controller contract. Drain pending requests befor
 changing targets or downgrading; see [the upgrade guide](../how-to/upgrading.md#pending-withdrawals-and-rollback).
 Application status and local speaker intent do not prove router enforcement.
 
-## Delivery order
+## Remaining backend work
 
-| Stage | Work and gate |
-|-------|---------------|
-| 1 | Support rustbgpd and GoBGP through the shared controller, authenticated RPC and codec tests |
-| 2 | Retry failed expiry withdrawals; real daemon TTL/restart recovery and transport/deployment wiring |
-| 3 | Shared readable-backend contract, secure profiles, persistent settings and actual route lifecycle gate shipping; peer receipt and vendor-router enforcement remain separately qualified |
-| 4 | Optional observation split implemented; durable confirmed announcement state remains required (pending withdrawal cleanup exists) |
-| 5 | Health availability metadata and CLI/dashboard observation states implemented; retain legacy public fields |
-| 6 | HTTP shim, a second transport proof, shared conformance and per-backend CI |
+Both readable adapters have shared contracts, released-daemon CI, secure
+profiles, restart recovery and durable withdrawal cleanup. Optional observation
+and health availability metadata are implemented.
 
-The capability/ledger work can proceed before the default switch, but a
-write-only backend cannot ship before its reconciliation path is verified.
-Generic exec transport, runtime plugin loading, and unrelated framework or UI
-rewrites are outside this first slice.
+Action-only drift repair, separately qualified vendor forwarding and a complete
+desired/acknowledged announcement ledger remain open. A write-only backend needs
+verified reconciliation and restart replay before shipping. ExaBGP, a generic
+HTTP shim, exec transport and runtime plugin loading are not supported today.
 
 ## Contributor and certification gates
 
