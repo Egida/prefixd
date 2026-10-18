@@ -10462,3 +10462,496 @@ async fn test_public_list_cursor_mock_tuple_order_and_filters() {
         assert!(cursor.is_none());
     }
 }
+
+mod list_filter_validation {
+    use super::*;
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    use axum::Router;
+    use chrono::{DateTime, Duration, Utc};
+    use prefixd::correlation::{CorrelationEngine, SignalGroupStatus};
+    use prefixd::domain::{
+        ActionParams, ActionType, AttackEvent, AttackEventInput, MatchCriteria, Mitigation,
+        MitigationIntent, MitigationStatus, OperatorRole,
+    };
+    use prefixd::observability::{ActorType, AuditEntry};
+    use serde_json::{Value, json};
+    use uuid::Uuid;
+
+    const ENDPOINTS: [(&str, &str, &str); 4] = [
+        ("events", "events", "event_id"),
+        ("audit", "entries", "audit_id"),
+        ("mitigations", "mitigations", "mitigation_id"),
+        ("signal-groups", "groups", "group_id"),
+    ];
+
+    fn router(repo: Arc<dyn RepositoryTrait>, mode: AuthMode) -> Router {
+        let mut settings = test_settings();
+        settings.http.auth.mode = if mode == AuthMode::Bearer {
+            AuthMode::None
+        } else {
+            mode
+        };
+        let mut state = AppState::new(
+            settings,
+            test_inventory(),
+            test_playbooks(),
+            repo,
+            Arc::new(MockAnnouncer::new()),
+            ".".into(),
+        )
+        .unwrap();
+        if mode == AuthMode::Bearer {
+            let state = Arc::get_mut(&mut state).unwrap();
+            state.settings.http.auth.mode = mode;
+            state.bearer_token = Some("list-filter-token".into());
+        }
+        create_test_router(state)
+    }
+
+    async fn get(
+        app: &Router,
+        path: &str,
+        header: Option<(&str, &str)>,
+    ) -> axum::response::Response {
+        let mut request = Request::builder().uri(path);
+        if let Some((name, value)) = header {
+            request = request.header(name, value);
+        }
+        app.clone()
+            .oneshot(request.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn body(response: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    async fn assert_invalid(response: axum::response::Response, field: &str, path: &str) {
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        let json = body(response).await;
+        let message = json["error"].as_str().expect("structured error");
+        assert!(message.starts_with("invalid request:"), "{path}: {json}");
+        assert!(
+            message.contains(&format!("invalid {field} filter")),
+            "{path}: {json}"
+        );
+        assert_eq!(json.as_object().unwrap().len(), 1);
+    }
+
+    fn mitigation(id: u128, at: DateTime<Utc>, status: MitigationStatus) -> Mitigation {
+        let ip = format!("203.0.113.{}", id + 10);
+        let mut row = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: Uuid::from_u128(id),
+                customer_id: None,
+                service_id: None,
+                pop: "iad1".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: format!("{ip}/32"),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams { rate_bps: None },
+                ttl_seconds: 300,
+                reason: "filter fixture".into(),
+            },
+            ip,
+            AttackVector::UdpFlood,
+        );
+        row.mitigation_id = Uuid::from_u128(id);
+        row.created_at = at;
+        row.status = status;
+        row
+    }
+
+    async fn dated_fixture() -> (Router, DateTime<Utc>) {
+        let repo = Arc::new(MockRepository::new());
+        let timestamp: DateTime<Utc> = "2026-10-18T12:00:00.123456789Z".parse().unwrap();
+        for (id, delta) in [(1, -1), (2, 0), (3, 1)] {
+            let at = timestamp + Duration::seconds(delta);
+            let mut event = AttackEvent::from_input(AttackEventInput {
+                event_id: None,
+                timestamp: at,
+                source: "filters".into(),
+                victim_ip: "203.0.113.10".into(),
+                vector: AttackVector::UdpFlood,
+                bps: None,
+                pps: None,
+                top_dst_ports: None,
+                confidence: None,
+                action: "ban".into(),
+                raw_details: None,
+            });
+            event.event_id = Uuid::from_u128(id);
+            event.ingested_at = at;
+            repo.insert_event(&event).await.unwrap();
+            let mut entry =
+                AuditEntry::new(ActorType::System, None, "filters", None, None, json!({}));
+            entry.audit_id = Uuid::from_u128(id);
+            entry.timestamp = at;
+            repo.insert_audit(&entry).await.unwrap();
+            repo.insert_mitigation(&mitigation(id, at, MitigationStatus::Active))
+                .await
+                .unwrap();
+            let mut group = CorrelationEngine::create_group(
+                &format!("203.0.113.{}", id + 10),
+                "udp_flood",
+                300,
+            );
+            group.group_id = Uuid::from_u128(id);
+            group.created_at = at;
+            repo.insert_signal_group(&group).await.unwrap();
+        }
+        (router(repo, AuthMode::None), timestamp)
+    }
+
+    #[tokio::test]
+    async fn dates_preserve_omission_offsets_and_exact_boundaries() {
+        let (app, at) = dated_fixture().await;
+        let start = urlencoding::encode(&at.to_rfc3339()).into_owned();
+        let end = urlencoding::encode(&(at + Duration::seconds(1)).to_rfc3339()).into_owned();
+        let offset_start = urlencoding::encode("2026-10-18T17:30:00.123456789+05:30").into_owned();
+        let offset_end = urlencoding::encode("2026-10-18T08:00:01.123456789-04:00").into_owned();
+        let relaxed_start = urlencoding::encode("2026-10-18 12:00:00.123456789+0000").into_owned();
+        for (endpoint, rows, id_key) in ENDPOINTS {
+            for (query, expected) in [
+                (String::new(), vec![3, 2, 1]),
+                (format!("start={start}"), vec![3, 2]),
+                (format!("end={start}"), vec![1]),
+                (format!("start={start}&end={end}"), vec![2]),
+                (format!("start={offset_start}"), vec![3, 2]),
+                (format!("end={offset_end}"), vec![2, 1]),
+                (format!("start={offset_start}&end={offset_end}"), vec![2]),
+                (format!("start={relaxed_start}"), vec![3, 2]),
+                (format!("start={start}&end={start}"), vec![]),
+                (format!("start={end}&end={start}"), vec![]),
+            ] {
+                let path = format!("/v1/{endpoint}?{query}");
+                let response = get(&app, &path, None).await;
+                assert_eq!(response.status(), StatusCode::OK, "{path}");
+                let json = body(response).await;
+                let ids: Vec<_> = json[rows]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|row| Uuid::parse_str(row[id_key].as_str().unwrap()).unwrap())
+                    .collect();
+                assert_eq!(
+                    ids,
+                    expected
+                        .iter()
+                        .copied()
+                        .map(Uuid::from_u128)
+                        .collect::<Vec<_>>(),
+                    "{path}"
+                );
+                assert_eq!(json["count"], expected.len(), "{path}");
+                assert_eq!(json["has_more"], false);
+                assert!(json["next_cursor"].is_null());
+            }
+        }
+        for path in [
+            "/v1/signal-groups?vector=unknown",
+            "/v1/mitigations?pop=unknown",
+        ] {
+            let response = get(&app, path, None).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(body(response).await["count"], 0, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn statuses_preserve_each_value_and_valid_duplicates() {
+        let repo = Arc::new(MockRepository::new());
+        let at: DateTime<Utc> = "2026-10-18T12:00:00Z".parse().unwrap();
+        let statuses = [
+            MitigationStatus::Pending,
+            MitigationStatus::Active,
+            MitigationStatus::Escalated,
+            MitigationStatus::Expired,
+            MitigationStatus::Withdrawn,
+            MitigationStatus::Rejected,
+        ];
+        for (index, status) in statuses.iter().copied().enumerate() {
+            repo.insert_mitigation(&mitigation(index as u128 + 1, at, status))
+                .await
+                .unwrap();
+        }
+        for (index, status) in [
+            SignalGroupStatus::Open,
+            SignalGroupStatus::Resolved,
+            SignalGroupStatus::Expired,
+        ]
+        .iter()
+        .copied()
+        .enumerate()
+        {
+            let mut group = CorrelationEngine::create_group(
+                &format!("203.0.113.{}", index + 10),
+                "udp_flood",
+                300,
+            );
+            group.group_id = Uuid::from_u128(index as u128 + 1);
+            group.created_at = at;
+            group.status = status;
+            repo.insert_signal_group(&group).await.unwrap();
+        }
+        let app = router(repo, AuthMode::None);
+        for (endpoint, count) in [("mitigations", 6), ("signal-groups", 3)] {
+            let response = get(&app, &format!("/v1/{endpoint}"), None).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(body(response).await["count"], count);
+        }
+        for (index, status) in statuses.iter().enumerate() {
+            let response = get(&app, &format!("/v1/mitigations?status={status}"), None).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let json = body(response).await;
+            assert_eq!(json["count"], 1, "{status}");
+            assert_eq!(
+                json["mitigations"][0]["mitigation_id"],
+                Uuid::from_u128(index as u128 + 1).to_string()
+            );
+        }
+        for (status, expected) in [
+            ("active,escalated", vec![3, 2]),
+            ("active,active", vec![2]),
+            ("pending,active,pending", vec![2, 1]),
+        ] {
+            let response = get(
+                &app,
+                &format!("/v1/mitigations?status={}", urlencoding::encode(status)),
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let json = body(response).await;
+            let ids: Vec<_> = json["mitigations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| Uuid::parse_str(row["mitigation_id"].as_str().unwrap()).unwrap())
+                .collect();
+            assert_eq!(
+                ids,
+                expected
+                    .into_iter()
+                    .map(Uuid::from_u128)
+                    .collect::<Vec<_>>(),
+                "{status}"
+            );
+        }
+        for status in ["open", "resolved", "expired"] {
+            let response = get(&app, &format!("/v1/signal-groups?status={status}"), None).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let json = body(response).await;
+            assert_eq!(json["count"], 1);
+            assert_eq!(json["groups"][0]["status"], status);
+        }
+    }
+
+    async fn unavailable_router() -> Router {
+        // Every real list method fails on this closed pool; no network or database is needed.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
+            .unwrap();
+        pool.close().await;
+        router(Arc::new(prefixd::db::Repository::new(pool)), AuthMode::None)
+    }
+
+    #[tokio::test]
+    async fn invalid_dates_reject_before_repository_listing() {
+        let app = unavailable_router().await;
+        for (endpoint, _, _) in ENDPOINTS {
+            let response = get(&app, &format!("/v1/{endpoint}"), None).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{endpoint}: unavailable-list positive control"
+            );
+            for field in ["start", "end"] {
+                for value in [
+                    "",
+                    " ",
+                    "not-a-date",
+                    "2026-10-18",
+                    "2026-13-01T00:00:00Z",
+                    "2026-02-30T00:00:00Z",
+                    "2026-10-18T12:00:00",
+                    "0",
+                ] {
+                    let path = format!("/v1/{endpoint}?{field}={}", urlencoding::encode(value));
+                    assert_invalid(get(&app, &path, None).await, field, &path).await;
+                }
+            }
+            for (query, field) in [
+                ("start=invalid&end=2026-10-18T12:00:00Z", "start"),
+                ("start=2026-10-18T12:00:00Z&end=invalid", "end"),
+            ] {
+                let path = format!("/v1/{endpoint}?{query}");
+                assert_invalid(get(&app, &path, None).await, field, &path).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_statuses_reject_before_repository_listing() {
+        let app = unavailable_router().await;
+        for (endpoint, values) in [
+            (
+                "mitigations",
+                vec![
+                    "",
+                    " ",
+                    ",",
+                    "unknown",
+                    "ACTIVE",
+                    " active",
+                    "active ",
+                    ",active",
+                    "active,",
+                    "active,,escalated",
+                    "active,unknown",
+                    "unknown,active",
+                    "active, active",
+                    "active,\tactive",
+                ],
+            ),
+            (
+                "signal-groups",
+                vec![
+                    "",
+                    "unknown",
+                    "OPEN",
+                    " open",
+                    "open ",
+                    "open,resolved",
+                    "open,open",
+                    ",open",
+                    "open,",
+                ],
+            ),
+        ] {
+            let status = if endpoint == "mitigations" {
+                "active"
+            } else {
+                "open"
+            };
+            let response = get(&app, &format!("/v1/{endpoint}?status={status}"), None).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "{endpoint}: valid-status unavailable-list control"
+            );
+            for value in values {
+                let path = format!("/v1/{endpoint}?status={}", urlencoding::encode(value));
+                assert_invalid(get(&app, &path, None).await, "status", &path).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn authentication_and_audit_role_precede_filter_validation() {
+        let app = router(Arc::new(MockRepository::new()), AuthMode::Bearer);
+        for (endpoint, _, _) in ENDPOINTS {
+            let mut queries = vec!["start=invalid", "end="];
+            if endpoint == "mitigations" || endpoint == "signal-groups" {
+                queries.push("status=unknown");
+            }
+            for query in queries {
+                let path = format!("/v1/{endpoint}?{query}");
+                assert_eq!(
+                    get(&app, &path, None).await.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "{path}"
+                );
+                let field = query.split('=').next().unwrap();
+                assert_invalid(
+                    get(
+                        &app,
+                        &path,
+                        Some(("authorization", "Bearer list-filter-token")),
+                    )
+                    .await,
+                    field,
+                    &path,
+                )
+                .await;
+            }
+        }
+
+        let repo = Arc::new(MockRepository::new());
+        let password = "filter-validation-password";
+        let hash = Argon2::default()
+            .hash_password(
+                password.as_bytes(),
+                &SaltString::encode_b64(b"list-filter-test").unwrap(),
+            )
+            .unwrap()
+            .to_string();
+        repo.create_operator("filter-viewer", &hash, OperatorRole::Viewer, None)
+            .await
+            .unwrap();
+        let viewer = router(repo, AuthMode::Credentials);
+        let login = viewer
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/auth/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({"username":"filter-viewer", "password":password}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(login.status(), StatusCode::OK);
+        let cookie = login.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        for (endpoint, _, _) in ENDPOINTS {
+            let path = format!("/v1/{endpoint}?start=invalid");
+            let response = get(&viewer, &path, Some(("cookie", &cookie))).await;
+            if endpoint == "audit" {
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            } else {
+                assert_invalid(response, "start", &path).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn openapi_documents_invalid_optional_filters() {
+        let app = router(Arc::new(MockRepository::new()), AuthMode::None);
+        let response = get(&app, "/openapi.json", None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let spec = body(response).await;
+        for (endpoint, _, _) in ENDPOINTS {
+            let operation = &spec["paths"][format!("/v1/{endpoint}")]["get"];
+            assert_eq!(
+                operation["responses"]["400"]["content"]["application/json"]["schema"]["$ref"],
+                "#/components/schemas/ErrorResponse"
+            );
+            for name in ["start", "end"] {
+                let parameter = operation["parameters"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p["name"] == name)
+                    .unwrap();
+                let description = parameter["description"].as_str().unwrap();
+                assert!(description.contains("RFC3339") && description.contains("invalid"));
+            }
+        }
+    }
+}

@@ -393,8 +393,21 @@ fn default_limit() -> u32 {
     100
 }
 
-fn parse_datetime(s: &str) -> Option<DateTime<Utc>> {
-    s.parse::<DateTime<Utc>>().ok()
+type DateRange = (Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+
+fn parse_date_range(start: Option<&str>, end: Option<&str>) -> crate::error::Result<DateRange> {
+    let parse = |value: Option<&str>, name: &str| {
+        value
+            .map(|value| {
+                value.parse::<DateTime<Utc>>().map_err(|_| {
+                    PrefixdError::InvalidRequest(format!(
+                        "invalid {name} filter; expected an RFC3339 timestamp"
+                    ))
+                })
+            })
+            .transpose()
+    };
+    Ok((parse(start, "start")?, parse(end, "end")?))
 }
 
 fn clamp_limit(limit: u32) -> u32 {
@@ -1355,12 +1368,12 @@ async fn handle_ban(
     params(
         ("limit" = Option<u32>, Query, description = "Max results (default 100, max 1000)"),
         ("cursor" = Option<String>, Query, description = "Opaque e1 continuation from next_cursor (max 128 bytes); superseded timestamp-only cursors are rejected"),
-        ("start" = Option<String>, Query, description = "Start of date range (ISO 8601, inclusive)"),
-        ("end" = Option<String>, Query, description = "End of date range (ISO 8601, exclusive)"),
+        ("start" = Option<String>, Query, description = "Inclusive RFC3339 start; empty or malformed supplied values are invalid"),
+        ("end" = Option<String>, Query, description = "Exclusive RFC3339 end; empty or malformed supplied values are invalid"),
     ),
     responses(
         (status = 200, description = "List of events", body = EventsListResponse),
-        (status = 400, description = "Invalid or superseded event cursor", body = ErrorResponse)
+        (status = 400, description = "Invalid date filter or invalid/superseded event cursor", body = ErrorResponse)
     )
 )]
 pub async fn list_events(
@@ -1382,11 +1395,15 @@ pub async fn list_events(
             )).into_response()),
         },
     };
+    let (start, end) = match parse_date_range(query.start.as_deref(), query.end.as_deref()) {
+        Ok(bounds) => bounds,
+        Err(error) => return Ok(AppError(error).into_response()),
+    };
     let params = ListParams {
         limit: limit + 1,
         cursor,
-        start: query.start.as_deref().and_then(parse_datetime),
-        end: query.end.as_deref().and_then(parse_datetime),
+        start,
+        end,
     };
 
     let mut events = state
@@ -1424,12 +1441,12 @@ pub async fn list_events(
     params(
         ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
         ("cursor" = Option<String>, Query, description = "Opaque a1 continuation from next_cursor (max 128 bytes); superseded timestamp-only cursors are rejected"),
-        ("start" = Option<String>, Query, description = "Start of date range (ISO 8601, inclusive)"),
-        ("end" = Option<String>, Query, description = "End of date range (ISO 8601, exclusive)"),
+        ("start" = Option<String>, Query, description = "Inclusive RFC3339 start; empty or malformed supplied values are invalid"),
+        ("end" = Option<String>, Query, description = "Exclusive RFC3339 end; empty or malformed supplied values are invalid"),
     ),
     responses(
         (status = 200, description = "List of audit log entries", body = AuditListResponse),
-        (status = 400, description = "Invalid or superseded audit cursor", body = ErrorResponse)
+        (status = 400, description = "Invalid date filter or invalid/superseded audit cursor", body = ErrorResponse)
     )
 )]
 pub async fn list_audit(
@@ -1452,11 +1469,15 @@ pub async fn list_audit(
             )).into_response()),
         },
     };
+    let (start, end) = match parse_date_range(query.start.as_deref(), query.end.as_deref()) {
+        Ok(bounds) => bounds,
+        Err(error) => return Ok(AppError(error).into_response()),
+    };
     let params = ListParams {
         limit: limit + 1,
         cursor,
-        start: query.start.as_deref().and_then(parse_datetime),
-        end: query.end.as_deref().and_then(parse_datetime),
+        start,
+        end,
     };
 
     let mut entries = state
@@ -1492,19 +1513,19 @@ pub async fn list_audit(
     path = "/v1/mitigations",
     tag = "mitigations",
     params(
-        ("status" = Option<String>, Query, description = "Filter by status (comma-separated)"),
+        ("status" = Option<String>, Query, description = "Comma-separated exact statuses: pending, active, escalated, expired, withdrawn, rejected; every token must be valid and nonempty"),
         ("customer_id" = Option<String>, Query, description = "Filter by customer ID"),
         ("victim_ip" = Option<String>, Query, description = "Filter by victim IP address"),
         ("pop" = Option<String>, Query, description = "Exact case-sensitive POP; omitted or literal 'all' lists every POP. Empty/NUL identifiers are invalid."),
         ("acknowledged" = Option<bool>, Query, description = "Filter by acknowledged status"),
         ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
         ("cursor" = Option<String>, Query, description = "Opaque m1 continuation from next_cursor (max 128 bytes); superseded timestamp-only cursors are rejected"),
-        ("start" = Option<String>, Query, description = "Start of date range (ISO 8601, inclusive)"),
-        ("end" = Option<String>, Query, description = "End of date range (ISO 8601, exclusive)"),
+        ("start" = Option<String>, Query, description = "Inclusive RFC3339 start; empty or malformed supplied values are invalid"),
+        ("end" = Option<String>, Query, description = "Exclusive RFC3339 end; empty or malformed supplied values are invalid"),
     ),
     responses(
         (status = 200, description = "List of mitigations", body = MitigationsListResponse),
-        (status = 400, description = "Invalid POP filter or invalid/superseded mitigation cursor", body = ErrorResponse)
+        (status = 400, description = "Invalid date/status/POP filter or invalid/superseded mitigation cursor", body = ErrorResponse)
     )
 )]
 pub async fn list_mitigations(
@@ -1516,10 +1537,22 @@ pub async fn list_mitigations(
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
-    let status_filter: Option<Vec<MitigationStatus>> = query
+    let status_filter = match query
         .status
-        .as_ref()
-        .map(|s| s.split(',').filter_map(|st| st.parse().ok()).collect());
+        .as_deref()
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::parse)
+                .collect::<std::result::Result<Vec<MitigationStatus>, _>>()
+        })
+        .transpose()
+    {
+        Ok(status) => status,
+        Err(_) => return Ok(AppError(PrefixdError::InvalidRequest(
+            "invalid status filter; expected comma-separated pending, active, escalated, expired, withdrawn or rejected".into(),
+        )).into_response()),
+    };
 
     let limit = clamp_limit(query.limit);
     let cursor = match query.cursor.as_deref() {
@@ -1540,12 +1573,16 @@ pub async fn list_mitigations(
         }
         Some(value) => Some(value.to_owned()),
     };
+    let (start, end) = match parse_date_range(query.start.as_deref(), query.end.as_deref()) {
+        Ok(bounds) => bounds,
+        Err(error) => return Ok(AppError(error).into_response()),
+    };
     let params = MitigationListParams {
         pop,
         limit: limit + 1,
         cursor,
-        start: query.start.as_deref().and_then(parse_datetime),
-        end: query.end.as_deref().and_then(parse_datetime),
+        start,
+        end,
     };
 
     let mut mitigations = state
@@ -4618,16 +4655,16 @@ pub struct ListSignalGroupsQuery {
     path = "/v1/signal-groups",
     tag = "signal-groups",
     params(
-        ("status" = Option<String>, Query, description = "Filter by status (open, resolved, expired)"),
+        ("status" = Option<String>, Query, description = "Exact status: open, resolved or expired; empty or unknown values are invalid"),
         ("vector" = Option<String>, Query, description = "Filter by attack vector"),
         ("limit" = Option<u32>, Query, description = "Max results (default 100, max 1000)"),
         ("cursor" = Option<String>, Query, description = "Opaque s1 continuation from next_cursor (max 128 bytes); superseded timestamp-only cursors are rejected"),
-        ("start" = Option<String>, Query, description = "Start of date range (ISO 8601, inclusive)"),
-        ("end" = Option<String>, Query, description = "End of date range (ISO 8601, exclusive)"),
+        ("start" = Option<String>, Query, description = "Inclusive RFC3339 start; empty or malformed supplied values are invalid"),
+        ("end" = Option<String>, Query, description = "Exclusive RFC3339 end; empty or malformed supplied values are invalid"),
     ),
     responses(
         (status = 200, description = "List of signal groups", body = SignalGroupsListResponse),
-        (status = 400, description = "Invalid or superseded signal-group cursor", body = ErrorResponse),
+        (status = 400, description = "Invalid date/status filter or invalid/superseded signal-group cursor", body = ErrorResponse),
         (status = 401, description = "Authentication required"),
     )
 )]
@@ -4640,7 +4677,15 @@ pub async fn list_signal_groups(
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
-    let status_filter = query.status.as_deref().and_then(|s| s.parse().ok());
+    let status_filter = match query.status.as_deref().map(str::parse).transpose() {
+        Ok(status) => status,
+        Err(_) => {
+            return Ok(AppError(PrefixdError::InvalidRequest(
+                "invalid status filter; expected open, resolved or expired".into(),
+            ))
+            .into_response());
+        }
+    };
 
     let limit = clamp_limit(query.limit);
     let cursor = match query.cursor.as_deref() {
@@ -4652,11 +4697,15 @@ pub async fn list_signal_groups(
             )).into_response()),
         },
     };
+    let (start, end) = match parse_date_range(query.start.as_deref(), query.end.as_deref()) {
+        Ok(bounds) => bounds,
+        Err(error) => return Ok(AppError(error).into_response()),
+    };
     let params = ListParams {
         limit: limit + 1,
         cursor,
-        start: query.start.as_deref().and_then(parse_datetime),
-        end: query.end.as_deref().and_then(parse_datetime),
+        start,
+        end,
     };
 
     let filter = crate::correlation::SignalGroupFilter {

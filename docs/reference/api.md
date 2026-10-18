@@ -54,6 +54,23 @@ http:
 
 > Unless explicitly marked "Public", `/v1/*` endpoints require authentication.
 
+## List Filters
+
+Events, audit, mitigations and signal-group listings accept optional `start` and
+`end` timestamps. Omit a bound to leave it unset. Empty or malformed supplied
+values return `400` with a JSON `error`; date/status validation follows each
+endpoint's existing authentication and role checks and precedes listing.
+
+Use RFC3339 timestamps, including offsets; encode a query-string `+` as `%2B`.
+Start is inclusive and end is exclusive. Equal or reversed valid bounds return
+an empty page.
+
+Mitigation status lists accept exact case-sensitive tokens separated by commas;
+duplicates are accepted. Every component must be nonempty and known, without
+surrounding whitespace. Signal-group status accepts one exact value. Invalid
+status filters return `400` rather than being discarded. Unknown vector and
+concrete POP names still match no rows.
+
 ---
 
 ## Events
@@ -231,8 +248,8 @@ Authorization: Bearer <token>
 |-------|------|-------------|
 | `limit` | integer | Max results (default 100, max 1000) |
 | `cursor` | string | Opaque `e1` continuation from the previous `next_cursor` (maximum 128 bytes) |
-| `start` | string | Start of date range (ISO 8601, inclusive) |
-| `end` | string | End of date range (ISO 8601, exclusive) |
+| `start` | string | RFC3339 start (inclusive); see [list filters](#list-filters) |
+| `end` | string | RFC3339 end (exclusive); see [list filters](#list-filters) |
 
 Results order by `(ingested_at, event_id)` descending, including tied timestamps.
 Copy `next_cursor` unchanged with the same filters; omit `cursor` to start a fresh
@@ -291,8 +308,8 @@ Authorization: Bearer <token>
 | `acknowledged` | boolean | Filter by acknowledged status (`true`/`false`) |
 | `limit` | integer | Max results (default 100, max 1000) |
 | `cursor` | string | Opaque `m1` continuation from the previous `next_cursor` (maximum 128 bytes) |
-| `start` | string | Start of date range (ISO 8601, inclusive) |
-| `end` | string | End of date range (ISO 8601, exclusive) |
+| `start` | string | RFC3339 start (inclusive); see [list filters](#list-filters) |
+| `end` | string | RFC3339 end (exclusive); see [list filters](#list-filters) |
 
 A concrete `pop` filters rows before ordering, cursor continuation and page limits.
 Identifiers match stored values exactly, including case, spaces and Unicode;
@@ -635,8 +652,8 @@ Authorization: Bearer <token>
 | `vector` | string | Filter by attack vector |
 | `limit` | integer | Max results (default 100, max 1000) |
 | `cursor` | string | Opaque `s1` continuation from the previous `next_cursor` (maximum 128 bytes) |
-| `start` | string | Start of date range (ISO 8601, inclusive) |
-| `end` | string | End of date range (ISO 8601, exclusive) |
+| `start` | string | RFC3339 start (inclusive); see [list filters](#list-filters) |
+| `end` | string | RFC3339 end (exclusive); see [list filters](#list-filters) |
 
 Results order by `(created_at, group_id)` descending, including tied timestamps.
 Copy `next_cursor` unchanged with the same filters; omit `cursor` to start a fresh
@@ -2027,8 +2044,8 @@ Authorization: Bearer <token>
 |-------|------|-------------|
 | `limit` | integer | Max results (default 100, max 1000) |
 | `cursor` | string | Opaque `a1` continuation from the previous `next_cursor` (maximum 128 bytes) |
-| `start` | string | Start of date range (ISO 8601, inclusive) |
-| `end` | string | End of date range (ISO 8601, exclusive) |
+| `start` | string | RFC3339 start (inclusive); see [list filters](#list-filters) |
+| `end` | string | RFC3339 end (exclusive); see [list filters](#list-filters) |
 
 Results order by `(timestamp, audit_id)` descending, including tied timestamps.
 Copy `next_cursor` unchanged with the same filters; omit `cursor` to start a fresh
