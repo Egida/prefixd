@@ -58,7 +58,9 @@ function formatUptime(seconds: number): string {
   const mins = Math.floor((seconds % 3600) / 60)
 
   if (days > 0) return `${days}d ${hours}h`
+
   if (hours > 0) return `${hours}h ${mins}m`
+
   return `${mins}m`
 }
 
@@ -169,7 +171,7 @@ export default function AdminPage() {
       // Refresh all data
       mutate(() => true)
       setTimeout(() => setReloadStatus("idle"), 3000)
-    } catch (err) {
+    } catch {
       setReloadStatus("error")
       setTimeout(() => setReloadStatus("idle"), 3000)
     } finally {
@@ -208,6 +210,7 @@ export default function AdminPage() {
 
   const handleChangePassword = async () => {
     if (!passwordTarget || !newUserPassword.trim()) return
+
     if (operator?.id === passwordTarget.operator_id && !currentPassword.trim()) return
 
     setIsChangingPassword(true)

@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, waitFor, act, within } from "@testing-library/react"
+import { render, screen, act, within } from "@testing-library/react"
 import { Suspense } from "react"
 
 // ─── Mocks ──────────────────────────────────────────────
 
 const mockPush = vi.fn()
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush, back: vi.fn() }),
   usePathname: () => "/mitigations/mit-001",
@@ -72,6 +73,7 @@ vi.mock("@/components/dashboard/incident-report-dialog", () => ({
 // Mock API functions
 vi.mock("@/lib/api", async () => {
   const actual = await vi.importActual("@/lib/api")
+
   return {
     ...actual,
     withdrawMitigation: vi.fn(),
@@ -174,6 +176,7 @@ async function renderPage() {
       </Suspense>
     )
   })
+
   return result!
 }
 

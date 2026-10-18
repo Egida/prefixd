@@ -14,6 +14,7 @@ function setClipboardWritePermission(state: PermissionState | "unsupported") {
         if (state === "unsupported") {
           throw new TypeError("clipboard-write is not a supported permission name")
         }
+
         return { state } as PermissionStatus
       },
     },
@@ -31,21 +32,25 @@ function setClipboard(clipboard: unknown) {
 /** Captures the text handed to execCommand and returns its result. */
 function stubExecCommand(result: boolean) {
   let copied = ""
-  document.execCommand = vi.fn(() => {
+  document.execCommand = vi.fn<typeof document.execCommand>(() => {
     copied = document.querySelector("textarea")?.value ?? ""
+
     return result
-  }) as unknown as typeof document.execCommand
+  })
+
   return () => copied
 }
 
 afterEach(() => {
   document.execCommand = originalExecCommand
   Object.defineProperty(navigator, "permissions", { configurable: true, value: originalPermissions })
+
   if (originalClipboard) {
     Object.defineProperty(navigator, "clipboard", originalClipboard)
   } else {
     delete (navigator as { clipboard?: unknown }).clipboard
   }
+
   if (originalSecureContext) {
     Object.defineProperty(window, "isSecureContext", originalSecureContext)
   }

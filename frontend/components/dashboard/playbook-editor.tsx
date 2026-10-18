@@ -12,7 +12,6 @@ import { EmptyState } from "@/components/dashboard/states"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Checkbox } from "@/components/ui/checkbox"
 import { Pencil, Trash2, Plus, GripVertical, Save, Undo2, AlertCircle } from "lucide-react"
-import { cn } from "@/lib/utils"
 import type { ConfigPlaybook } from "@/lib/api"
 
 const VECTORS = ["udp_flood", "syn_flood", "ack_flood", "icmp_flood", "unknown"] as const
@@ -25,12 +24,14 @@ interface PlaybookEditorProps {
 }
 
 type DraftStep = ConfigPlaybook["steps"][0] & { _id: string }
+
 type DraftPlaybook = Omit<ConfigPlaybook, "steps"> & { _id: string; steps: DraftStep[] }
 
 function createId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID()
   }
+
   return `pb-${Math.random().toString(36).slice(2, 10)}`
 }
 
@@ -60,6 +61,7 @@ function toDraft(playbooks: ConfigPlaybook[]): DraftPlaybook[] {
 // null and an absent key mean the same thing to the API; compare them as equal.
 function samePlaybooks(a: ConfigPlaybook[], b: ConfigPlaybook[]): boolean {
   const normalise = (_key: string, value: unknown) => value ?? undefined
+
   return JSON.stringify(a, normalise) === JSON.stringify(b, normalise)
 }
 
@@ -76,6 +78,7 @@ function validatePlaybooks(playbooks: ConfigPlaybook[]): string[] {
 
   if (playbooks.length === 0) {
     errors.push("At least one playbook is required")
+
     return errors
   }
 
@@ -90,6 +93,7 @@ function validatePlaybooks(playbooks: ConfigPlaybook[]): string[] {
     } else if (names.has(pb.name)) {
       errors.push(`${ctx}: duplicate name`)
     }
+
     names.add(pb.name)
 
     if (!VECTORS.includes(pb.match.vector as typeof VECTORS[number])) {
@@ -102,6 +106,7 @@ function validatePlaybooks(playbooks: ConfigPlaybook[]): string[] {
     }
 
     const first = pb.steps[0]
+
     if (first.require_confidence_at_least != null || first.require_persistence_seconds != null) {
       errors.push(`${ctx}: first step must not have escalation requirements`)
     }
@@ -113,15 +118,18 @@ function validatePlaybooks(playbooks: ConfigPlaybook[]): string[] {
       if (!ACTIONS.includes(step.action as typeof ACTIONS[number])) {
         errors.push(`${sctx}: action must be one of ${ACTIONS.join(", ")}`)
       }
+
       if (!Number.isFinite(step.ttl_seconds) || step.ttl_seconds < 1 || step.ttl_seconds > 86400) {
         errors.push(`${sctx}: TTL must be 1-86400 seconds`)
       }
+
       if (
         step.action === "police" &&
         (!Number.isFinite(step.rate_bps ?? NaN) || !step.rate_bps || step.rate_bps <= 0)
       ) {
         errors.push(`${sctx}: police action requires rate > 0`)
       }
+
       if (
         step.require_confidence_at_least != null &&
         (!Number.isFinite(step.require_confidence_at_least) ||
@@ -130,6 +138,7 @@ function validatePlaybooks(playbooks: ConfigPlaybook[]): string[] {
       ) {
         errors.push(`${sctx}: confidence must be 0.0-1.0`)
       }
+
       if (
         step.require_persistence_seconds != null &&
         (!Number.isFinite(step.require_persistence_seconds) || step.require_persistence_seconds < 0)
@@ -144,14 +153,19 @@ function validatePlaybooks(playbooks: ConfigPlaybook[]): string[] {
 
 function formatRate(bps: number): string {
   if (bps >= 1_000_000_000) return `${(bps / 1_000_000_000).toFixed(1)} Gbps`
+
   if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(0)} Mbps`
+
   if (bps >= 1_000) return `${(bps / 1_000).toFixed(0)} Kbps`
+
   return `${bps} bps`
 }
 
 function formatTtl(seconds: number): string {
   if (seconds >= 3600) return `${(seconds / 3600).toFixed(1)}h`
+
   if (seconds >= 60) return `${(seconds / 60).toFixed(0)}m`
+
   return `${seconds}s`
 }
 

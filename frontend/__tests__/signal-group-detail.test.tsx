@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, waitFor, act, within } from "@testing-library/react"
+import { render, screen, act, within } from "@testing-library/react"
 import { Suspense } from "react"
 
 // ─── Mocks ──────────────────────────────────────────────
 
 const mockPush = vi.fn()
 const mockReplace = vi.fn()
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mockPush, replace: mockReplace, back: vi.fn() }),
   usePathname: () => "/correlation/groups/grp-1",
@@ -142,6 +143,7 @@ async function renderPage(id: string) {
       </Suspense>,
     )
   })
+
   return result!
 }
 
@@ -335,12 +337,14 @@ describe("SignalGroupDetailPage", () => {
     } })
     await renderPage("grp-1")
     const table = screen.getByRole("table")
+
     for (const [source, raw] of [["fastnetmon", "95%"], ["alertmanager", "80%"]]) {
       const cells = within(within(table).getByText(source).closest("tr")!).getAllByRole("cell")
       expect(cells[1]).toHaveTextContent(raw)
       expect(cells[2]).toHaveTextContent("0.0")
       expect(cells[3]).toHaveTextContent("0%")
     }
+
     expect(within(table).queryByText("Invalid")).not.toBeInTheDocument()
     expect(screen.getByRole("meter", { name: "Confidence" })).toHaveAttribute("aria-valuenow", "0")
   })
