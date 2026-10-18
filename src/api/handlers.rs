@@ -623,7 +623,10 @@ async fn persist_new_mitigation(
     mitigation: &mut Mitigation,
 ) -> crate::error::Result<Option<AnnouncementOutcome>> {
     mitigation.activate();
-    state.repo.insert_mitigation(mitigation).await?;
+    state
+        .repo
+        .admit_mitigation(mitigation, &state.settings.quotas)
+        .await?;
     if state.is_dry_run() {
         return Ok(None);
     }

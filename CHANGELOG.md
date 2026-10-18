@@ -148,6 +148,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Admit new mitigations atomically against shared PostgreSQL customer, POP and
+  global quotas. Competing controllers cannot consume the same last slot; quota
+  rejection or a bounded database admission failure sends no announcement from that
+  request. A timeout while awaiting COMMIT can leave committed intent for later
+  reconciliation.
+
 - Fix `prefixdctl operators list` against the shipped operator schema while
   preserving its JSON fields, table output and exclusion of password hashes.
 

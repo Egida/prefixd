@@ -24,6 +24,19 @@ Use PostgreSQL as the sole storage backend. Remove SQLite support entirely.
 
 All queries use `sqlx` with compile-time checked SQL against a real PostgreSQL database. No ORM abstraction layer.
 
+New mitigation creation checks active customer, POP and global quotas and inserts
+intent in one READ COMMITTED transaction on one connection. A fixed advisory
+transaction lock serializes admissions across controllers; counts occur after the
+lock is acquired. The transaction commits before a speaker RPC. Admission has a
+five-second admission deadline including pool waits, with transaction-local server
+timeouts. Preflight checks precede this deadline. Dropping an unfinished transaction
+queues rollback; a timeout while awaiting COMMIT can instead leave committed intent
+if the acknowledgement is lost. The failing request sends no announcement, but later
+reconciliation can announce that retained intent. Raw repository inserts are reserved for
+fixtures/imports and bypass admission. Withdrawals do not take this advisory lock;
+a controller's local lifecycle mutex can still delay its own lifecycle operations
+while it waits for admission.
+
 ## Consequences
 
 **Positive:**

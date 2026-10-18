@@ -3498,6 +3498,8 @@ async fn test_expiry_failure_keeps_pending_cleanup_and_peer_refresh() {
 }
 
 struct CreationSpeaker {
+    pop: String,
+    backend: &'static str,
     repo: std::sync::Arc<dyn prefixd::db::RepositoryTrait>,
     inner: prefixd::bgp::MockAnnouncer,
     mode: std::sync::atomic::AtomicUsize,
@@ -3511,6 +3513,8 @@ struct CreationSpeaker {
 impl CreationSpeaker {
     fn new(repo: std::sync::Arc<dyn prefixd::db::RepositoryTrait>, mode: usize) -> Self {
         Self {
+            pop: "test-pop".into(),
+            backend: "mock",
             repo,
             inner: prefixd::bgp::MockAnnouncer::new(),
             mode: std::sync::atomic::AtomicUsize::new(mode),
@@ -3525,7 +3529,7 @@ impl CreationSpeaker {
 
 impl prefixd::bgp::FlowSpecAnnouncer for CreationSpeaker {
     fn backend(&self) -> &'static str {
-        "mock"
+        self.backend
     }
     fn reader(&self) -> Option<&dyn prefixd::bgp::FlowSpecReader> {
         Some(self)
@@ -3542,7 +3546,7 @@ impl FlowSpecWriter for CreationSpeaker {
         self.adds.fetch_add(1, SeqCst);
         let owners = self
             .repo
-            .active_mitigations_for_pop("test-pop")
+            .active_mitigations_for_pop(&self.pop)
             .await?
             .into_iter()
             .filter(|owner| prefixd::domain::mitigation_rule(owner).nlri_hash() == rule.nlri_hash())
@@ -4439,4 +4443,596 @@ async fn test_signal_group_reads_propagate_corrupt_dimensions() {
         ctx.repo.find_expired_signal_groups().await.unwrap().len(),
         1
     );
+}
+
+async fn quota_state(
+    context: &TestContext,
+    pop: &str,
+    quotas: prefixd::config::QuotasConfig,
+) -> (
+    std::sync::Arc<prefixd::AppState>,
+    std::sync::Arc<CreationSpeaker>,
+) {
+    let mut settings = context.state.settings.clone();
+    settings.pop = pop.into();
+    settings.quotas = quotas;
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    settings.bgp.mode = prefixd::config::BgpMode::Gobgp;
+    settings.bgp.gobgp_grpc = format!("http://{pop}.example:50051");
+    let binding = context
+        .repo
+        .register_speaker_target(
+            pop,
+            &prefixd::domain::SpeakerTarget::from_config(&settings.bgp).unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+    let mut speaker = CreationSpeaker::new(context.repo.clone(), 0);
+    speaker.pop = pop.into();
+    speaker.backend = "gobgp";
+    let speaker = std::sync::Arc::new(speaker);
+    let state = prefixd::AppState::new(
+        settings,
+        common::test_inventory(),
+        common::test_playbooks(),
+        context.repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap()
+    .with_speaker_binding(binding)
+    .unwrap();
+    (state, speaker)
+}
+
+// Observe actual lock waiters. The admission namespace is production's fixed pair;
+// the insert gate is fixture-owned and never used by production.
+async fn wait_quota_lock(pool: &sqlx::PgPool, admission: bool, waiters: i64) {
+    let (class, object) = if admission {
+        (1886545528_i64, 1903522164_i64)
+    } else {
+        (7355, 2362)
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' AND classid::bigint = $1 AND objid::bigint = $2 AND NOT granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())")
+                .bind(class).bind(object).fetch_one(pool).await.unwrap();
+            if count == waiters { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }).await.expect("requests must reach the observed quota/insert lock before release");
+}
+
+#[tokio::test]
+async fn test_shared_quota_http_serializes_two_pop_admissions() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for quota in ["global", "customer"] {
+        let context = TestContext::new().await;
+        let mut quotas = common::test_settings().quotas;
+        if quota == "global" {
+            quotas.max_active_global = 1;
+        } else {
+            quotas.max_active_per_customer = 1;
+        }
+        let (a, speaker_a) = quota_state(&context, "quota-a", quotas.clone()).await;
+        let (b, speaker_b) = quota_state(&context, "quota-b", quotas).await;
+        let app_a = prefixd::api::create_test_router(a);
+        let app_b = prefixd::api::create_test_router(b);
+        sqlx::raw_sql("CREATE FUNCTION gate_quota_insert() RETURNS trigger AS $$ BEGIN PERFORM pg_advisory_xact_lock(7355, 2362); RETURN NEW; END; $$ LANGUAGE plpgsql; CREATE TRIGGER gate_quota_insert BEFORE INSERT ON mitigations FOR EACH ROW EXECUTE FUNCTION gate_quota_insert();")
+            .execute(&context.pool).await.unwrap();
+        let mut gate = context.pool.begin().await.unwrap();
+        sqlx::query("SELECT pg_advisory_xact_lock(7355, 2362)")
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+        let first = tokio::spawn(async move {
+            app_a
+                .oneshot(creation_request("manual", "203.0.113.10", "quota-a"))
+                .await
+                .unwrap()
+        });
+        wait_quota_lock(&context.pool, false, 1).await;
+        let second = tokio::spawn(async move {
+            app_b
+                .oneshot(creation_request("detector", "203.0.113.11", "quota-b"))
+                .await
+                .unwrap()
+        });
+        // The first request holds admission through INSERT; the second has completed
+        // readable preflight and is waiting for its fresh authoritative counts.
+        wait_quota_lock(&context.pool, true, 1).await;
+        assert_eq!(speaker_a.adds.load(SeqCst) + speaker_b.adds.load(SeqCst), 0);
+        gate.commit().await.unwrap();
+        assert_eq!(first.await.unwrap().status(), StatusCode::CREATED);
+        let rejected = second.await.unwrap();
+        assert_eq!(rejected.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(creation_json(rejected).await.to_string().contains(quota));
+        assert_eq!(context.repo.count_active_global().await.unwrap(), 1);
+        assert_eq!(speaker_a.adds.load(SeqCst), 1);
+        assert_eq!(speaker_b.adds.load(SeqCst), 0);
+        assert_eq!(speaker_a.owners_at_rpc.lock().unwrap()[0].len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn test_shared_quota_sequential_and_same_controller_controls() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let context = TestContext::new().await;
+    let mut quotas = common::test_settings().quotas;
+    quotas.max_active_global = 1;
+    let (state, speaker) = quota_state(&context, "quota-control", quotas).await;
+    let app = prefixd::api::create_test_router(state);
+    let first = app
+        .clone()
+        .oneshot(creation_request("manual", "203.0.113.10", "first"));
+    let second = app
+        .clone()
+        .oneshot(creation_request("manual", "203.0.113.11", "second"));
+    let (first, second) = tokio::join!(first, second);
+    let first = first.unwrap();
+    let winning_ip = if first.status() == StatusCode::CREATED {
+        "203.0.113.10"
+    } else {
+        "203.0.113.11"
+    };
+    let mut statuses = [first.status().as_u16(), second.unwrap().status().as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [201, 422]);
+    let response = app
+        .clone()
+        .oneshot(creation_request("detector", "203.0.113.12", "third"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let extended = app
+        .oneshot(creation_request(
+            "detector",
+            winning_ip,
+            "extend-at-capacity",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(extended.status(), StatusCode::ACCEPTED);
+    assert_eq!(creation_json(extended).await["status"], "extended");
+    assert_eq!(context.repo.count_active_global().await.unwrap(), 1);
+    assert_eq!(speaker.adds.load(SeqCst), 1);
+}
+
+fn assert_quota_error(result: prefixd::error::Result<()>, kind: &str, current: u32, max: u32) {
+    match result.unwrap_err() {
+        prefixd::error::PrefixdError::GuardrailViolation(
+            prefixd::error::GuardrailError::QuotaExceeded {
+                quota_type,
+                current: observed,
+                max: limit,
+            },
+        ) => assert_eq!((quota_type.as_str(), observed, limit), (kind, current, max)),
+        error => panic!("expected quota error, got {error}"),
+    }
+}
+
+#[tokio::test]
+async fn test_shared_quota_postgres_mock_status_threshold_and_scope_parity() {
+    let context = TestContext::new().await;
+    for status in [
+        MitigationStatus::Pending,
+        MitigationStatus::Active,
+        MitigationStatus::Escalated,
+        MitigationStatus::Expired,
+        MitigationStatus::Withdrawn,
+        MitigationStatus::Rejected,
+    ] {
+        sqlx::query("DELETE FROM mitigations")
+            .execute(&context.pool)
+            .await
+            .unwrap();
+        let mock: std::sync::Arc<dyn prefixd::db::RepositoryTrait> =
+            std::sync::Arc::new(prefixd::db::MockRepository::new());
+        for repo in [&context.repo, &mock] {
+            let mut existing =
+                inventory_mitigation("203.0.113.10/32", "quota-a", chrono::Utc::now(), status);
+            existing.customer_id = Some("customer-a".into());
+            // Clock expiry does not release an active lifecycle slot.
+            existing.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+            repo.insert_mitigation(&existing).await.unwrap();
+            let mut candidate = inventory_mitigation(
+                "203.0.113.11/32",
+                "quota-a",
+                chrono::Utc::now(),
+                MitigationStatus::Active,
+            );
+            candidate.customer_id = Some("customer-a".into());
+            let mut quotas = common::test_settings().quotas;
+            quotas.max_active_per_customer = 1;
+            quotas.max_active_per_pop = 1;
+            quotas.max_active_global = 1;
+            if status.is_active() {
+                assert_quota_error(
+                    repo.admit_mitigation(&candidate, &quotas).await,
+                    "customer",
+                    1,
+                    1,
+                );
+                candidate.customer_id = None;
+                assert_quota_error(
+                    repo.admit_mitigation(&candidate, &quotas).await,
+                    "pop",
+                    1,
+                    1,
+                );
+                candidate.pop = "quota-b".into();
+                assert_quota_error(
+                    repo.admit_mitigation(&candidate, &quotas).await,
+                    "global",
+                    1,
+                    1,
+                );
+                existing.mitigation_id = uuid::Uuid::new_v4();
+                existing.victim_ip = "203.0.113.13".into();
+                existing.match_criteria.dst_prefix = "203.0.113.13/32".into();
+                existing.scope_hash = existing.match_criteria.compute_scope_hash();
+                repo.insert_mitigation(&existing).await.unwrap();
+                candidate.customer_id = Some("customer-a".into());
+                assert_quota_error(
+                    repo.admit_mitigation(&candidate, &quotas).await,
+                    "customer",
+                    2,
+                    1,
+                );
+                candidate.customer_id = None;
+                candidate.pop = "quota-a".into();
+                assert_quota_error(
+                    repo.admit_mitigation(&candidate, &quotas).await,
+                    "pop",
+                    2,
+                    1,
+                );
+                candidate.pop = "quota-b".into();
+                assert_quota_error(
+                    repo.admit_mitigation(&candidate, &quotas).await,
+                    "global",
+                    2,
+                    1,
+                );
+            } else {
+                repo.admit_mitigation(&candidate, &quotas).await.unwrap();
+            }
+        }
+    }
+    sqlx::query("DELETE FROM mitigations")
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    let mock: std::sync::Arc<dyn prefixd::db::RepositoryTrait> =
+        std::sync::Arc::new(prefixd::db::MockRepository::new());
+    for repo in [&context.repo, &mock] {
+        let mut candidate = inventory_mitigation(
+            "203.0.113.12/32",
+            "quota-a",
+            chrono::Utc::now(),
+            MitigationStatus::Active,
+        );
+        candidate.customer_id = Some("customer-a".into());
+        let mut quotas = common::test_settings().quotas;
+        quotas.max_active_per_customer = 0;
+        assert_quota_error(
+            repo.admit_mitigation(&candidate, &quotas).await,
+            "customer",
+            0,
+            0,
+        );
+        candidate.customer_id = None;
+        quotas.max_active_per_pop = 0;
+        assert_quota_error(
+            repo.admit_mitigation(&candidate, &quotas).await,
+            "pop",
+            0,
+            0,
+        );
+        quotas.max_active_per_pop = 1;
+        quotas.max_active_global = 0;
+        assert_quota_error(
+            repo.admit_mitigation(&candidate, &quotas).await,
+            "global",
+            0,
+            0,
+        );
+        quotas.max_active_global = 10;
+        repo.admit_mitigation(&candidate, &quotas).await.unwrap(); // None skips customer zero.
+        candidate.mitigation_id = uuid::Uuid::new_v4();
+        candidate.pop = "quota-b".into();
+        candidate.customer_id = Some("customer-b".into());
+        quotas.max_active_per_customer = 1;
+        repo.admit_mitigation(&candidate, &quotas).await.unwrap(); // independent POP and customer.
+        candidate.mitigation_id = uuid::Uuid::new_v4();
+        candidate.customer_id = Some("customer-c".into());
+        candidate.pop = "quota-c".into();
+        repo.admit_mitigation(&candidate, &quotas).await.unwrap();
+        assert_eq!(repo.count_active_global().await.unwrap(), 3);
+    }
+}
+
+#[tokio::test]
+async fn test_shared_quota_one_connection_overrides_repeatable_read() {
+    use prefixd::db::RepositoryTrait;
+    let context = TestContext::new().await;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|connection, _| {
+            Box::pin(async move {
+                sqlx::query("SET default_transaction_isolation = 'repeatable read'")
+                    .execute(connection)
+                    .await?;
+                Ok(())
+            })
+        })
+        .connect(&context.state.settings.storage.connection_string)
+        .await
+        .unwrap();
+    let repository = prefixd::db::Repository::new(pool.clone());
+    let mut quotas = common::test_settings().quotas;
+    quotas.max_active_global = 1;
+    let candidate = inventory_mitigation(
+        "203.0.113.10/32",
+        "quota-b",
+        chrono::Utc::now(),
+        MitigationStatus::Active,
+    );
+    let mut gate = context.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(1886545528, 1903522164)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let admission =
+        tokio::spawn(async move { repository.admit_mitigation(&candidate, &quotas).await });
+    wait_quota_lock(&context.pool, true, 1).await;
+    context
+        .repo
+        .insert_mitigation(&inventory_mitigation(
+            "203.0.113.11/32",
+            "quota-a",
+            chrono::Utc::now(),
+            MitigationStatus::Active,
+        ))
+        .await
+        .unwrap();
+    gate.commit().await.unwrap();
+    assert_quota_error(admission.await.unwrap(), "global", 1, 1);
+    sqlx::query("DELETE FROM mitigations")
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    let repository = prefixd::db::Repository::new(pool.clone());
+    repository
+        .admit_mitigation(
+            &inventory_mitigation(
+                "203.0.113.12/32",
+                "quota-b",
+                chrono::Utc::now(),
+                MitigationStatus::Active,
+            ),
+            &common::test_settings().quotas,
+        )
+        .await
+        .unwrap();
+    let default_isolation: String = sqlx::query_scalar("SHOW default_transaction_isolation")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(default_isolation, "repeatable read");
+    pool.close().await;
+}
+
+async fn assert_quota_cleanup(context: &TestContext, pool: &sqlx::PgPool, retained_rows: i64) {
+    // Returning the HTTP result and completing SQLx's queued rollback are separate
+    // events. Observe pool recovery and absence of the transaction lock/row.
+    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+        loop {
+            let locks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' AND classid::bigint = 1886545528 AND objid::bigint = 1903522164 AND database = (SELECT oid FROM pg_database WHERE datname = current_database())")
+                .fetch_one(&context.pool).await.unwrap();
+            if locks == 0 { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let mut connection = pool.acquire().await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations").fetch_one(&mut *connection).await.unwrap();
+        assert_eq!(count, retained_rows);
+    }).await.expect("cancelled admission must release its lock, connection, and uncommitted row");
+}
+
+#[tokio::test]
+async fn test_shared_quota_pool_wait_uses_whole_deadline() {
+    use prefixd::db::RepositoryTrait;
+    let context = TestContext::new().await;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(std::time::Duration::from_secs(30))
+        .connect(&context.state.settings.storage.connection_string)
+        .await
+        .unwrap();
+    let held = pool.acquire().await.unwrap();
+    let repository = prefixd::db::Repository::new(pool.clone());
+    let started = std::time::Instant::now();
+    let error = repository
+        .admit_mitigation(
+            &inventory_mitigation(
+                "203.0.113.10/32",
+                "quota-a",
+                chrono::Utc::now(),
+                MitigationStatus::Active,
+            ),
+            &common::test_settings().quotas,
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, prefixd::error::PrefixdError::Internal(ref message) if message == "mitigation admission timed out")
+    );
+    assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+    assert!(started.elapsed() < std::time::Duration::from_secs(7));
+    drop(held);
+    assert_quota_cleanup(&context, &pool, 0).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn test_shared_quota_lock_wait_times_out_without_rpc_or_blocking_other_pop_withdrawal() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let context = TestContext::new().await;
+    let (a, speaker_a) = quota_state(&context, "quota-a", common::test_settings().quotas).await;
+    let (b, speaker_b) = quota_state(&context, "quota-b", common::test_settings().quotas).await;
+    let existing = inventory_mitigation(
+        "203.0.113.11/32",
+        "quota-b",
+        chrono::Utc::now(),
+        MitigationStatus::Active,
+    );
+    context.repo.insert_mitigation(&existing).await.unwrap();
+    speaker_b
+        .announce(&prefixd::domain::mitigation_rule(&existing))
+        .await
+        .unwrap();
+    let mut gate = context.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(1886545528, 1903522164)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let app_a = prefixd::api::create_test_router(a.clone());
+    let started = std::time::Instant::now();
+    let task = tokio::spawn(async move {
+        app_a
+            .oneshot(creation_request("manual", "203.0.113.10", "timeout"))
+            .await
+            .unwrap()
+    });
+    wait_quota_lock(&context.pool, true, 1).await;
+    // A different controller's lifecycle mutex and row update remain independent.
+    let withdrawn = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        prefixd::api::create_test_router(b).oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/v1/mitigations/{}/withdraw",
+                    existing.mitigation_id
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"reason":"independent POP"}"#))
+                .unwrap(),
+        ),
+    )
+    .await
+    .expect("independent withdrawal must complete while admission is locked")
+    .unwrap();
+    assert_eq!(withdrawn.status(), StatusCode::OK);
+    assert_eq!(speaker_b.deletes.load(SeqCst), 1);
+    let response = task.await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(started.elapsed() < std::time::Duration::from_secs(7));
+    assert_eq!(speaker_a.adds.load(SeqCst), 0);
+    // This controller still holds its lifecycle mutex during admission, but releases
+    // it after the bounded failure. Do not claim zero local withdrawal interference.
+    let _released =
+        tokio::time::timeout(std::time::Duration::from_secs(1), a.mitigation_lock.lock())
+            .await
+            .unwrap();
+    gate.commit().await.unwrap();
+    assert_eq!(
+        context
+            .repo
+            .get_mitigation(existing.mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MitigationStatus::Withdrawn
+    );
+    assert_quota_cleanup(&context, &context.pool, 1).await;
+}
+
+#[tokio::test]
+async fn test_shared_quota_count_failure_after_preflight_sends_no_rpc() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let context = TestContext::new().await;
+    let (state, speaker) = quota_state(&context, "quota-a", common::test_settings().quotas).await;
+    let mut gate = context.pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(1886545528, 1903522164)")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let app = prefixd::api::create_test_router(state);
+    let task = tokio::spawn(async move {
+        app.oneshot(creation_request("manual", "203.0.113.10", "count-failure"))
+            .await
+            .unwrap()
+    });
+    wait_quota_lock(&context.pool, true, 1).await;
+    // Preflight has succeeded. Only the authoritative transaction's count fails.
+    sqlx::query("ALTER TABLE mitigations RENAME TO hidden_quota_mitigations")
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    gate.commit().await.unwrap();
+    assert_eq!(
+        task.await.unwrap().status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    sqlx::query("ALTER TABLE hidden_quota_mitigations RENAME TO mitigations")
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    assert_eq!(speaker.adds.load(SeqCst), 0);
+    assert_quota_cleanup(&context, &context.pool, 0).await;
+}
+
+#[tokio::test]
+async fn test_shared_quota_statement_timeout_and_cancellation_roll_back() {
+    use std::sync::atomic::Ordering::SeqCst;
+    for cancel in [false, true] {
+        let mut context = TestContext::new().await;
+        let admission_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&context.state.settings.storage.connection_string)
+            .await
+            .unwrap();
+        context.repo = std::sync::Arc::new(prefixd::db::Repository::new(admission_pool.clone()));
+        let (state, speaker) =
+            quota_state(&context, "quota-a", common::test_settings().quotas).await;
+        sqlx::raw_sql("CREATE FUNCTION slow_quota_insert() RETURNS trigger AS $$ BEGIN PERFORM pg_sleep(30); RETURN NEW; END; $$ LANGUAGE plpgsql; CREATE TRIGGER slow_quota_insert BEFORE INSERT ON mitigations FOR EACH ROW EXECUTE FUNCTION slow_quota_insert();")
+            .execute(&context.pool).await.unwrap();
+        let app = prefixd::api::create_test_router(state);
+        let started = std::time::Instant::now();
+        let task = tokio::spawn(async move {
+            app.oneshot(creation_request("manual", "203.0.113.10", "slow-insert"))
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let sleeping: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND wait_event = 'PgSleep' AND query LIKE '%INSERT INTO mitigations%')")
+                    .fetch_one(&context.pool).await.unwrap();
+                if sleeping { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.expect("INSERT must reach server-side sleep before cancellation");
+        if cancel {
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+        } else {
+            assert_eq!(
+                task.await.unwrap().status(),
+                StatusCode::INTERNAL_SERVER_ERROR
+            );
+            assert!(started.elapsed() < std::time::Duration::from_secs(7));
+        }
+        let cleanup_started = std::time::Instant::now();
+        assert_quota_cleanup(&context, &admission_pool, 0).await;
+        eprintln!(
+            "cancel={cancel}: caller elapsed {:?}, observed rollback cleanup {:?}",
+            started.elapsed(),
+            cleanup_started.elapsed()
+        );
+        assert_eq!(speaker.adds.load(SeqCst), 0);
+        admission_pool.close().await;
+    }
 }
