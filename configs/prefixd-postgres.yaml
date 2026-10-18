@@ -12,7 +12,7 @@ http:
     burst: 500
 
 bgp:
-  mode: sidecar
+  backend: gobgp
   gobgp_grpc: "gobgp:50051"
   local_asn: 65010
   router_id: "10.10.0.10"

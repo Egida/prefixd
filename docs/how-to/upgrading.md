@@ -4,8 +4,12 @@
 
 - **Database migrations run automatically** on startup. Legacy speaker state also
   requires the explicit ownership adoption below before the upgraded daemon starts.
-- **Config files are backward compatible.** New fields have sensible defaults; old configs continue to work.
-- **Mitigations survive restarts.** Active mitigations are stored in PostgreSQL and re-announced by the reconciliation loop after startup.
+- Review configuration and ownership changes before upgrading; new defaults do
+  not establish downgrade compatibility.
+- PostgreSQL retains mitigation intent. Reconciliation checks eligible intent
+  after restart; stored Active status does not prove router enforcement.
+- The independent speaker can retain rules while prefixd is stopped. Application
+  TTL cleanup pauses until the controller resumes.
 - **Always back up the database** before upgrading.
 
 ## Speaker ownership upgrade
@@ -22,8 +26,6 @@ once:
 
 ```bash
 prefixd --config /etc/prefixd --adopt-legacy-speaker
-# Compose: run the newly built image with the same config and database environment
-docker compose run --rm --no-deps prefixd --config /etc/prefixd --adopt-legacy-speaker
 ```
 
 Choose the command for your installation, then start the controller normally.
@@ -41,12 +43,12 @@ take another POP's target, or repair mismatched pending request ownership. Norma
 startup also rejects unadopted legacy requests, even when all mitigations have
 expired. Do not delete history or clear target IDs to make startup pass.
 
-The identity includes the normalized backend, HTTP(S) endpoint and fixed `GLOBAL`
+The identity includes the normalized backend, HTTP(S) or absolute Unix-socket endpoint and fixed `GLOBAL`
 routing namespace. `sidecar` and `gobgp`, bare and explicit HTTP addresses, host
 case, equivalent IPv6 spelling and default ports normalize consistently. Token
 environment names/values, CA paths, timeouts and controller operation mode are
 excluded. Endpoints containing userinfo, a query or fragment are rejected.
-Rotating credentials therefore preserves ownership; changing the endpoint does
+HTTP(S) path prefixes are rejected; a root slash is normalized. Rotating credentials therefore preserves ownership; changing the endpoint does
 not. Config reload continues to leave the running POP, BGP settings and mode
 unchanged. Restarting with a different target fails before any speaker connection.
 
@@ -146,8 +148,9 @@ backend. Treat `gobgp.status: unsupported` as unavailable optional observation,
 successful read with no peers. Updated CLI/dashboard clients accept responses
 from older daemons that omit `speaker`.
 
-All selectable adapters still support both observations, and defaults are
-unchanged. External Rust implementations must implement `FlowSpecWriter` and
+All selectable adapters still support both observations. Normal builds include
+rustbgpd, the default backend; `bgp.backend: gobgp` selects GoBGP explicitly.
+External Rust implementations must implement `FlowSpecWriter` and
 `FlowSpecAnnouncer`, then opt into `FlowSpecReader` and `PeerObserver` through the
 facade accessors where supported. Import those traits for concrete adapter calls.
 A production write-only backend remains gated on a durable announcement ledger.
@@ -203,33 +206,82 @@ ledger or an active-active controller protocol.
 
 ## Docker Compose Upgrade
 
+Select exactly one profile and its matching controller service:
+
+| Backend | Profile | Controller service | Main configuration |
+| --- | --- | --- | --- |
+| rustbgpd | `rustbgpd` | `prefixd-rustbgpd` | `configs/prefixd.yaml` |
+| GoBGP | `gobgp` | `prefixd-gobgp` | `configs/prefixd-gobgp.yaml` |
+
+The examples below use rustbgpd. For GoBGP, substitute both the profile and
+controller service. Bare `docker compose up -d` does not select a controller.
+Do not enable both profiles. Profile selection does not change an existing
+database's speaker ownership binding.
+
+Keep your existing configuration and image references before pulling code. The
+checkout's main-config examples select different immutable targets; retain your
+deployment's settings when updating them. Named configuration volumes are seeded
+only when files are missing; updating a checkout does not replace persisted
+inventory or playbooks. Never use `down -v` during an upgrade.
+
+For published images, select the controller and dashboard references you have
+qualified. The same `PREFIXD_IMAGE` also selects the initializer. Without explicit
+overrides Compose uses moving `main` tags; see
+[image selection](deployment.md#image-publication-and-selection).
+
 ```bash
 # 1. Back up the database
-docker compose exec postgres pg_dump -U prefixd prefixd > backup-$(date +%F).sql
+docker compose exec -T postgres pg_dump -U prefixd prefixd > backup-$(date +%F).sql
 
 # 2. Pull latest code
 git pull origin main
 
-# 3. Rebuild containers
-docker compose build
+# 3. Pull selected published images; do not build local source
+docker compose --profile rustbgpd pull
 
 # 4. Restart (prefixd applies migrations on startup)
-docker compose up -d
+docker compose --profile rustbgpd up -d --no-build
 
 # 5. Verify
-curl http://localhost/v1/health
-docker compose logs prefixd | grep "database migrations applied"
+curl --fail http://localhost/v1/health
+docker compose logs prefixd-rustbgpd
+docker compose exec prefixd-rustbgpd prefixdctl migrations
 ```
 
-### Zero-Downtime Upgrade
+Verify authenticated health, ownership, peer observation and reconciliation
+before resuming inputs. Public liveness alone does not establish routing health.
 
-For environments where downtime is unacceptable:
+For a source build, replace steps 3–4 with local image overrides. Keep these
+values set for subsequent Compose commands:
 
-1. Build the new image while the old one is running
-2. Run `docker compose up -d --no-deps prefixd` to replace only the prefixd container
-3. The reconciliation loop will re-announce any rules within 30 seconds
-4. GoBGP retains announcements while prefixd restarts. Application TTL expiry
-   pauses during controller downtime and resumes with reconciliation.
+```bash
+export PREFIXD_IMAGE=prefixd:local
+export PREFIXD_DASHBOARD_IMAGE=prefixd-dashboard:local
+docker compose --profile rustbgpd build
+docker compose --profile rustbgpd up -d --pull missing --no-build
+```
+
+The build supplies the local controller/initializer and dashboard tags; startup
+can still pull missing speaker and infrastructure images.
+
+### Controller restart
+
+Replacing only the controller can preserve the independent speaker's sessions:
+
+1. Pull the selected published image, or build it with the local overrides above,
+   while the old controller is running.
+2. Run `docker compose --profile rustbgpd up -d --no-deps --no-build prefixd-rustbgpd`
+   to replace only the controller. For GoBGP, use profile `gobgp` and service
+   `prefixd-gobgp`. If GoBGP itself is recreated, recreate both the namespace
+   owner and controller together:
+   `docker compose --profile gobgp up -d --no-build --force-recreate gobgp prefixd-gobgp`.
+3. Verify API availability, ownership, speaker observation and reconciliation
+   after startup; no fixed recovery time is guaranteed.
+4. The speaker may retain announcements while prefixd restarts. Application TTL
+   expiry pauses during controller downtime and resumes with reconciliation.
+
+The API is unavailable during replacement and rules can outlive their deadlines
+until cleanup resumes. This is not a zero-downtime or automatic fail-open promise.
 
 ---
 
@@ -262,62 +314,32 @@ prefixdctl migrations
 
 ## Rollback
 
-If an upgrade causes issues:
+Keep the previous binaries/images and configuration before upgrading. A downgrade
+needs explicit compatibility with the current schema, desired intent, durable
+withdrawal queue and speaker ownership rules. An additive migration or
+`IF NOT EXISTS` does not establish that compatibility: an old binary can ignore
+new cleanup state and reannounce a requested deletion.
 
-### Docker Compose
+Pause inputs, drain pending cleanup on the original target, verify local and
+receiving-peer state, and stop the controller before any supported downgrade.
+Keep history and immutable target references when changing backend or endpoint.
 
-```bash
-# Check out the previous version
-git checkout v0.8.5  # or whatever the previous tag was
-
-# Restore database (if migration changed schema)
-docker compose exec -T postgres psql -U prefixd prefixd < backup-2026-02-20.sql
-
-# Rebuild and restart
-docker compose build
-docker compose up -d
-```
-
-### Bare Metal
-
-```bash
-# Stop
-sudo systemctl stop prefixd
-
-# Restore database backup
-psql -U prefixd prefixd < backup-2026-02-20.sql
-
-# Install previous binary
-sudo cp /path/to/previous/prefixd /usr/local/bin/
-
-# Start
-sudo systemctl start prefixd
-```
-
-> **Important:** Database migrations are forward-only. If a migration altered the schema, you must restore from backup to roll back. Migrations that only add tables or columns (using `IF NOT EXISTS`) are safe to roll back without a restore.
+A database restore does not undo speaker mutations. It can resurrect older
+Active rows or lose pending withdrawals. Treat database disaster recovery as a
+separate coordinated restoration of controller and speaker state, with an
+explicitly reviewed version/state recovery plan; do not restore a backup as the
+routine undo step for a speaker switch.
 
 ---
 
 ## Checking Migration Status
 
-After an upgrade, confirm all migrations applied:
+After an upgrade, confirm all migrations applied. This CLI command connects
+directly to PostgreSQL using `DATABASE_URL`; it does not query the HTTP API:
 
 ```bash
-# CLI
+# DATABASE_URL must point to this deployment's database.
 prefixdctl migrations
-
-# Expected output:
-# VERSION   NAME                            APPLIED AT
-# -----------------------------------------------------------------
-# 1         initial                         2026-01-15 10:00:00
-# 2         operators_sessions              2026-01-15 10:00:00
-# 3         raw_details                     2026-01-28 12:00:00
-# 4         schema_migrations               2026-02-20 10:00:00
-# 5         acknowledge                     2026-03-18 14:37:00
-# 6         notification_preferences        2026-03-18 14:37:00
-# 7         signal_groups                   2026-03-19 18:00:00
-#
-# 7 migration(s) applied
 ```
 
 ---
@@ -363,7 +385,9 @@ Migration 007 (`signal_groups`) runs automatically on startup. It adds:
 - `mitigations.signal_group_id` nullable FK column
 - Two indexes for performance (victim/vector lookup, expiry sweep)
 
-This is an additive migration — it only creates new tables and adds a nullable column. **Safe to roll back** without a database restore (the new tables/column will be ignored by v0.13.0).
+This historical migration adds tables and a nullable column. Current downgrade
+safety still depends on every later migration and runtime contract; this entry
+does not authorize running an old controller against current routing state.
 
 ##### New API endpoints
 
@@ -416,17 +440,20 @@ The dashboard adds a `/correlation` page with three tabs:
 
 Plus a signal group detail page at `/correlation/groups/[id]` and a correlation context section on the mitigation detail page.
 
-##### Docker: Config volume now writable by default
+##### Historical Docker change: writable configuration
 
-The default `docker-compose.yml` now mounts `./configs:/etc/prefixd` (writable) so the dashboard config editors work out of the box. Previously it was `:ro`. If you have a customized `docker-compose.yml` with `:ro`, the `PUT /v1/config/correlation` endpoint (and playbooks/alerting PUT) will return 500. Either remove `:ro` or edit configs on the host and use `POST /v1/config/reload`.
+That release changed the checkout bind mount to writable so dashboard config
+editors could save. Current profiles instead use a writable named directory with
+a read-only main-file overlay. Follow the [current Compose procedure](#docker-compose-upgrade)
+for selected-profile operations.
 
 ##### Upgrade steps
 
 1. Back up the database (as always)
 2. Add `configs/correlation.yaml` if you want correlation (optional — omit to keep existing behavior)
-3. Rebuild and restart: `docker compose build && docker compose up -d`
+3. Rebuild and restart using the [current profile procedure](#docker-compose-upgrade).
 4. Migration 007 runs automatically
-5. Verify: `curl http://localhost/v1/config/correlation` should return config (or defaults if no file)
+5. Verify the correlation configuration using an authenticated operator session.
 6. If using Alertmanager/FastNetMon, point webhook URLs at the new adapter endpoints
 7. Tune `min_sources` and `confidence_threshold` to taste
 

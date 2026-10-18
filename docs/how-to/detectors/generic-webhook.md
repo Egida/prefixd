@@ -140,7 +140,7 @@ The adapter then calls the standard `handle_ban` path, which runs guardrails, co
 Tail the logs and look for `ingest_webhook` entries:
 
 ```bash
-docker compose logs -f prefixd | grep webhook
+docker compose logs -f prefixd-rustbgpd | grep webhook
 ```
 
 Check the dashboard → Correlation → Signals tab. Events should appear with `source: radware`. If you've configured correlation weights, the adapter contributes at weight 1.2 per the `sources.radware` entry.

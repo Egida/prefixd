@@ -24,17 +24,14 @@ http:
   #   ca_path: "/etc/prefixd/ca.crt"  # For mTLS
 
 bgp:
-  # BGP modes: sidecar (existing GoBGP name), gobgp, rustbgpd, mock
-  mode: sidecar
-  gobgp_grpc: "gobgp:50051"
+  # rustbgpd is included in normal builds; use backend: gobgp for compatibility.
+  backend: rustbgpd
+  rustbgpd:
+    endpoint: "unix:///run/rustbgpd/grpc.sock"
+  # GoBGP: remove rustbgpd above and set gobgp_grpc: "127.0.0.1:50051".
   local_asn: 65010
   router_id: "10.10.0.10"
   neighbors: []
-  # Experimental rustbgpd: build with --features bgp-rustbgpd and set mode above.
-  # rustbgpd:
-  #   endpoint: "http://127.0.0.1:50051" # Plaintext only on literal loopback IPs
-  #   bearer_token_env: "PREFIXD_RUSTBGPD_TOKEN"
-  #   ca_cert_path: "/etc/prefixd/rustbgpd-ca.pem" # For a remote https:// endpoint
 
 guardrails:
   require_ttl: true

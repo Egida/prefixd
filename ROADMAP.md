@@ -241,21 +241,22 @@ speaker daemon. [ADR 025](docs/adr/025-pluggable-speaker-backends.md) records th
 support decision; [speaker backends](docs/reference/speaker-backends.md) tracks the
 capability boundary, evidence limits, and delivery order.
 
-### Phase 1: Selectable rustbgpd Adapter
+### Phase 1: Shared Controller and Readable Speakers
 
-- [x] Vendor the controller proto behind `bgp-rustbgpd`
-- [x] Implement and validate the experimental `RustBgpdAnnouncer` for announce, withdraw, retained local-rule read-back, and peer status
-- [x] Add compatible `sidecar`, `gobgp`, `rustbgpd`, and `mock` selection; preserve existing defaults until qualification
+- [x] Vendor the controller proto; include `bgp-rustbgpd` in normal builds
+- [x] Implement and validate `RustBgpdAnnouncer` for announce, withdraw, retained local-rule read-back, and peer status
+- [x] Select rustbgpd or GoBGP through canonical `bgp.backend`, defaulting to rustbgpd and sharing the same controller boundary
 - [x] Persist and retry failed withdrawals before terminal state, including TTL expiry and enforced-mode cleanup across dry-run restarts
-- [ ] Complete UDS/client-certificate mTLS and rustbgpd deployment wiring
+- [x] Connect through owner-only UDS and verified client-certificate mTLS; qualify production profile wiring separately
 
-### Phase 2: Qualification and Default Migration
+### Phase 2: Qualification and Shipping
 
 - [x] Verify local-controller TTL withdrawal and same-channel restart re-injection against digest-pinned rustbgpd v0.76.0/v0.77.0; router/deployment qualification remains separate
-- [ ] Re-run FRR and Juniper interop against rustbgpd; qualify Arista/Cisco independently
+- [x] Qualify canonical/default and no-default-feature builds plus both pinned profiles: UID999 socket ownership, fresh/existing config volumes, administrative saves, restart/recreation and mutual-profile rejection — [dated receipt](docs/reference/qualification/speaker-profiles-2026-10-18.md)
+- [x] Verify exact dual-family peer receipt and recovery after speaker restart in the current isolated topology; keep superseded fixture receipts separate
+- [x] Make rustbgpd the deployment default; retain GoBGP's adapter, proto, configuration and CI in the same controller image
+- [ ] Re-run FRR and Juniper interop against rustbgpd; qualify Arista/Cisco independently of controller/profile promotion
 - [ ] Re-run bounded chaos/load checks and attribute evidence to the tested backend
-- [ ] Publish migration/rollback instructions and an explicit version pin/upgrade policy
-- [ ] Switch default deployment to rustbgpd after these gates pass; retain GoBGP's adapter, proto, configuration, and CI
 
 ### Phase 3: Other Daemons
 

@@ -98,9 +98,9 @@ name = "benchmarks"
 harness = false
 
 [features]
-default = []
+default = ["bgp-rustbgpd"]
 test-utils = []
-# Experimental rustbgpd adapter (ADR 025); GoBGP remains supported.
+# The standard binary contains rustbgpd and GoBGP adapters.
 bgp-rustbgpd = ["tonic/tls-aws-lc", "tonic/tls-native-roots", "dep:hyper-util", "dep:rustix"]
 
 [[bin]]

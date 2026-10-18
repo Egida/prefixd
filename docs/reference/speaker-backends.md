@@ -2,8 +2,8 @@
 
 prefixd owns mitigation policy, guardrails, and desired state. The selected BGP
 daemon owns peer sessions and protocol distribution. rustbgpd is the preferred
-integration target; GoBGP remains supported. The default deployment continues
-to use GoBGP while the rustbgpd path is qualified.
+integration target and the standard build/profile choice; GoBGP remains an
+explicit choice in the same binary.
 
 ## Current boundary
 
@@ -12,7 +12,7 @@ Its required `FlowSpecWriter` contract provides announce/upsert and idempotent
 withdraw: repeating a request after an ambiguous response must be safe.
 `reader()` optionally exposes `FlowSpecReader`; `peer_observer()` optionally
 exposes `PeerObserver`. Availability is derived from these accessors. All three
-current adapters provide both observers; no deployment default changes.
+current adapters provide both observers.
 
 Without a reader, reconciliation still loads the strict complete desired
 inventory and updates status gauges, but performs no announcement repairs.
@@ -37,8 +37,8 @@ unsupported observation, observation errors, and a successful empty peer list.
 
 | Backend | Runtime selection | Read-back / peers | Status |
 |---------|-------------------|-------------------|--------|
-| GoBGP | `gobgp` or existing `sidecar` | Implemented / implemented | Existing backend; existing lab receipts apply to this path |
-| rustbgpd | `rustbgpd`, built with `bgp-rustbgpd` | Local injected view / neighbor states | Experimental adapter; deployment and router parity gates remain open |
+| rustbgpd | `backend: rustbgpd` (default) | Retained local intent / neighbor states | Primary profile; released controller qualification below |
+| GoBGP | `backend: gobgp` | Accepted local RIB / neighbor states | Selectable profile |
 | Mock | `mock` | In-memory / synthetic | Automated testing only |
 | Generic HTTP shim | Planned | Capability-dependent | Requires durable announcement ledger |
 | ExaBGP or another daemon | Planned adapter or shim | Must be verified | No support or interoperability claim yet |
@@ -107,82 +107,85 @@ block reconciliation observation and require operator attention.
 
 ## rustbgpd configuration
 
-Build with `cargo build --features bgp-rustbgpd`. A local authenticated TCP
-configuration uses:
+Normal `cargo build` includes rustbgpd. Local Compose uses owner-authenticated UDS:
 
 ```yaml
 bgp:
-  mode: rustbgpd
+  backend: rustbgpd
   rustbgpd:
-    endpoint: "http://127.0.0.1:50051"
-    bearer_token_env: "PREFIXD_RUSTBGPD_TOKEN"
+    endpoint: "unix:///run/rustbgpd/grpc.sock"
   local_asn: 65010
   router_id: "10.10.0.10"
 ```
 
-Set the environment variable to the token stored in rustbgpd's `token_file`.
-The daemon's listener principal needs an `operator` role for Add/DeleteFlowSpec;
-the token authenticates that listener identity. The client sends the bearer
-token, not a user-supplied principal header. Credential values are never YAML
-configuration fields or settings API output.
+Both processes must run as the same UID. The immediate directory must be 0700
+and the socket 0600, owned by that UID, without symlink traversal. The client
+checks filesystem ownership and the server's Unix peer identity on connection
+and reconnect. This path authenticates rustbgpd's implicit local operator.
+Do not share the private volume with unrelated containers. Every ancestor must
+be owned by root or the controller UID and prevent untrusted directory
+replacement; writable ancestors require the sticky bit. Root and the controller
+UID are trusted to maintain these paths. A listener declaring `token_file` also
+requires `bearer_token_env` in prefixd.
 
-For co-located processes use the owner-only Unix socket:
+### Remote mTLS
 
-```yaml
-bgp:
-  mode: rustbgpd
-  rustbgpd:
-    endpoint: "unix:///var/lib/rustbgpd/grpc.sock"
-  local_asn: 65010
-  router_id: "10.10.0.10"
-```
-
-Mount the runtime directory at a stable absolute path and run both processes
-with the same UID. The directory must be owner-only (normally `0700`), the
-socket owner-only (normally `0600`), and neither path may traverse symlinks.
-prefixd checks ownership, permissions and the Unix peer UID on every connection,
-including reconnects after socket recreation. Every ancestor must be owned by
-root or the controller UID and prevent untrusted directory replacement; writable
-ancestors require the sticky bit. Root and the controller UID are trusted to
-maintain these paths. An owner-only rustbgpd listener
-without an explicit principal authorizes its owner as `local-operator`; no token
-or role mapping is needed. If its UDS listener sets `token_file`, also configure
-`bearer_token_env` in prefixd. Changing the socket path changes the persistent
-speaker target; recreating it or rotating credentials does not.
-
-For remote native mTLS use:
+For a remote speaker, verify its certificate against a trusted CA and hostname,
+and present the operator client identity:
 
 ```yaml
 bgp:
-  mode: rustbgpd
+  backend: rustbgpd
   rustbgpd:
     endpoint: "https://speaker.example:50051"
-    ca_cert_path: "/etc/prefixd/speaker-ca.pem"
-    client_cert_path: "/etc/prefixd/client.pem"
-    client_key_path: "/etc/prefixd/client-key.pem"
+    ca_cert_path: "/etc/prefixd/credentials/server-ca.pem"
+    client_cert_path: "/etc/prefixd/credentials/client.pem"
+    client_key_path: "/etc/prefixd/credentials/client.key"
   local_asn: 65010
   router_id: "10.10.0.10"
 ```
 
-The server certificate must match the endpoint hostname and chain to the
-configured CA or system roots. Client certificate and key must be configured
-together. On rustbgpd set all three `tls_cert_file`, `tls_key_file` and
-`tls_client_ca_file`; partial server TLS configuration is invalid. Native mTLS
-has no TLS-without-client-certificates mode. Map the verified client certificate
-principal to `operator` under `[security.grpc.roles]`, rather than setting a TCP
-listener principal. rustbgpd uses the full first `rustbgpd:` URI SAN, otherwise
-an email SAN or Subject CN. No principal header is sent by prefixd.
+Mount credentials read-only and readable by controller UID 999. The server
+certificate needs the endpoint hostname in its SAN. Configure rustbgpd with all
+three server TLS fields (`tls_cert_file`, `tls_key_file`, `tls_client_ca_file`).
+Map the verified client certificate principal to `operator` under
+`[security.grpc.roles]`, rather than configuring a TCP listener principal.
+rustbgpd uses the full first `rustbgpd:` URI SAN, otherwise an email SAN or
+Subject CN; prefixd sends no principal header. For example, a client with URI
+SAN `rustbgpd:prefixd` needs:
 
-Existing HTTPS bearer connections through a verified TLS endpoint remain valid;
-client identity is optional for that case. Plain HTTP still requires a bearer
-token and accepts only literal loopback IPs, including `127.0.0.1` and `[::1]`;
-container DNS and other hostnames are not a loopback guarantee. TLS fields are
-rejected on plaintext and Unix endpoints. Private key contents and token values
-never belong in YAML or settings API output.
+```toml
+[global.telemetry.grpc_tcp]
+address = "0.0.0.0:50051"
+tls_cert_file = "/etc/rustbgpd/credentials/server.pem"
+tls_key_file = "/etc/rustbgpd/credentials/server.key"
+tls_client_ca_file = "/etc/rustbgpd/credentials/client-ca.pem"
 
-Initial network connection attempts and each TLS handshake have a ten-second
-budget. A peer that accepts TCP but does not finish TLS cannot stall startup
-indefinitely. Complete RPC attempts remain bounded separately.
+[security.grpc.roles]
+"rustbgpd:prefixd" = "operator"
+```
+
+No hostname or certificate verification bypass is supported. The client
+certificate and key must be supplied together. A server requiring bearer
+credentials additionally needs `bearer_token_env` in prefixd. TLS fields are
+rejected on plaintext and Unix endpoints. Changing the socket path changes
+persistent target ownership; socket recreation and credential rotation do not.
+
+Loopback TCP remains available for isolated local deployments with
+`endpoint: http://127.0.0.1:50051` and
+`bearer_token_env: PREFIXD_RUSTBGPD_TOKEN`. Set that environment variable to the
+server's private token-file contents; its configured principal needs `operator`.
+Plain HTTP accepts only literal loopback IPs, not hostnames or container DNS.
+Tokens and credential paths remain absent from settings API responses.
+
+The Compose GoBGP profile binds its unauthenticated management listener only to
+loopback in a namespace shared with its controller. Neither profile publishes a
+management port. Recreate the GoBGP/controller pair together when replacing its
+namespace owner. Selecting a different profile on existing state requires the
+[upgrade and rollback procedure](../how-to/upgrading.md).
+
+Initial network connections and TLS handshakes have a ten-second budget;
+complete RPC attempts are bounded separately.
 
 The relevant vendored controller message fields were checked against rustbgpd
 `v0.77.0`. This is a protocol baseline, not proof that an arbitrary binary
@@ -308,9 +311,9 @@ Application status and local speaker intent do not prove router enforcement.
 
 | Stage | Work and gate |
 |-------|---------------|
-| 1 | Keep GoBGP supported; selectable rustbgpd adapter, compatible config, authenticated RPC and codec tests |
+| 1 | Support rustbgpd and GoBGP through the shared controller, authenticated RPC and codec tests |
 | 2 | Retry failed expiry withdrawals; real daemon TTL/restart recovery and transport/deployment wiring |
-| 3 | Router interop, migration and rollback evidence; only then change deployment defaults |
+| 3 | Shared readable-backend contract, secure profiles, persistent settings and actual route lifecycle gate shipping; peer receipt and vendor-router enforcement remain separately qualified |
 | 4 | Optional observation split implemented; durable confirmed announcement state remains required (pending withdrawal cleanup exists) |
 | 5 | Health availability metadata and CLI/dashboard observation states implemented; retain legacy public fields |
 | 6 | HTTP shim, a second transport proof, shared conformance and per-backend CI |

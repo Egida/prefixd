@@ -1,5 +1,18 @@
 # Troubleshooting Guide
 
+Compose examples use the primary `rustbgpd` profile and controller service
+`prefixd-rustbgpd`. For the GoBGP profile, use `gobgp` and
+`prefixd-gobgp`; do not enable both. Follow the [quickstart](../tutorials/quickstart.md)
+to start a fresh stack. Bare `docker compose up -d` does not start a controller.
+Profile selection does not change the database's
+[speaker ownership binding](upgrading.md#speaker-ownership-upgrade).
+
+The dashboard and API share `http://localhost` through nginx; the controller's
+port 8080 is not published. Protected curl examples below assume a deployment
+configured for bearer authentication with `PREFIXD_API_TOKEN` set. The shipped
+credentials-mode stack uses a logged-in browser session instead; see
+[authentication setup](deployment.md#authentication-setup).
+
 ## Quick Diagnostics
 
 ```bash
@@ -11,7 +24,7 @@ prefixdctl status
 prefixdctl peers
 
 # Check logs
-docker compose logs -f prefixd
+docker compose logs -f prefixd-rustbgpd
 journalctl -u prefixd -f
 
 # Check metrics (via nginx proxy)
@@ -28,10 +41,10 @@ curl -s localhost/metrics | grep prefixd_
 
 **Check the response:**
 ```bash
-curl -v -X POST http://localhost/v1/events \
+curl --fail-with-body --silent --show-error -X POST http://localhost/v1/events \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
-  -d '{"source":"test","victim_ip":"203.0.113.10","vector":"udp_flood"}'
+  -d "{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"source\":\"test\",\"victim_ip\":\"203.0.113.10\",\"vector\":\"udp_flood\",\"bps\":5000000000,\"confidence\":0.95}"
 ```
 
 **Common causes:**
@@ -71,7 +84,14 @@ prefixdctl safelist list
 
 ### Session Not Established
 
-**Check GoBGP:**
+**Check rustbgpd:**
+
+```bash
+docker compose exec rustbgpd rbgp --addr unix:///run/rustbgpd/grpc.sock health
+docker compose exec rustbgpd rbgp --addr unix:///run/rustbgpd/grpc.sock neighbor
+```
+
+**GoBGP compatibility profile:**
 ```bash
 # Docker
 docker compose exec gobgp gobgp neighbor
@@ -80,7 +100,7 @@ docker compose exec gobgp gobgp neighbor
 gobgp neighbor
 ```
 
-**Expected output:**
+**GoBGP output example:**
 ```
 Peer            AS  Up/Down State       |#Received  Accepted
 10.0.0.1     65000 01:23:45 Establ      |        0         0
@@ -107,7 +127,16 @@ iptables -L -n | grep 179
 
 ### FlowSpec Not Reaching Router
 
-**Check GoBGP RIB:**
+**Check rustbgpd's retained local intent:**
+
+```bash
+docker compose exec rustbgpd rbgp --addr unix:///run/rustbgpd/grpc.sock \
+  --json flowspec received 0.0.0.0 --family ipv4_flowspec
+docker compose exec rustbgpd rbgp --addr unix:///run/rustbgpd/grpc.sock \
+  --json flowspec received 0.0.0.0 --family ipv6_flowspec
+```
+
+**GoBGP compatibility profile's accepted local RIB:**
 ```bash
 # IPv4 FlowSpec
 docker compose exec gobgp gobgp global rib -a ipv4-flowspec
@@ -116,7 +145,8 @@ docker compose exec gobgp gobgp global rib -a ipv4-flowspec
 docker compose exec gobgp gobgp global rib -a ipv6-flowspec
 ```
 
-**If rules are in GoBGP but not on router:**
+Neither local inventory proves export or router enforcement. If a local rule is
+absent on the receiving router:
 
 1. Check BGP session includes FlowSpec AFI/SAFI
 2. Check router import policy accepts FlowSpec
@@ -184,7 +214,10 @@ show log messages | match bgp
   # Do NOT add ipv4-unicast here
 ```
 
-Restart GoBGP after changing the config: `docker restart prefixd-gobgp`
+For the compatibility profile, restart GoBGP after changing the config:
+`docker compose --profile gobgp restart gobgp`. If you recreate its container,
+recreate the namespace-sharing controller together as described in the
+[upgrade guide](upgrading.md#controller-restart).
 
 **"License key missing; requires 'BGP' license":**
 
@@ -342,13 +375,16 @@ flowspec
 
 **Check operators exist:**
 ```bash
-prefixdctl operators list
+docker compose exec prefixd-rustbgpd prefixdctl operators list
 ```
 
-**Create operator:**
+**Create operator** (the password prompt hides input):
 ```bash
-prefixdctl operators create --username admin --role admin --password
+docker compose exec prefixd-rustbgpd prefixdctl operators create --username admin --role admin
 ```
+
+These setup commands use the container's `DATABASE_URL` directly. Native
+installations must set that variable for the deployment's database.
 
 **Check session cookies:**
 - Browser: Check Developer Tools > Application > Cookies
@@ -359,13 +395,13 @@ prefixdctl operators create --username admin --role admin --password
 
 **Check token is set:**
 ```bash
-echo $PREFIXD_API_TOKEN
+test -n "$PREFIXD_API_TOKEN" && echo "token is set"
 ```
 
 **Test authentication:**
 ```bash
-curl -v -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
-  http://localhost/v1/health
+curl --fail-with-body --silent --show-error -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
+  http://localhost/v1/health/detail
 ```
 
 **Check config:**
@@ -373,18 +409,18 @@ curl -v -H "Authorization: Bearer $PREFIXD_API_TOKEN" \
 http:
   auth:
     mode: bearer
-    token: "${PREFIXD_API_TOKEN}"
+    bearer_token_env: "PREFIXD_API_TOKEN"
 ```
 
 ### CORS Errors (Dashboard)
 
 **Symptoms:** Browser console shows CORS errors.
 
-**Fix:** Add dashboard origin to config:
-```yaml
-http:
-  cors_origins: "http://localhost:3000"
-```
+Open the dashboard through nginx at `http://localhost` so API requests and
+WebSockets use the same origin. Port 3000 is an internal service, not a second
+public entrypoint in the supplied Compose stack. For a custom split-origin
+deployment, review the [HTTP configuration](../reference/configuration.md)
+and ingress rather than bypassing the proxy.
 
 ---
 
@@ -483,36 +519,27 @@ VACUUM ANALYZE;
 
 **Check logs:**
 ```bash
-docker compose logs prefixd 2>&1 | grep -i reconcil
+docker compose logs prefixd-rustbgpd 2>&1 | grep -i reconcil
 ```
 
 **Common causes:**
 
 | Error | Cause | Fix |
 |-------|-------|-----|
-| GoBGP unreachable | Container/service down | Restart GoBGP |
+| Speaker unreachable | Selected service/socket down | Check selected speaker logs and endpoint |
 | Database error | Connection issue | Check PostgreSQL |
-| Parse error | Unknown FlowSpec format | Check GoBGP version |
+| Parse error | Unsupported FlowSpec format | Check selected backend, version and local rules |
 
-### Orphan Rules in GoBGP
+### Unknown Local Rules
 
-**Symptoms:** Rules in GoBGP RIB that aren't in prefixd database.
+**Symptoms:** Speaker-local rules are absent from prefixd's desired inventory.
 
-**Check:**
-```bash
-# GoBGP RIB
-docker compose exec gobgp gobgp global rib -a ipv4-flowspec
-
-# prefixd active mitigations
-prefixdctl mitigations list --status active
-```
-
-**Fix:** Reconciliation will clean orphans on next run (30s default).
-
-**Manual cleanup:**
-```bash
-docker compose exec gobgp gobgp global rib -a ipv4-flowspec del all
-```
+Compare the selected speaker's local inventory above with all relevant mitigation
+pages, statuses, POP ownership and pending cleanup. Reconciliation reports unknown
+rules; it does not delete them because it cannot establish their owner. Another
+controller or operator may have installed them. Do not clear the RIB wholesale.
+Check [speaker ownership](upgrading.md#speaker-ownership-upgrade) and verify
+individual removals on the original speaker and receiving router.
 
 ---
 
@@ -544,11 +571,18 @@ wscat -c ws://localhost/v1/ws/feed -H "Cookie: session=..."
 
 ### Enable Debug Logging
 
-```bash
-# Environment variable
-RUST_LOG=debug docker compose up prefixd
+In Compose, change `environment.RUST_LOG` to `debug` for the selected controller
+in `docker-compose.yml`, then recreate that controller:
 
-# Or in config
+```bash
+docker compose --profile rustbgpd up -d --no-deps --no-build prefixd-rustbgpd
+```
+
+For a native service, set `RUST_LOG=debug` in its environment or use the config
+below when `RUST_LOG` is unset. The Compose file's explicit environment takes
+precedence over this setting:
+
+```yaml
 observability:
   log_level: debug
 ```
@@ -591,32 +625,27 @@ cat audit.jsonl | jq 'select(.details.source == "fastnetmon")'
 
 ### Withdraw All Mitigations
 
-```bash
-# Via CLI
-prefixdctl mitigations list --status active -f json | \
-  jq -r '.[].id' | \
-  xargs -I{} prefixdctl mitigations withdraw {} --reason "emergency"
-
-# Direct GoBGP (nuclear option)
-docker compose exec gobgp gobgp global rib -a ipv4-flowspec del all
-docker compose exec gobgp gobgp global rib -a ipv6-flowspec del all
-```
+Pause detector input first. Use the authenticated dashboard or CLI to withdraw
+the affected mitigations with an explicit reason, reviewing every page and any
+pending or escalated intent. Check durable pending cleanup and verify removal
+on the selected speaker and receiving routers before declaring the incident
+cleared. Check [pending cleanup](upgrading.md#pending-withdrawals-and-rollback); clearing
+the speaker's RIB directly bypasses withdrawal intent and allows the controller
+to reannounce eligible desired rules.
 
 ### Stop All New Mitigations
 
-```bash
-# Switch to dry-run mode (edit config)
-mode: dry-run
-
-# Restart
-docker compose restart prefixd
-```
+Pause detector input. Before changing an enforced deployment to `mode: dry-run`,
+withdraw active intent, drain pending cleanup on the original speaker and verify
+its local state. Dry-run does not delete previously enforced rules or acknowledge
+their pending deletions. Follow the [mode-change guidance](upgrading.md#pending-withdrawals-and-rollback),
+then restart the selected controller after updating its main configuration.
 
 ### Force Database Reconnection
 
 ```bash
 # Restart prefixd
-docker compose restart prefixd
+docker compose --profile rustbgpd restart prefixd-rustbgpd
 ```
 
 ---

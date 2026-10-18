@@ -10,7 +10,9 @@
 #   ./test-flowspec.sh --withdraw   # Test announce then withdraw
 #
 # Prerequisites:
-#   - prefixd stack running: docker compose up -d
+#   - Fresh GoBGP compatibility stack (repository root):
+#     docker compose --profile gobgp up -d --pull always --no-build
+#   - This legacy script needs repair before qualification; see lab/README.md.
 #   - At least one lab deployed (FRR or cJunos)
 #   - GoBGP connected to lab network
 

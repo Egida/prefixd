@@ -2,6 +2,12 @@
 
 FlowSpec support varies significantly across router vendors, platforms, and software versions. This page documents what has been tested with prefixd and known limitations.
 
+The recorded environments below used **GoBGP**, not rustbgpd. Selecting the new
+rustbgpd default does not extend these historical reports to that speaker or
+prove forwarding-plane enforcement. Requalify your exact speaker, router version,
+address family and action; retain dated command and result receipts. FRR RIB
+receipt alone is control-plane evidence.
+
 ## Support Matrix
 
 | Capability | Juniper (Junos/Evolved) | Arista (EOS) | Cisco (IOS-XR) | Nokia (SR OS) | FRR |
@@ -138,39 +144,44 @@ router bgp 65000
 
 ## Testing Your Router
 
-Use the lab scripts to validate FlowSpec with your hardware:
+Start with the [quickstart](../tutorials/quickstart.md) for the rustbgpd profile,
+authentication and same-origin API access through `http://localhost`. Existing
+databases retain their [speaker ownership binding](../how-to/upgrading.md#speaker-ownership-upgrade);
+profile selection does not change it.
+
+To investigate the historical GoBGP path on a **fresh, isolated** test deployment:
 
 ```bash
-# 1. Start prefixd stack
-docker compose up -d
+# Replace the documentation peer in configs/gobgp.conf before starting.
+# GoBGP listens on BGP port 179, AS 65010; its RPC port is private.
 
-# 2. Configure your router to peer with GoBGP (see configs/gobgp.conf)
-#    Default: GoBGP listens on port 179, AS 65010
+# Start the explicit compatibility profile; do not enable rustbgpd alongside it.
+docker compose --profile gobgp up -d --pull always --no-build
 
-# 3. Verify BGP session
-docker exec prefixd-gobgp gobgp neighbor
-
-# 4. Send a test event
-curl -X POST http://localhost:8080/v1/events \
-  -H "Content-Type: application/json" \
-  -d '{
-    "timestamp": "2026-01-01T00:00:00Z",
-    "source": "test",
-    "victim_ip": "203.0.113.10",
-    "vector": "udp_flood",
-    "pps": 100000,
-    "confidence": 0.95
-  }'
-
-# 5. Verify FlowSpec rule in GoBGP RIB
-docker exec prefixd-gobgp gobgp global rib -a ipv4-flowspec
-
-# 6. Check your router's FlowSpec table
-#    Juniper: show route table inetflow.0
-#    Arista:  show bgp flow-spec ipv4
-#    Cisco:   show bgp ipv4 flowspec
-#    FRR:     show bgp ipv4 flowspec
+# Inspect local session and accepted FlowSpec RIB state.
+docker compose exec gobgp gobgp neighbor
+docker compose exec gobgp gobgp global rib -a ipv4-flowspec
+docker compose exec gobgp gobgp global rib -a ipv6-flowspec
 ```
+
+Create an administrator as described in the quickstart, using service
+`prefixd-gobgp`, and sign in to the dashboard. Configure inventory and playbooks
+for the test victim, then create and withdraw a test mitigation through the
+authenticated UI. For detector ingestion, follow the
+[API input and authentication reference](api.md), rather than sending an
+unauthenticated request to the unpublished controller port.
+
+Check the rule on the receiving router, its action and removal independently:
+
+```text
+Juniper: show route table inetflow.0
+Arista:  show bgp flow-spec ipv4
+Cisco:   show bgp ipv4 flowspec
+FRR:     show bgp ipv4 flowspec
+```
+
+The [legacy Containerlab examples](../../lab/README.md) remain GoBGP-specific;
+their helper script needs repair before it can provide current qualification.
 
 ## Contributing Test Results
 

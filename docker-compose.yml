@@ -1,3 +1,14 @@
+x-controller: &controller
+  image: ${PREFIXD_IMAGE:-ghcr.io/lance0/prefixd:main}
+  build: .
+  container_name: prefixd
+  user: "999:999"
+  environment:
+    RUST_LOG: info
+    PREFIXD_API_TOKEN: ${PREFIXD_API_TOKEN:-}
+    DATABASE_URL: postgres://prefixd:${POSTGRES_PASSWORD:-prefixd_secret}@postgres:5432/prefixd
+  restart: unless-stopped
+
 services:
   nginx:
     image: nginx:alpine
@@ -7,38 +18,97 @@ services:
     volumes:
       - ./configs/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
-      - prefixd
       - dashboard
     restart: unless-stopped
 
-  prefixd:
+  init:
+    image: ${PREFIXD_IMAGE:-ghcr.io/lance0/prefixd:main}
     build: .
-    container_name: prefixd
-    expose:
-      - "8080"
+    profiles: [rustbgpd, gobgp]
+    user: "0:0"
+    entrypoint: ["/usr/local/bin/prefixd-init"]
+    command: []
     volumes:
-      - ./configs:/etc/prefixd
-      - prefixd-data:/data
-    environment:
-      - RUST_LOG=info
-      - PREFIXD_API_TOKEN=${PREFIXD_API_TOKEN:-}
-      - DATABASE_URL=postgres://prefixd:${POSTGRES_PASSWORD:-prefixd_secret}@postgres:5432/prefixd
+      - type: volume
+        source: prefixd-config
+        target: /etc/prefixd
+        volume:
+          nocopy: true
+      - type: volume
+        source: prefixd-data
+        target: /data
+        volume:
+          nocopy: true
+      - type: volume
+        source: rustbgpd-runtime
+        target: /run/rustbgpd
+        volume:
+          nocopy: true
+    restart: "no"
+
+  prefixd-rustbgpd:
+    <<: *controller
+    profiles: [rustbgpd]
+    expose: ["8080"]
+    volumes:
+      - type: volume
+        source: prefixd-config
+        target: /etc/prefixd
+        volume:
+          nocopy: true
+      - ./configs/prefixd.yaml:/etc/prefixd/prefixd.yaml:ro
+      - type: volume
+        source: prefixd-data
+        target: /data
+        volume:
+          nocopy: true
+      - type: volume
+        source: rustbgpd-runtime
+        target: /run/rustbgpd
+        volume:
+          nocopy: true
+    networks:
+      default:
+        aliases: [prefixd]
     depends_on:
+      init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      rustbgpd:
+        condition: service_healthy
+
+  prefixd-gobgp:
+    <<: *controller
+    profiles: [gobgp]
+    network_mode: service:gobgp
+    volumes:
+      - type: volume
+        source: prefixd-config
+        target: /etc/prefixd
+        volume:
+          nocopy: true
+      - ./configs/prefixd-gobgp.yaml:/etc/prefixd/prefixd.yaml:ro
+      - type: volume
+        source: prefixd-data
+        target: /data
+        volume:
+          nocopy: true
+    depends_on:
+      init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       gobgp:
-        condition: service_started
-    restart: unless-stopped
+        condition: service_healthy
 
   dashboard:
+    image: ${PREFIXD_DASHBOARD_IMAGE:-ghcr.io/lance0/prefixd-dashboard:main}
     build: ./frontend
     container_name: prefixd-dashboard
-    expose:
-      - "3000"
+    expose: ["3000"]
     environment:
-      - PREFIXD_API=http://prefixd:8080
-    depends_on:
-      - prefixd
+      PREFIXD_API: http://prefixd:8080
     restart: unless-stopped
 
   postgres:
@@ -50,8 +120,6 @@ services:
       POSTGRES_DB: prefixd
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U prefixd"]
       interval: 5s
@@ -59,15 +127,51 @@ services:
       retries: 5
     restart: unless-stopped
 
-  gobgp:
-    image: jauderho/gobgp:latest
-    container_name: prefixd-gobgp
+  rustbgpd:
+    image: ghcr.io/lance0/rustbgpd:0.77.0@sha256:6dbfa42c47aa1d063f119f3eff9524aac4585665c0a9c79167ec8d20244bc6c2
+    profiles: [rustbgpd]
+    container_name: prefixd-rustbgpd
+    user: "999:999"
+    command: ["rustbgpd", "/etc/rustbgpd/config.toml"]
     ports:
-      - "50051:50051"  # gRPC API
-      - "179:179"      # BGP
+      - "179:179"
+    volumes:
+      - ./configs/rustbgpd.toml:/etc/rustbgpd/config.toml:ro
+      - type: volume
+        source: rustbgpd-runtime
+        target: /run/rustbgpd
+        volume:
+          nocopy: true
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "rbgp", "--addr", "unix:///run/rustbgpd/grpc.sock", "health", "--liveness"]
+      interval: 2s
+      timeout: 5s
+      start_period: 5s
+      retries: 15
+    restart: unless-stopped
+
+  gobgp:
+    image: jauderho/gobgp@sha256:42b8d0017237e388c55936efe1f23632365b24a31751f6e8815f93e12c4d18c2
+    profiles: [gobgp]
+    container_name: prefixd-gobgp
+    user: "999:999"
+    ports:
+      - "179:179"
+    expose: ["8080"]
+    networks:
+      default:
+        aliases: [prefixd]
     volumes:
       - ./configs/gobgp.conf:/etc/gobgp/gobgp.conf:ro
-    command: ["/usr/local/bin/gobgpd", "-f", "/etc/gobgp/gobgp.conf", "-p", "--api-hosts=0.0.0.0:50051"]
+    command: ["/usr/local/bin/gobgpd", "-f", "/etc/gobgp/gobgp.conf", "--api-hosts=127.0.0.1:50051", "--pprof-disable", "--metrics-path="]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/gobgp", "-u", "127.0.0.1", "-p", "50051", "global"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
     restart: unless-stopped
 
   prometheus:
@@ -78,8 +182,6 @@ services:
     volumes:
       - ./grafana/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
-    depends_on:
-      - prefixd
     restart: unless-stopped
 
   grafana:
@@ -93,14 +195,16 @@ services:
       - ./grafana/prefixd-security.json:/var/lib/grafana/dashboards/prefixd-security.json:ro
       - grafana-data:/var/lib/grafana
     environment:
-      - GF_AUTH_ANONYMOUS_ENABLED=true
-      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
     depends_on:
       - prometheus
     restart: unless-stopped
 
 volumes:
+  prefixd-config:
   prefixd-data:
+  rustbgpd-runtime:
   postgres-data:
   prometheus-data:
   grafana-data:

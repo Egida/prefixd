@@ -183,7 +183,11 @@ fn default_burst() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BgpConfig {
-    #[serde(default = "default_bgp_mode")]
+    #[serde(
+        default = "default_bgp_mode",
+        rename(deserialize = "backend"),
+        alias = "mode"
+    )]
     pub mode: BgpMode,
     #[serde(default)]
     pub gobgp_grpc: String,
@@ -196,7 +200,7 @@ pub struct BgpConfig {
 }
 
 fn default_bgp_mode() -> BgpMode {
-    BgpMode::Sidecar
+    BgpMode::Rustbgpd
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -473,24 +477,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn speaker_modes_preserve_old_configs_and_accept_rustbgpd_without_gobgp() {
-        let old: BgpConfig =
-            serde_yaml::from_str("gobgp_grpc: gobgp:50051\nlocal_asn: 65010\nrouter_id: 192.0.2.1")
-                .unwrap();
-        assert_eq!(old.mode, BgpMode::Sidecar);
-        assert!(old.rustbgpd.is_none());
-        for mode in ["sidecar", "gobgp", "mock", "rustbgpd"] {
-            let config: BgpConfig = serde_yaml::from_str(&format!("mode: {mode}\nlocal_asn: 65010\nrouter_id: 192.0.2.1\nrustbgpd:\n  endpoint: http://127.0.0.1:50051\n  bearer_token_env: TEST_TOKEN")).unwrap();
-            assert_eq!(serde_json::to_value(config.mode).unwrap(), mode);
-            assert!(config.gobgp_grpc.is_empty());
-            assert_eq!(config.rustbgpd.unwrap().bearer_token_env, "TEST_TOKEN");
+    fn backend_selector_defaults_to_rustbgpd_and_selects_either_speaker() {
+        let base = "local_asn: 65010\nrouter_id: 192.0.2.1\n";
+        for (selector, expected) in [
+            ("", BgpMode::Rustbgpd),
+            ("backend: rustbgpd\n", BgpMode::Rustbgpd),
+            ("backend: gobgp\n", BgpMode::Gobgp),
+        ] {
+            let config: BgpConfig = serde_yaml::from_str(&format!("{base}{selector}")).unwrap();
+            assert_eq!(config.mode, expected);
+            assert_eq!(
+                serde_json::to_value(&config).unwrap()["mode"],
+                serde_json::to_value(expected).unwrap()
+            );
         }
-        assert!(
-            serde_yaml::from_str::<BgpConfig>(
-                "mode: unsupported\nlocal_asn: 65010\nrouter_id: 192.0.2.1"
-            )
-            .is_err()
-        );
+    }
+
+    #[test]
+    fn backend_selector_rejects_duplicate_and_unknown_values() {
+        let base = "local_asn: 65010\nrouter_id: 192.0.2.1\n";
+        for selector in [
+            "backend: rustbgpd\nbackend: gobgp\n",
+            "backend: rustbgpd\nmode: rustbgpd\n",
+            "backend: exabgp\n",
+        ] {
+            assert!(serde_yaml::from_str::<BgpConfig>(&format!("{base}{selector}")).is_err());
+        }
+    }
+
+    #[test]
+    fn shipped_speaker_examples_select_the_matching_backend() {
+        for (yaml, expected) in [
+            (
+                include_str!("../../configs/prefixd.yaml"),
+                BgpMode::Rustbgpd,
+            ),
+            (
+                include_str!("../../configs/prefixd.yaml.example"),
+                BgpMode::Rustbgpd,
+            ),
+            (
+                include_str!("../../configs/prefixd-gobgp.yaml"),
+                BgpMode::Gobgp,
+            ),
+        ] {
+            let settings: Settings = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(settings.bgp.mode, expected);
+            assert_eq!(settings.http.auth.mode, AuthMode::Credentials);
+        }
     }
 
     /// Minimal valid YAML for a Settings struct (no correlation section).
