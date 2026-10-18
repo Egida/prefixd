@@ -88,17 +88,18 @@ fresh runtime dependency images are fetched without replacing local builds.
 
 ## Dashboard dependency and development baseline
 
-Bun 1.3.14 and `frontend/bun.lock` define the dashboard install used by CI and
+Bun 1.4.3 and `frontend/bun.lock` define the dashboard install used by CI and
 the container builder. The runner copies standalone output and uses the same
 Bun version. Use `bun install --frozen-lockfile` when validating a
 checkout; do not create an npm lockfile. The current lock resolves Next.js
-16.4.2; `^16.3.8` is the manifest minimum, not the installed version.
+16.4.2, matching the manifest minimum. Native frontend tests use Node.js 26.12.0.
 
 Application-level `NEXT_PUBLIC_MOCK_MODE` has been retired. Development uses the
 normal API client; component tests keep their own controlled API fixtures.
-The removed `next lint` command is no longer advertised. Tests and production
-build are the current frontend gates; separate type-check/ESLint checks and a
-browser harness remain frontend tooling work.
+The removed `next lint` command is no longer advertised. Run `bun run typecheck`,
+`bun run test` and `bun run build` before deployment; production builds enforce
+TypeScript checks. Standalone lint and automated browser CI remain frontend
+tooling work.
 
 ## Quick Start
 
