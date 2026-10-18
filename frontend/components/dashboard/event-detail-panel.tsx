@@ -13,6 +13,7 @@ import { copyText } from "@/lib/clipboard"
 import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { useReducedMotion } from "@/hooks/use-reduced-motion"
+import { isConfidence } from "@/lib/confidence"
 
 interface EventDetailPanelProps {
   event: Event | null
@@ -198,20 +199,16 @@ export function EventDetailPanel({ event, onClose }: EventDetailPanelProps) {
             <CardTitle className="text-sm font-medium text-muted-foreground">Confidence Score</CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="flex items-center gap-4">
-              <div className="flex-1">
-                <ConfidenceBar value={event.confidence || 0} />
-              </div>
-              <span className="font-mono text-lg font-semibold text-foreground">
-                {event.confidence ? `${Math.round(event.confidence * 100)}%` : "N/A"}
-              </span>
-            </div>
+            <ConfidenceBar value={event.confidence} />
             <p className="text-xs text-muted-foreground mt-2">
-              {event.confidence && event.confidence >= 0.8
-                ? "High confidence - automatic mitigation applied"
-                : event.confidence && event.confidence >= 0.5
-                  ? "Medium confidence - review recommended"
-                  : "Low confidence - may be rejected by policy"}
+              {isConfidence(event.confidence)
+                ? event.confidence >= 0.8
+                  ? "High reported confidence."
+                  : event.confidence >= 0.5
+                    ? "Medium reported confidence."
+                    : "Low reported confidence."
+                : "No valid confidence reported."}{" "}
+              Confidence alone does not confirm mitigation or router installation.
             </p>
           </CardContent>
         </Card>

@@ -167,6 +167,17 @@ describe("SignalsTab", () => {
     expect(screen.getAllByText("0.8").length).toBeGreaterThan(0)
   })
 
+  it("preserves zero, missing and invalid confidence in recent signals", () => {
+    mockUseSignalSources.mockReturnValue({ data: sampleSources })
+    mockUseSignalGroups.mockReturnValue({ data: { groups: [0.95, 0, null, NaN].map((confidence, index) => ({
+      ...sampleGroups[0], group_id: `group-${index}`, derived_confidence: confidence,
+    })) } })
+    render(<SignalsTab />)
+    for (const label of ["95%", "0%", "Unavailable", "Invalid"]) {
+      expect(screen.getByText(label)).toBeInTheDocument()
+    }
+  })
+
   it("renders loading skeletons while fetching", () => {
     mockUseSignalSources.mockReturnValue({ data: undefined, error: null, isLoading: true })
     mockUseSignalGroups.mockReturnValue({ data: undefined, error: null, isLoading: true })
@@ -244,6 +255,25 @@ describe("GroupsTab", () => {
     expect(screen.getByText("198.51.100.25")).toBeInTheDocument()
     expect(screen.getByText("88%")).toBeInTheDocument()
     expect(screen.getByText("45%")).toBeInTheDocument()
+  })
+
+  it.each([
+    [0, "0%", "text-red-600"],
+    [0.499, "50%", "text-red-600"],
+    [0.5, "50%", "text-yellow-600"],
+    [0.799, "80%", "text-yellow-600"],
+    [0.8, "80%", "text-green-600"],
+    [0.95, "95%", "text-green-600"],
+    [1, "100%", "text-green-600"],
+    [null, "Unavailable", "text-muted-foreground"],
+    [NaN, "Invalid", "text-muted-foreground"],
+  ])("classifies confidence %s before rounding its label", (confidence, label, color) => {
+    mockUseSignalGroupsPaginated.mockReturnValue({
+      data: [{ groups: [{ ...sampleGroups[0], derived_confidence: confidence }], count: 1, next_cursor: null, has_more: false }],
+      size: 1, setSize: vi.fn(),
+    })
+    render(<GroupsTab />)
+    expect(screen.getByText(label)).toHaveClass(color)
   })
 
   it("renders empty state with clear-filters option", () => {

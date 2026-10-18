@@ -1,5 +1,6 @@
 "use client"
 
+import { formatConfidence } from "@/lib/confidence"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -117,8 +118,8 @@ export function CacheTab() {
                     <td className="py-1.5 pr-3 text-muted-foreground">
                       {dimsLabel(s)}
                     </td>
-                    <td className="py-1.5 pr-3">
-                      {s.confidence != null ? s.confidence.toFixed(2) : "—"}
+                    <td className="py-1.5 pr-3 tabular-nums">
+                      {formatConfidence(s.confidence)}
                     </td>
                     <td
                       className="py-1.5 pr-3 text-muted-foreground"

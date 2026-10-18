@@ -1,5 +1,6 @@
 "use client"
 
+import { formatConfidence } from "@/lib/confidence"
 import { useCallback, useState } from "react"
 import { useRouter } from "next/navigation"
 import {
@@ -166,7 +167,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
                     <span>{e.victim_ip}</span>
                     <span className="text-muted-foreground">{e.vector.replace(/_/g, " ")}</span>
                     <span className="ml-auto text-muted-foreground tabular-nums">
-                      {e.confidence ? `${Math.round(e.confidence * 100)}%` : "N/A"}
+                      {formatConfidence(e.confidence)}
                     </span>
                   </CommandItem>
                 ))}

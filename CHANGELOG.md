@@ -95,6 +95,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Display confidence fractions consistently as percentages across event, mitigation
+  and correlation views. Preserve zero, distinguish missing and invalid values, and
+  avoid implying that confidence confirms mitigation or router installation.
+
 - Reject non-finite correlation confidence thresholds and source/default weights
   on YAML loading and API edits, including numeric overflow.
   Preserve the active correlation configuration after a rejected reload or edit.

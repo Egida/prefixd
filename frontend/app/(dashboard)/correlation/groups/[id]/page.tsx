@@ -8,6 +8,8 @@ import { useSignalGroupDetail, useCorrelationConfig } from "@/hooks/use-api"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
+import { formatConfidence, isConfidence } from "@/lib/confidence"
 import {
   ArrowLeft,
   Layers,
@@ -126,9 +128,12 @@ export default function SignalGroupDetailPage({
   // Confidence breakdown calculations
   const totalWeight = sortedEvents.reduce((sum, e) => sum + e.source_weight, 0)
   const confidenceRows = sortedEvents.map((e) => {
-    const rawConfidence = e.confidence ?? 0
-    const weightedContribution =
-      totalWeight > 0 ? (rawConfidence * e.source_weight) / totalWeight : 0
+    const rawConfidence = e.confidence
+    const weightedContribution = rawConfidence == null
+      ? rawConfidence
+      : isConfidence(rawConfidence)
+        ? totalWeight === 0 ? 0 : (rawConfidence * e.source_weight) / totalWeight
+        : NaN
     return {
       source: e.source,
       event_id: e.event_id,
@@ -242,9 +247,7 @@ export default function SignalGroupDetailPage({
                             )}
                             <span className="text-xs text-muted-foreground tabular-nums">
                               Confidence:{" "}
-                              {event.confidence != null
-                                ? `${Math.round(event.confidence * 100)}%`
-                                : "N/A"}
+                              {formatConfidence(event.confidence)}
                             </span>
                           </div>
                           <p className="text-xs text-muted-foreground font-mono mt-1">
@@ -312,13 +315,13 @@ export default function SignalGroupDetailPage({
                             </div>
                           </td>
                           <td className="py-2 pr-3 text-right tabular-nums">
-                            {Math.round(row.rawConfidence * 100)}%
+                            {formatConfidence(row.rawConfidence)}
                           </td>
                           <td className="py-2 pr-3 text-right tabular-nums">
                             {row.weight.toFixed(1)}
                           </td>
                           <td className="py-2 text-right tabular-nums">
-                            {Math.round(row.weightedContribution * 100)}%
+                            {formatConfidence(row.weightedContribution)}
                           </td>
                         </tr>
                       ))}
@@ -331,7 +334,7 @@ export default function SignalGroupDetailPage({
                           {totalWeight.toFixed(1)}
                         </td>
                         <td className="pt-2 text-right tabular-nums">
-                          {Math.round(group.derived_confidence * 100)}%
+                          {formatConfidence(group.derived_confidence)}
                         </td>
                       </tr>
                     </tfoot>
@@ -458,19 +461,7 @@ export default function SignalGroupDetailPage({
                       </span>
                     ) : null}
                   </p>
-                  <div className="flex items-center gap-2">
-                    <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
-                      <div
-                        className="h-full rounded-full bg-primary transition-all"
-                        style={{
-                          width: `${Math.round(group.derived_confidence * 100)}%`,
-                        }}
-                      />
-                    </div>
-                    <span className="text-sm font-mono font-medium tabular-nums">
-                      {Math.round(group.derived_confidence * 100)}%
-                    </span>
-                  </div>
+                  <ConfidenceBar value={group.derived_confidence} />
                 </div>
                 <div>
                   <p className="text-xs text-muted-foreground mb-1">
@@ -483,9 +474,7 @@ export default function SignalGroupDetailPage({
                     Confidence Threshold
                   </p>
                   <p className="text-sm font-mono">
-                    {correlationConfig
-                      ? `${Math.round(correlationConfig.confidence_threshold * 100)}%`
-                      : "—"}
+                    {formatConfidence(correlationConfig?.confidence_threshold)}
                   </p>
                 </div>
                 <div>
