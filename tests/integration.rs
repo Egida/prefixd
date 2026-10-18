@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #![allow(
     clippy::field_reassign_with_default,
     reason = "Exercise individual settings without duplicating fixture defaults in each test"
@@ -1165,15 +1166,13 @@ async fn setup_app() -> axum::Router {
 }
 
 async fn setup_app_bearer_with_config_dir(config_dir: std::path::PathBuf) -> axum::Router {
-    unsafe {
-        std::env::set_var("TEST_PREFIXD_TOKEN", "test-secret-token-123");
-    }
-
     let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
     let announcer = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings_with_bearer();
+    settings.http.auth.mode = AuthMode::Credentials;
 
-    let state = AppState::new(
-        test_settings_with_bearer(),
+    let mut state = AppState::new(
+        settings,
         test_inventory(),
         test_playbooks(),
         repo,
@@ -1182,6 +1181,9 @@ async fn setup_app_bearer_with_config_dir(config_dir: std::path::PathBuf) -> axu
     )
     .expect("failed to create app state");
 
+    let cached = Arc::get_mut(&mut state).expect("unshared test state");
+    cached.settings.http.auth.mode = AuthMode::Bearer;
+    cached.bearer_token = Some("test-secret-token-123".into());
     create_test_router(state)
 }
 
@@ -1737,26 +1739,96 @@ fn test_settings_with_bearer() -> Settings {
 }
 
 async fn setup_app_with_bearer() -> axum::Router {
-    // Set the test token in environment
-    // SAFETY: Tests run serially, no other threads reading this env var
-    unsafe {
-        std::env::set_var("TEST_PREFIXD_TOKEN", "test-secret-token-123");
+    setup_app_bearer_with_config_dir(std::path::PathBuf::from(".")).await
+}
+
+#[tokio::test]
+async fn test_bearer_startup_environment_boundary() {
+    const CHILD: &str = "PREFIXD_BEARER_STARTUP_CASE";
+    const TOKEN_ENV: &str = "PREFIXD_TEST_BEARER_STARTUP_TOKEN";
+    const TOKEN: &str = "startup-boundary-token";
+    if let Ok(case) = std::env::var(CHILD) {
+        assert!(matches!(case.as_str(), "present" | "missing" | "empty"));
+        let mut settings = test_settings_with_bearer();
+        settings.http.auth.bearer_token_env = Some(TOKEN_ENV.into());
+        let state = AppState::new(
+            settings,
+            test_inventory(),
+            test_playbooks(),
+            Arc::new(MockRepository::new()),
+            Arc::new(MockAnnouncer::new()),
+            ".".into(),
+        );
+        if case == "present" {
+            let state = state.expect("present startup token must construct state");
+            assert!(state.bearer_token.as_deref() == Some(TOKEN));
+            let app = create_test_router(state);
+            let response = app
+                .clone()
+                .oneshot(Request::get("/v1/mitigations").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let response = app
+                .oneshot(
+                    Request::get("/v1/mitigations")
+                        .header("authorization", format!("Bearer {TOKEN}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        } else {
+            let expected = format!("auth.mode=bearer but {TOKEN_ENV} is not set or empty");
+            assert!(
+                matches!(state, Err(prefixd::error::PrefixdError::Config(message)) if message == expected),
+                "missing or empty startup token must reject state construction before serving"
+            );
+        }
+        println!("\nprefixd-bearer-startup-completed:{case}");
+        return;
     }
 
-    let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
-    let announcer = Arc::new(MockAnnouncer::new());
-
-    let state = AppState::new(
-        test_settings_with_bearer(),
-        test_inventory(),
-        test_playbooks(),
-        repo,
-        announcer,
-        std::path::PathBuf::from("."),
-    )
-    .expect("failed to create app state");
-
-    create_test_router(state)
+    for case in ["present", "missing", "empty"] {
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "test_bearer_startup_environment_boundary",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(CHILD, case)
+            .env_remove(TOKEN_ENV)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        match case {
+            "present" => {
+                command.env(TOKEN_ENV, TOKEN);
+            }
+            "empty" => {
+                command.env(TOKEN_ENV, "");
+            }
+            _ => {}
+        }
+        let output = tokio::time::timeout(std::time::Duration::from_secs(15), command.output())
+            .await
+            .expect("bearer startup child exceeded fifteen seconds")
+            .expect("bearer startup child output");
+        let stdout = String::from_utf8_lossy(&output.stdout).replace(TOKEN, "[redacted]");
+        let stderr = String::from_utf8_lossy(&output.stderr).replace(TOKEN, "[redacted]");
+        assert!(
+            output.status.success(),
+            "bearer startup {case} child failed ({:?})\n{stdout}\n{stderr}",
+            output.status.code()
+        );
+        let completion = format!("prefixd-bearer-startup-completed:{case}");
+        assert!(
+            stdout.lines().any(|line| line == completion),
+            "bearer startup {case} child did not complete its assertions\n{stdout}\n{stderr}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -4142,11 +4214,9 @@ async fn test_signal_groups_auth_required() {
         ldap: None,
         radius: None,
     };
-    unsafe {
-        std::env::set_var("TEST_PREFIXD_TOKEN", "test-secret-token-123");
-    }
+    settings.http.auth.mode = AuthMode::Credentials;
 
-    let state = AppState::new(
+    let mut state = AppState::new(
         settings,
         test_inventory(),
         test_playbooks(),
@@ -4156,6 +4226,9 @@ async fn test_signal_groups_auth_required() {
     )
     .expect("failed to create app state");
 
+    let cached = Arc::get_mut(&mut state).expect("unshared test state");
+    cached.settings.http.auth.mode = AuthMode::Bearer;
+    cached.bearer_token = Some("test-secret-token-123".into());
     let app = create_test_router(state);
 
     // GET /v1/signal-groups without auth → 401
@@ -4914,11 +4987,9 @@ async fn test_alertmanager_auth_required() {
         ldap: None,
         radius: None,
     };
-    unsafe {
-        std::env::set_var("TEST_PREFIXD_TOKEN", "test-secret-token-123");
-    }
+    settings.http.auth.mode = AuthMode::Credentials;
 
-    let state = AppState::new(
+    let mut state = AppState::new(
         settings,
         test_inventory(),
         test_playbooks(),
@@ -4928,6 +4999,9 @@ async fn test_alertmanager_auth_required() {
     )
     .expect("failed to create app state");
 
+    let cached = Arc::get_mut(&mut state).expect("unshared test state");
+    cached.settings.http.auth.mode = AuthMode::Bearer;
+    cached.bearer_token = Some("test-secret-token-123".into());
     let app = create_test_router(state);
 
     let alert = make_alert("firing", "203.0.113.10", "udp_flood", "critical", "auth_fp");
@@ -5302,11 +5376,9 @@ async fn test_fastnetmon_auth_required() {
         ldap: None,
         radius: None,
     };
-    unsafe {
-        std::env::set_var("TEST_PREFIXD_FNM_TOKEN", "fnm-test-token-456");
-    }
+    settings.http.auth.mode = AuthMode::Credentials;
 
-    let state = AppState::new(
+    let mut state = AppState::new(
         settings,
         test_inventory(),
         test_playbooks(),
@@ -5316,6 +5388,9 @@ async fn test_fastnetmon_auth_required() {
     )
     .expect("failed to create app state");
 
+    let cached = Arc::get_mut(&mut state).expect("unshared test state");
+    cached.settings.http.auth.mode = AuthMode::Bearer;
+    cached.bearer_token = Some("fnm-test-token-456".into());
     let app = create_test_router(state);
 
     let payload = make_fastnetmon_payload("ban", "203.0.113.10", Some("auth-uuid"));
@@ -6191,16 +6266,75 @@ async fn test_webhook_malformed_json_returns_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
+// Only these cases require the handler to read a real process environment secret.
+async fn webhook_hmac_child(test_name: &str, env_name: &str, secret: &str) -> Option<String> {
+    const CHILD: &str = "PREFIXD_WEBHOOK_HMAC_CHILD";
+    const SECRETS: [&str; 3] = [
+        "PREFIXD_TEST_HMAC_SECRET_POS",
+        "PREFIXD_TEST_HMAC_SECRET_NEG",
+        "PREFIXD_TEST_HMAC_SECRET_MISS",
+    ];
+    let completion = format!("prefixd-hmac-completed:{test_name}");
+    if std::env::var(CHILD).ok().as_deref() == Some(test_name) {
+        assert!(
+            std::env::var(env_name).ok().as_deref() == Some(secret),
+            "HMAC child secret must be installed before startup"
+        );
+        for inherited in SECRETS {
+            if inherited != env_name {
+                assert!(
+                    std::env::var_os(inherited).is_none(),
+                    "HMAC child must not inherit another case's secret"
+                );
+            }
+        }
+        return Some(completion);
+    }
+
+    let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", test_name, "--test-threads=1", "--nocapture"])
+        .env(CHILD, test_name)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    for inherited in SECRETS {
+        command.env_remove(inherited);
+    }
+    command.env(env_name, secret);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(15), command.output())
+        .await
+        .expect("HMAC child exceeded fifteen seconds")
+        .expect("HMAC child output");
+    let stdout = String::from_utf8_lossy(&output.stdout).replace(secret, "[redacted]");
+    let stderr = String::from_utf8_lossy(&output.stderr).replace(secret, "[redacted]");
+    assert!(
+        output.status.success(),
+        "HMAC child {test_name} failed ({:?})\n{stdout}\n{stderr}",
+        output.status.code()
+    );
+    assert!(
+        stdout.lines().any(|line| line == completion),
+        "HMAC child {test_name} did not complete its assertions\n{stdout}\n{stderr}"
+    );
+    None
+}
+
 #[tokio::test]
 async fn test_webhook_hmac_accepts_correct_signature() {
     use hmac::Mac;
     use prefixd::correlation::WebhookAuth;
 
-    // Use a random env var name to avoid parallel-test contention
     let env_name = "PREFIXD_TEST_HMAC_SECRET_POS";
     let secret = "super-secret";
-    // SAFETY: test-only; other tests use different env var names
-    unsafe { std::env::set_var(env_name, secret) };
+    let Some(completed) = webhook_hmac_child(
+        "test_webhook_hmac_accepts_correct_signature",
+        env_name,
+        secret,
+    )
+    .await
+    else {
+        return;
+    };
 
     let mut adapter = basic_webhook_adapter("signed");
     adapter.auth = WebhookAuth::Hmac {
@@ -6220,7 +6354,7 @@ async fn test_webhook_hmac_accepts_correct_signature() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["processed"], 1);
 
-    unsafe { std::env::remove_var(env_name) };
+    println!("\n{completed}");
 }
 
 #[tokio::test]
@@ -6228,7 +6362,16 @@ async fn test_webhook_hmac_rejects_wrong_signature() {
     use prefixd::correlation::WebhookAuth;
 
     let env_name = "PREFIXD_TEST_HMAC_SECRET_NEG";
-    unsafe { std::env::set_var(env_name, "super-secret") };
+    let secret = "super-secret";
+    let Some(completed) = webhook_hmac_child(
+        "test_webhook_hmac_rejects_wrong_signature",
+        env_name,
+        secret,
+    )
+    .await
+    else {
+        return;
+    };
 
     let mut adapter = basic_webhook_adapter("signed2");
     adapter.auth = WebhookAuth::Hmac {
@@ -6245,7 +6388,7 @@ async fn test_webhook_hmac_rejects_wrong_signature() {
         post_webhook(&app, "signed2", body, &[("X-Signature-SHA256", &wrong_sig)]).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    unsafe { std::env::remove_var(env_name) };
+    println!("\n{completed}");
 }
 
 #[tokio::test]
@@ -6253,7 +6396,16 @@ async fn test_webhook_hmac_missing_header_returns_401() {
     use prefixd::correlation::WebhookAuth;
 
     let env_name = "PREFIXD_TEST_HMAC_SECRET_MISS";
-    unsafe { std::env::set_var(env_name, "super-secret") };
+    let secret = "super-secret";
+    let Some(completed) = webhook_hmac_child(
+        "test_webhook_hmac_missing_header_returns_401",
+        env_name,
+        secret,
+    )
+    .await
+    else {
+        return;
+    };
 
     let mut adapter = basic_webhook_adapter("signed3");
     adapter.auth = WebhookAuth::Hmac {
@@ -6267,7 +6419,7 @@ async fn test_webhook_hmac_missing_header_returns_401() {
     let (status, _json) = post_webhook(&app, "signed3", body, &[]).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 
-    unsafe { std::env::remove_var(env_name) };
+    println!("\n{completed}");
 }
 
 #[tokio::test]

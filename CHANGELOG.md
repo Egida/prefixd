@@ -85,6 +85,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Isolate integration-test HMAC secrets in bounded child processes, use cached
+  bearer-token fixtures and forbid unsafe code in the integration-test crate.
+  Cover real bearer startup loading and missing/empty-token rejection in child tests.
+
 - Remove the unused policy correlation prototype and ineffective
   `timers.correlation_window_seconds` configuration/API-settings field. The active
   multi-signal engine continues to use `correlation.window_seconds`.
