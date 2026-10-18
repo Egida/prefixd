@@ -43,7 +43,7 @@ async function run() {
   const origin = new URL(suppliedUrl).origin
   const username = required("USERNAME")
   const password = required("PASSWORD")
-  const mitigationId = required("MITIGATION_ID")
+  const mitigationId = required("MITIGATION_ID").toLowerCase()
   assert(uuid.test(mitigationId), "mitigation ID must be a UUID")
   const requestedDir = resolve(required("OUTPUT_DIR"))
   const uiSource = required("UI_SOURCE")
