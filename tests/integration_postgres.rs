@@ -191,6 +191,391 @@ async fn test_mitigation_withdrawal() {
 }
 
 #[tokio::test]
+async fn test_authenticated_withdrawal_audit_success_and_failure_boundaries() {
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    use prefixd::{
+        AppState,
+        auth::create_auth_layer,
+        bgp::{FlowSpecAnnouncer, MockAnnouncer},
+        config::{AuthMode, OperationMode},
+        domain::{
+            ActionParams, ActionType, AttackVector, FlowSpecRule, MatchCriteria, Mitigation,
+            MitigationIntent, OperatorRole, mitigation_rule,
+        },
+        error::{PrefixdError, Result},
+    };
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst},
+    };
+
+    struct Speaker {
+        inner: MockAnnouncer,
+        failing_hash: String,
+        fail: AtomicBool,
+        deletes: AtomicUsize,
+    }
+    impl FlowSpecAnnouncer for Speaker {
+        fn backend(&self) -> &'static str {
+            "mock"
+        }
+    }
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for Speaker {
+        async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.inner.announce(rule).await
+        }
+
+        async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.deletes.fetch_add(1, SeqCst);
+            self.inner.withdraw(rule).await?;
+            if rule.nlri_hash() == self.failing_hash && self.fail.load(SeqCst) {
+                return Err(PrefixdError::BgpWithdrawalFailed(
+                    "reply lost after delete".into(),
+                ));
+            }
+            Ok(())
+        }
+    }
+
+    async fn post(
+        app: &axum::Router,
+        cookie: &str,
+        path: &str,
+        payload: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(path)
+                    .header("cookie", cookie)
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = if body.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap()
+        };
+        (status, json)
+    }
+
+    async fn audits(app: &axum::Router, cookie: &str) -> Vec<serde_json::Value> {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/audit")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["has_more"], false);
+        let entries = json["entries"].as_array().unwrap();
+        assert_eq!(json["count"], entries.len());
+        entries
+            .iter()
+            .filter(|entry| entry["action"] == "withdraw")
+            .cloned()
+            .collect()
+    }
+
+    let context = TestContext::new().await;
+    let started_at = chrono::Utc::now();
+    let salt = SaltString::encode_b64(b"postgres-audit-test").unwrap();
+    let hash = Argon2::default()
+        .hash_password(b"audit-test-password", &salt)
+        .unwrap()
+        .to_string();
+    context
+        .repo
+        .create_operator("postgres-auditor", &hash, OperatorRole::Operator, None)
+        .await
+        .unwrap();
+    let mut targets = Vec::new();
+    for suffix in 10..16 {
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: "test-pop".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: format!("203.0.113.{suffix}/32"),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                },
+                action_type: ActionType::Discard,
+                action_params: ActionParams { rate_bps: None },
+                ttl_seconds: 600,
+                reason: "audit fixture".into(),
+            },
+            format!("203.0.113.{suffix}"),
+            AttackVector::UdpFlood,
+        );
+        mitigation.activate();
+        context.repo.insert_mitigation(&mitigation).await.unwrap();
+        targets.push(mitigation);
+    }
+    let speaker = Arc::new(Speaker {
+        inner: MockAnnouncer::new(),
+        failing_hash: mitigation_rule(&targets[3]).nlri_hash(),
+        fail: AtomicBool::new(true),
+        deletes: AtomicUsize::new(0),
+    });
+    for mitigation in &targets {
+        speaker
+            .announce(&mitigation_rule(mitigation))
+            .await
+            .unwrap();
+    }
+    let mut settings = context.state.settings.clone();
+    settings.mode = OperationMode::Enforced;
+    settings.http.auth.mode = AuthMode::Credentials;
+    let state = AppState::new(
+        settings,
+        common::test_inventory(),
+        common::test_playbooks(),
+        context.repo.clone(),
+        speaker.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let auth = create_auth_layer(context.pool.clone(), context.repo.clone(), false).await;
+    let app = prefixd::api::create_router(state.clone(), auth);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/audit")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"username":"postgres-auditor","password":"audit-test-password"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    assert!(audits(&app, &cookie).await.is_empty());
+    let single_path =
+        |index: usize| format!("/v1/mitigations/{}/withdraw", targets[index].mitigation_id);
+    let payload = |reason: &str| serde_json::json!({"operator_id":"forged-admin", "reason":reason});
+    let (status, _) = post(&app, &cookie, &single_path(0), payload("single reason")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(audits(&app, &cookie).await.len(), 1);
+    let (status, result) = post(
+        &app,
+        &cookie,
+        "/v1/mitigations/withdraw",
+        serde_json::json!({
+            "mitigation_ids":[targets[1].mitigation_id, targets[2].mitigation_id],
+            "operator_id":"forged-admin", "reason":"bulk reason"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["withdrawn"], 2);
+    assert_eq!(result["failed"], 0);
+    assert_eq!(audits(&app, &cookie).await.len(), 3);
+
+    // The first deletion loses its reply; the independent second target must still complete.
+    let (status, result) = post(
+        &app,
+        &cookie,
+        "/v1/mitigations/withdraw",
+        serde_json::json!({
+            "mitigation_ids":[targets[3].mitigation_id, targets[4].mitigation_id],
+            "operator_id":"forged-admin", "reason":"mixed batch"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["withdrawn"], 1);
+    assert_eq!(result["failed"], 1);
+    assert_eq!(result["results"][0]["status"], "error");
+    assert_eq!(result["results"][1]["status"], "withdrawn");
+    let completed = audits(&app, &cookie).await;
+    assert_eq!(completed.len(), 4);
+    assert!(
+        completed
+            .iter()
+            .all(|entry| entry["target_id"] != targets[3].mitigation_id.to_string())
+    );
+    let pending = context.repo.pending_withdrawals(None).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    let ambiguous = &pending[0];
+    assert_eq!(ambiguous.mitigation_id, targets[3].mitigation_id);
+    assert_eq!(ambiguous.actor, "postgres-auditor");
+    assert_eq!(ambiguous.reason, "postgres-auditor: mixed batch");
+    assert_eq!(
+        context
+            .repo
+            .get_mitigation(targets[3].mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MitigationStatus::Active
+    );
+    speaker.fail.store(false, SeqCst);
+    let (status, _) = post(
+        &app,
+        &cookie,
+        &single_path(3),
+        payload("replacement reason"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(audits(&app, &cookie).await.len(), 5);
+
+    // Fail the audit INSERT after the terminal UPDATE, exercising the transaction rollback.
+    sqlx::raw_sql("CREATE FUNCTION reject_withdrawal_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action = 'withdraw' THEN RAISE EXCEPTION 'injected audit failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_audit BEFORE INSERT ON audit_log FOR EACH ROW EXECUTE FUNCTION reject_withdrawal_audit();")
+        .execute(&context.pool).await.unwrap();
+    let deletes_before = speaker.deletes.load(SeqCst);
+    let mut updates = state.ws_broadcast.subscribe();
+    let (status, _) = post(&app, &cookie, &single_path(5), payload("database failure")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(speaker.deletes.load(SeqCst), deletes_before + 1);
+    assert_eq!(speaker.inner.announced_count().await, 0);
+    assert!(updates.try_recv().is_err());
+    assert_eq!(audits(&app, &cookie).await.len(), 5);
+    assert_eq!(
+        context
+            .repo
+            .get_mitigation(targets[5].mitigation_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        MitigationStatus::Active
+    );
+    let pending = context.repo.pending_withdrawals(None).await.unwrap();
+    assert_eq!(pending.len(), 1);
+    let failed_audit = &pending[0];
+    assert_eq!(failed_audit.mitigation_id, targets[5].mitigation_id);
+    assert_eq!(failed_audit.actor, "postgres-auditor");
+    assert_eq!(failed_audit.reason, "postgres-auditor: database failure");
+    assert!(failed_audit.completed_at.is_none());
+    sqlx::query("DROP TRIGGER reject_audit ON audit_log")
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    let (status, _) = post(
+        &app,
+        &cookie,
+        &single_path(5),
+        payload("replacement reason"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let completed = audits(&app, &cookie).await;
+    assert_eq!(completed.len(), 6);
+    assert!(
+        context
+            .repo
+            .pending_withdrawals(None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for (target, reason) in targets.iter().zip([
+        "single reason",
+        "bulk reason",
+        "bulk reason",
+        "mixed batch",
+        "mixed batch",
+        "database failure",
+    ]) {
+        let entries: Vec<_> = completed
+            .iter()
+            .filter(|entry| entry["target_id"] == target.mitigation_id.to_string())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        let entry = entries[0];
+        assert_eq!(entry["actor_type"], "operator");
+        assert_eq!(entry["actor_id"], "postgres-auditor");
+        assert_eq!(entry["target_type"], "mitigation");
+        assert_eq!(
+            entry["details"]["reason"],
+            format!("postgres-auditor: {reason}")
+        );
+        let timestamp =
+            chrono::DateTime::parse_from_rfc3339(entry["timestamp"].as_str().unwrap()).unwrap();
+        assert!(timestamp >= started_at && timestamp <= chrono::Utc::now());
+        let (operation_id,): (uuid::Uuid,) = sqlx::query_as("SELECT operation_id FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NOT NULL")
+            .bind(target.mitigation_id).fetch_one(&context.pool).await.unwrap();
+        assert_eq!(entry["details"]["operation_id"], operation_id.to_string());
+        assert_eq!(
+            context
+                .repo
+                .get_mitigation(target.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Withdrawn
+        );
+    }
+    for request in [ambiguous, failed_audit] {
+        let entry = completed
+            .iter()
+            .find(|entry| entry["target_id"] == request.mitigation_id.to_string())
+            .unwrap();
+        assert_eq!(
+            entry["details"]["operation_id"],
+            request.operation_id.to_string()
+        );
+    }
+    assert_eq!(speaker.inner.announced_count().await, 0);
+    let deletes = speaker.deletes.load(SeqCst);
+    for index in [3, 5] {
+        let (status, _) = post(&app, &cookie, &single_path(index), payload("repeat")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(speaker.deletes.load(SeqCst), deletes);
+    assert_eq!(audits(&app, &cookie).await, completed);
+}
+
+#[tokio::test]
 async fn test_pagination() {
     let ctx = TestContext::new().await;
     let app = ctx.router().await;
