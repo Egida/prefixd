@@ -257,16 +257,19 @@ By contributing, you agree that your contributions will be licensed under the MI
 
 ### Dashboard checks
 
-Use Bun 1.3.14 with the committed `frontend/bun.lock`:
+Use Bun 1.4.3 and Node.js 26.12.0 with the committed `frontend/bun.lock`.
+Run tests with native Node.js 26.12.0; production containers build and run with Bun:
 
 ```bash
 cd frontend
 bun install --frozen-lockfile
+bun run typecheck
 bun run test
 bun run build
 bun audit
 ```
 
 The dashboard always uses the configured API. Keep response fixtures in tests;
-`NEXT_PUBLIC_MOCK_MODE` is retired. `next lint` was removed upstream; replacement
-ESLint/type-check checks and a browser harness remain frontend tooling work.
+`NEXT_PUBLIC_MOCK_MODE` is retired. `next lint` was removed upstream; standalone
+lint and automated browser CI remain frontend tooling work. Production
+builds enforce TypeScript checks; `bun run typecheck` runs them independently.

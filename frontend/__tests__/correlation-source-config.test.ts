@@ -1,3 +1,4 @@
+import { describe, expect, it } from "vitest"
 import { validateSourceConfig } from "@/components/dashboard/correlation/config-tab"
 import type { SourceConfig } from "@/lib/api"
 

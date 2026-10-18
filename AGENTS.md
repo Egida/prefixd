@@ -133,7 +133,7 @@ CPU and job budget:
 
 PostgreSQL tests use disposable containers; external speaker tests need their
 documented isolated fixtures. Do not target another person's running lab. The
-frontend build currently skips TypeScript errors, so it is not type-check proof.
+frontend build enforces TypeScript checks; `bun run typecheck` also runs them.
 Do not claim a compiler minimum or audit-clean state without checking the locked
 dependency graph and applicable exceptions.
 

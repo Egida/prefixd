@@ -74,6 +74,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Refresh the dashboard toolchain to Bun 1.4.3, native Node.js 26.12.0 tests,
+  React 19.3.1 and current Radix and test dependencies. Next.js remains at 16.4.2.
+- Enforce TypeScript errors in production dashboard builds and add a standalone
+  type check.
+- Update the playbook YAML editor to js-yaml 5 with bundled TypeScript declarations
+  while preserving YAML merge keys.
+
 - Remove unused dashboard UI scaffolding and its 23 exclusive direct dependencies.
 
 - Declare Rust 1.88 as the minimum compiler and add locked Linux CI checks for
