@@ -778,6 +778,23 @@ playbooks:
 
 ---
 
+## Alert destination URLs
+
+The alerting configuration editor requires HTTPS for Slack, Discord, Teams,
+PagerDuty `events_url` and generic webhook URLs. Validation rejects `localhost`
+and its subdomains, including absolute names ending in a dot, plus literal
+private, loopback, link-local, unspecified,
+multicast, broadcast and documentation addresses where applicable. IPv4-mapped
+IPv6 literals are checked as their underlying IPv4 addresses. Public IP literals
+and domain names remain accepted.
+
+These are URL and literal-address checks, not DNS resolution or redirect-target
+checks. They do not prevent a domain from resolving to a local address or a
+remote server from redirecting requests there. Apply network egress restrictions
+to alert destinations as needed.
+
+---
+
 ## Environment Variables
 
 | Variable | Description | Default |

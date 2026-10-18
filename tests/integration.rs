@@ -2378,6 +2378,124 @@ async fn test_update_alerting_rejects_link_local_url() {
 }
 
 #[tokio::test]
+async fn alert_destination_url_rejections_preserve_running_and_saved_config() {
+    use prefixd::alerting::AlertingConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    let original = serde_json::json!({
+        "destinations": [
+            { "type": "slack", "webhook_url": "https://example.com/slack-secret" },
+            { "type": "discord", "webhook_url": "https://example.com/discord-secret" },
+            { "type": "teams", "webhook_url": "https://example.com/teams-secret" },
+            {
+                "type": "pagerduty", "events_url": "https://example.com/events",
+                "routing_key": "original-routing-secret"
+            },
+            {
+                "type": "generic", "url": "https://example.com/generic-secret",
+                "secret": "original-signing-secret",
+                "headers": { "Authorization": "original-header-secret" }
+            }
+        ],
+        "events": ["mitigation.created"]
+    });
+    let config: AlertingConfig = serde_json::from_value(original.clone()).unwrap();
+    assert!(config.validate().is_empty());
+    let path = dir.path().join("alerting.yaml");
+    config.save(&path).unwrap();
+    let mut settings = test_settings();
+    settings.alerting = config;
+    let repo = Arc::new(MockRepository::new());
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        Arc::new(MockAnnouncer::new()),
+        dir.path().to_path_buf(),
+    )
+    .unwrap();
+    let app = create_test_router(state.clone());
+    let request = |config: &serde_json::Value| {
+        Request::builder()
+            .method("PUT")
+            .uri("/v1/config/alerting")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(config).unwrap()))
+            .unwrap()
+    };
+
+    // Exercise the successful save path before checking rejection without mutation.
+    let response = app.clone().oneshot(request(&original)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let current_service = state.alerting.read().await.clone();
+    let current_config = serde_json::to_value(current_service.config()).unwrap();
+    let loaded_at = *state.alerting_loaded_at.read().await;
+    let saved = std::fs::read(&path).unwrap();
+    let backup = std::fs::read(path.with_extension("yaml.bak")).unwrap();
+    let audit_query = prefixd::db::ListParams {
+        limit: 10,
+        ..Default::default()
+    };
+    let audit = serde_json::to_value(repo.list_audit(&audit_query).await.unwrap()).unwrap();
+    assert_eq!(
+        audit.as_array().unwrap().len(),
+        1,
+        "positive save writes an audit row"
+    );
+
+    for (index, kind, field) in [
+        (0, "slack", "webhook_url"),
+        (1, "discord", "webhook_url"),
+        (2, "teams", "webhook_url"),
+        (3, "pagerduty", "events_url"),
+        (4, "generic", "url"),
+    ] {
+        for host in [
+            "[::1]",
+            "[fe80::1]",
+            "[::ffff:127.0.0.1]",
+            "[::ffff:10.0.0.1]",
+        ] {
+            let mut incoming = original.clone();
+            incoming["destinations"][index][field] =
+                format!("https://user:request-secret@{host}/hook?token=request-secret").into();
+            let response = app.clone().oneshot(request(&incoming)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{kind}: {host}");
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({
+                    "errors": [format!("destination[{index}] ({kind}): {field} host IP is not allowed")]
+                })
+            );
+            let current = state.alerting.read().await.clone();
+            assert!(Arc::ptr_eq(&current, &current_service));
+            assert_eq!(
+                serde_json::to_value(current.config()).unwrap(),
+                current_config
+            );
+            assert_eq!(*state.alerting_loaded_at.read().await, loaded_at);
+            assert_eq!(std::fs::read(&path).unwrap(), saved);
+            assert_eq!(
+                std::fs::read(path.with_extension("yaml.bak")).unwrap(),
+                backup
+            );
+            assert_eq!(
+                serde_json::to_value(AlertingConfig::load(&path).unwrap()).unwrap(),
+                current_config
+            );
+            assert_eq!(
+                serde_json::to_value(repo.list_audit(&audit_query).await.unwrap()).unwrap(),
+                audit
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_reload_config_reloads_alerting_yaml() {
     let dir = tempfile::tempdir().unwrap();
     let config_dir = dir.path().to_path_buf();
