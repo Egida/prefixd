@@ -145,11 +145,7 @@ async fn valid_auth_transport_combinations_preserve_existing_modes() {
                 if mode == AuthMode::Mtls {
                     // Router-level control represents a request after native TLS verification.
                     let response = prefixd::api::create_test_router(state)
-                        .oneshot(
-                            Request::get("/v1/config/correlation")
-                                .body(Body::empty())
-                                .unwrap(),
-                        )
+                        .oneshot(Request::get("/v1/operators").body(Body::empty()).unwrap())
                         .await
                         .unwrap();
                     assert_eq!(response.status(), axum::http::StatusCode::OK);
@@ -304,7 +300,7 @@ async fn valid_native_mtls_requires_a_client_certificate_and_retains_admin_acces
             .is_err()
     );
     let response = trusted
-        .get(format!("{endpoint}/v1/config/correlation"))
+        .get(format!("{endpoint}/v1/operators"))
         .send()
         .await
         .unwrap();
