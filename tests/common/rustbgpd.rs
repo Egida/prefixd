@@ -239,7 +239,7 @@ prefixd-test = "operator"
                             format!("{rpc_container_port}/tcp"),
                             Some(vec![PortBinding {
                                 host_ip: Some("127.0.0.1".into()),
-                                host_port: Some("0".into()),
+                                host_port: Some(rpc_container_port.to_string()),
                             }]),
                         )]
                         .into_iter()

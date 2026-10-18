@@ -1,0 +1,41 @@
+# FlowSpec-only adaptation of rustbgpd v0.77.0 examples/ddos-mitigation/config.toml.
+# Replace documentation peer addresses with your edge routers before deployment.
+config_epoch = 2
+
+[global]
+asn = 65010
+router_id = "10.10.0.10"
+listen_port = 179
+runtime_state_dir = "/run/rustbgpd"
+ebgp_requires_policy = true
+
+[global.telemetry]
+prometheus_addr = "127.0.0.1:9179"
+log_format = "json"
+
+[global.telemetry.grpc_uds]
+path = "/run/rustbgpd/grpc.sock"
+mode = 0o600
+
+# Owner-only UDS authenticates the local operator; no management TCP listener.
+# Local injection is trusted origination; received FlowSpec validation is explicit.
+[flowspec]
+validation = "off"
+
+# This controller originates mitigation rules. Do not accept rules from edges.
+[policy.definitions.reject-edge-routes]
+default_action = "deny"
+
+[policy.definitions.distribute-mitigation]
+default_action = "permit"
+
+[policy]
+import_chain = ["reject-edge-routes"]
+export_chain = ["distribute-mitigation"]
+
+[[neighbors]]
+address = "192.0.2.1"
+remote_asn = 65001
+description = "edge-router-example"
+families = ["ipv4_flowspec", "ipv6_flowspec"]
+hold_time = 30

@@ -4,15 +4,16 @@ mode: enforced
 http:
   listen: "0.0.0.0:8080"
   auth:
-    mode: none
+    mode: credentials
   # cors_origin: "http://localhost:3000"  # Only needed without a reverse proxy
   rate_limit:
     events_per_second: 100
     burst: 500
 
 bgp:
-  mode: sidecar
-  gobgp_grpc: "gobgp:50051"
+  backend: rustbgpd
+  rustbgpd:
+    endpoint: "unix:///run/rustbgpd/grpc.sock"
   local_asn: 65010
   router_id: "10.10.0.10"
   neighbors: []

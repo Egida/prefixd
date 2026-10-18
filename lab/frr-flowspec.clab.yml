@@ -6,7 +6,9 @@
 # without requiring nested virtualization.
 #
 # Prerequisites:
-#   1. Start prefixd stack: docker compose up -d (in prefixd root)
+#   1. Fresh GoBGP compatibility stack (in prefixd root):
+#      docker compose --profile gobgp up -d --pull always --no-build
+#      Do not also select rustbgpd; this legacy topology does not qualify it.
 #
 # Usage:
 #   cd /path/to/prefixd/lab

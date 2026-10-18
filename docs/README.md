@@ -9,7 +9,7 @@ rustbgpd router enforcement.
 
 | Guide | Scope |
 |---|---|
-| [Run the local stack](tutorials/quickstart.md) | Start the default GoBGP stack and verify the API. |
+| [Run the local stack](tutorials/quickstart.md) | Start the rustbgpd-first stack, or select GoBGP, and verify the API. |
 
 ## How-to
 
@@ -45,6 +45,7 @@ rustbgpd router enforcement.
 
 | Page | Scope |
 |---|---|
+| [Speaker profile qualification](reference/qualification/speaker-profiles-2026-10-18.md) | Dated shared-image rustbgpd/GoBGP runtime, security, persistence and local-rule evidence. |
 | [Benchmark snapshot](perf/benchmarks.md) | Historical v0.15.0 measurements and instructions; not a current performance qualification. |
 | [Router lab](../lab/README.md) | Lab setup and topology-specific checks. |
 | [Pinned controller images](../tests/fixtures/rustbgpd/releases.json) | Immutable released images used by the controller test suite. |

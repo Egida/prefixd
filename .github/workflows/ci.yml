@@ -39,11 +39,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Run tests
-        run: cargo test --features test-utils
+      - name: Test GoBGP fallback
+        run: cargo test --locked --no-default-features --features test-utils
 
-      - name: Test rustbgpd backend
-        run: cargo test --features bgp-rustbgpd,test-utils
+      - name: Test all backend features
+        run: cargo test --locked --all-features
 
   msrv:
     name: MSRV (1.88.0)
@@ -167,11 +167,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Run clippy
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Lint GoBGP fallback
+        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
 
-      - name: Lint rustbgpd backend
-        run: cargo clippy --all-targets --features bgp-rustbgpd,test-utils -- -D warnings
+      - name: Lint all backend features
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
   build:
     name: Build

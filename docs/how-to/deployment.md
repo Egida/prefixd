@@ -5,15 +5,15 @@
 prefixd requires:
 
 - **prefixd** daemon
-- **GoBGP v4.x** sidecar for BGP FlowSpec (current default), or the experimental
-  rustbgpd adapter described in [speaker backends](../reference/speaker-backends.md)
+- **rustbgpd** as the primary speaker, or the GoBGP profile
+  described in [speaker backends](../reference/speaker-backends.md)
 - **PostgreSQL 14+**
 - **Routers** with FlowSpec support
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  Detector   │────▶│   prefixd   │────▶│   GoBGP     │
-│ (FastNetMon)│     │   :8080     │     │   :50051    │
+│  Detector   │────▶│   prefixd   │────▶│   Speaker   │
+│ (FastNetMon)│     │   :8080     │     │ UDS / RPC   │
 └─────────────┘     └──────┬──────┘     └──────┬──────┘
                            │                   │
                            ▼                   ▼
@@ -24,31 +24,34 @@ prefixd requires:
 
 ---
 
-## Experimental rustbgpd deployment
+## Select a speaker deployment
 
-The shipped Compose stack still uses GoBGP. To evaluate rustbgpd, build prefixd
-with `cargo build --features bgp-rustbgpd`, configure `bgp.mode: rustbgpd` as in
-the [configuration reference](../reference/configuration.md#bgp), and run rustbgpd separately.
-Do not point test workloads at a production speaker.
+The [quickstart](../tutorials/quickstart.md) uses
+`docker compose --profile rustbgpd up -d --pull always --no-build`. The standard controller image
+includes both adapters; use `--profile gobgp` for the GoBGP profile.
+Exactly one profile may run. Both selected controller services have the same
+container name so Compose rejects a conflicting model before startup.
 
-On the rustbgpd side, a local TCP listener uses a private token file and a
-principal with the `operator` role:
+The application has the stable internal DNS name `prefixd` in either profile.
+rustbgpd management uses an owner-only Unix socket, with UID/GID 999 shared by
+the two processes. GoBGP management binds only `127.0.0.1:50051` in the shared
+GoBGP/controller namespace. Management RPC and PostgreSQL are not published.
+The pinned speaker image references are in `docker-compose.yml`; do not replace
+them with moving tags without qualification.
 
-```toml
-[global.telemetry.grpc_tcp]
-address = "127.0.0.1:50051"
-token_file = "/etc/rustbgpd/prefixd-token"
-principal = "prefixd"
+A short-lived root initializer seeds only missing mutable YAML files into a
+named config volume and assigns the named volumes to UID 999. The selected main
+config is a separate read-only overlay. Administrator saves retain their
+existing atomic rename and backup behavior. Do not replace these named volumes
+with a host-checkout bind mount: the initializer owns their contents. See the
+[configuration storage procedure](../tutorials/quickstart.md#configuration-and-persistence)
+for edits and persistence.
 
-[security.grpc.roles]
-prefixd = "operator"
-```
-
-Set `PREFIXD_RUSTBGPD_TOKEN` in prefixd's environment to that token's contents.
-Configure the daemon's BGP peers, both FlowSpec families, and export policy
-separately; use its config checker before starting. Remote TCP requires a
-verified TLS endpoint. UDS and client-certificate mTLS, Compose wiring, and the
-default switch are follow-up work rather than shipped deployment recipes.
+Configure both FlowSpec families and your actual edge peers before expecting
+session establishment. The rustbgpd example adapts its released DDoS config,
+removes unicast/RTBH, rejects edge imports and explicitly permits mitigation
+exports. [Verified remote mTLS](../reference/speaker-backends.md#remote-mtls)
+is available when controller and speaker cannot share a private local socket.
 
 The running controller enforces TTLs. Stopping prefixd alone does not terminate
 the speaker's BGP sessions, and injected rules carry no application expiry
@@ -58,7 +61,30 @@ failure; monitor controller availability independently from BGP session health.
 For isolated released-container lifecycle, TTL and restart validation, run
 `scripts/test-rustbgpd.sh`; the [backend runbook](../reference/speaker-backends.md#released-controller-qualification)
 records the version floor, immutable pins, recovery behavior and alert queries.
-This suite is independent of the production Compose and router gates.
+With a locally built controller,
+`PREFIXD_IMAGE=prefixd:local python3 scripts/test-compose.py` checks
+profile isolation, duplicate-profile rejection, private management and missing-only
+config seeding across initializer recreation.
+
+Controller RPC acceptance, peer receipt and vendor-router enforcement remain
+different evidence. Follow the [upgrade guide](upgrading.md) before changing
+backend or rolling back an existing database.
+
+## Image publication and selection
+
+CI publishes `ghcr.io/lance0/prefixd` and `ghcr.io/lance0/prefixd-dashboard`.
+Main pushes publish `main`, `latest` and the short commit tag; version-tag pushes
+also publish the version and major.minor tags. Pull requests build the images
+without publishing them. Select the controller/dashboard pair from the same source revision.
+
+Compose uses the prebuilt `main` tags by default. `PREFIXD_IMAGE` overrides both
+the controller and its initializer; `PREFIXD_DASHBOARD_IMAGE` overrides the
+frontend. Supply already-published matching references when pinning a deployment.
+No new release tag or immutable controller digest is implied by this guide.
+The quickstart uses `--pull always --no-build`; the explicit
+[local build option](../tutorials/quickstart.md#build-from-source) uses local tags
+and a separate `compose build`, then `up -d --pull missing --no-build`, so
+fresh runtime dependency images are fetched without replacing local builds.
 
 ## Dashboard dependency and development baseline
 
@@ -259,22 +285,22 @@ See [ADR 018](../adr/018-multi-signal-correlation-engine.md) and [ADR 019](../ad
 
 ---
 
-## GoBGP v4.x Setup
+## GoBGP 4.10.0 Setup
 
-prefixd requires GoBGP v4.0.0 or later.
+The GoBGP controller contract is qualified against the pinned 4.10.0 image
+below. Other versions require their own lifecycle, read-back and restart checks.
 
-### Docker (Included)
+### Docker GoBGP profile
 
-The `docker-compose.yml` includes GoBGP v4.x:
+`docker compose --profile gobgp up -d --pull always --no-build` selects the pinned GoBGP image
+in `docker-compose.yml`. Its binary reports 4.10.0; the third-party OCI image
+revision identifies its image-build repository, not an upstream source
+attestation. The controller shares its network namespace and uses only the
+loopback management listener. BGP port 179 is published; management port 50051
+is not. Recreate both services together when replacing GoBGP:
 
-```yaml
-gobgp:
-  image: jauderho/gobgp:latest  # v4.2.0+
-  volumes:
-    - ./configs/gobgp.conf:/etc/gobgp/gobgp.conf
-  ports:
-    - "179:179"
-    - "50051:50051"
+```bash
+docker compose --profile gobgp up -d --force-recreate gobgp prefixd-gobgp
 ```
 
 ### GoBGP Configuration
@@ -317,17 +343,16 @@ docker compose exec gobgp gobgp global rib -a ipv6-flowspec
 
 ### Bare Metal GoBGP
 
+Install a verified upstream release and check its published checksums. The
+container receipt does not qualify a separately installed binary.
+
 ```bash
-# Download GoBGP v4.x
-wget https://github.com/osrg/gobgp/releases/download/v4.2.0/gobgp_4.2.0_linux_amd64.tar.gz
-tar xzf gobgp_4.2.0_linux_amd64.tar.gz
-sudo mv gobgp gobgpd /usr/local/bin/
+# Verify the separately installed binary before qualification.
+gobgpd --version  # This guide's pinned container reports 4.10.0.
 
-# Verify version
-gobgpd --version  # Should show v4.x
-
-# Start
-sudo gobgpd -f /etc/gobgp/gobgp.conf
+# Keep unauthenticated management confined to the controller's local namespace.
+sudo gobgpd -f /etc/gobgp/gobgp.conf --api-hosts=127.0.0.1:50051 \
+  --pprof-disable --metrics-path=
 ```
 
 ---

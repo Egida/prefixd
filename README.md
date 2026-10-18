@@ -4,7 +4,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.88+-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**prefixd** is a BGP FlowSpec policy daemon for automated DDoS mitigation. It receives attack signals from detectors, applies policy-driven playbooks, and announces FlowSpec rules to routers via GoBGP.
+**prefixd** is a BGP FlowSpec policy daemon for automated DDoS mitigation. It receives attack signals from detectors, applies policy-driven playbooks, and announces FlowSpec rules through rustbgpd, with GoBGP available as an explicit alternative.
 
 ![Dashboard Overview](docs/images/dashboard-overview.png)
 
@@ -25,7 +25,7 @@ You have detectors (FastNetMon, Kentik, Prometheus alerts) that know when you're
 **Key idea:** Detectors signal intent, prefixd decides policy. No detector ever speaks BGP directly.
 
 ```
-Detector ──► prefixd ──► GoBGP ──► Routers
+Detector ──► prefixd ──► rustbgpd ──► Routers
                 │
                 ├── Policy Engine (playbooks)
                 ├── Guardrails (quotas, safelist)
@@ -36,76 +36,40 @@ Detector ──► prefixd ──► GoBGP ──► Routers
 
 ## Quick Start
 
-### 1. Clone and configure
+Clone the repository and start the rustbgpd profile:
 
 ```bash
 git clone https://github.com/lance0/prefixd.git
 cd prefixd
+docker compose --profile rustbgpd up -d --pull always --no-build
 ```
 
-### 2. Start the stack
+The prebuilt controller and dashboard images follow the published `main` build.
+No source compilation is needed; see the [local build option](docs/tutorials/quickstart.md#build-from-source)
+when working on the code. The standard controller includes both adapters. This profile starts
+rustbgpd with a private owner-authenticated Unix socket; no management RPC port
+is published. The FlowSpec-only peer example uses a documentation address:
+configure your own edge router in `configs/rustbgpd.toml` before expecting a
+session or enforcement.
 
 ```bash
-docker compose up -d
-```
-
-This starts 7 services:
-
-| Service | Purpose | Ports |
-|---------|---------|-------|
-| **nginx** | Reverse proxy (single entrypoint) | 80 |
-| **prefixd** | Policy daemon | internal |
-| **dashboard** | Web UI | internal |
-| **gobgp** | BGP route server | 179 (BGP) |
-| **postgres** | State storage | 5432 |
-| **prometheus** | Metrics storage | 9091 |
-| **grafana** | Monitoring dashboards | 3001 |
-
-### 3. Verify it's running
-
-```bash
-# Check all services are healthy
-docker compose ps
-
-# Test the API
-curl http://localhost/v1/health
-# {"status":"ok","version":"0.18.1","auth_mode":"none"}
-```
-
-### 4. Create an admin account
-
-```bash
-docker compose exec prefixd prefixdctl operators create \
+# Create the first dashboard administrator; enter a password at the prompt.
+docker compose exec prefixd-rustbgpd prefixdctl operators create \
   --username admin --role admin
-# Enter password when prompted
-```
-
-### 5. Open the dashboard
-
-```bash
+curl http://localhost/v1/health
 open http://localhost
 ```
 
-Login with the admin credentials you just created.
+Use `docker compose --profile gobgp up -d --pull always --no-build` for the GoBGP
+profile, and `prefixd-gobgp` for controller commands. Select exactly one profile.
+Profile selection does not transfer active rules or an existing database's
+speaker ownership binding.
 
-### Troubleshooting
-
-```bash
-# View prefixd logs
-docker compose logs prefixd
-
-# View GoBGP logs
-docker compose logs gobgp
-
-# Restart everything
-docker compose restart
-```
-
-**Common issues:**
-- Port 80 in use → Stop local web server or change nginx port in docker-compose.yml
-- Port 5432 in use → Stop local PostgreSQL or change port in docker-compose.yml
-- Port 179 in use → Another BGP daemon is running
-- "connection refused" → Wait a few seconds for services to start
+The [quickstart](docs/tutorials/quickstart.md) explains configuration storage,
+ports, login and troubleshooting. PostgreSQL and speaker management remain
+internal; nginx serves the application on port 80, with Prometheus on 9091 and
+Grafana on 3001. Running prefixd enforces TTL expiry; an independently running
+speaker can retain rules while the controller is stopped.
 
 ---
 
@@ -115,7 +79,7 @@ Once you have prefixd running locally:
 
 ### 1. Configure your inventory
 
-Edit `configs/inventory.yaml` to map your IP space to customers:
+Edit the running inventory in the persistent config volume (see the [quickstart](docs/tutorials/quickstart.md#configuration-and-persistence)) to map your IP space to customers:
 
 ```yaml
 customers:
@@ -191,7 +155,7 @@ See [FastNetMon Integration](docs/how-to/detectors/fastnetmon.md) for a complete
 
 ### 4. Peer with your routers
 
-Configure GoBGP neighbors in `configs/gobgp.conf` and set up FlowSpec import policies on your routers. See [Router Setup](docs/how-to/deployment.md#router-configuration).
+Configure rustbgpd neighbors in `configs/rustbgpd.toml` (or `configs/gobgp.conf` for the GoBGP profile) and set up FlowSpec import policies on your routers. See [Router Setup](docs/how-to/deployment.md#router-configuration).
 
 ---
 
@@ -203,7 +167,7 @@ Configure GoBGP neighbors in `configs/gobgp.conf` and set up FlowSpec import pol
 | **Multi-Signal Correlation** | Time-windowed grouping of events from multiple detectors with source weighting and corroboration |
 | **Policy Engine** | YAML playbooks define per-vector responses with escalation |
 | **Guardrails** | Quotas, safelist, /32-only enforcement, mandatory TTLs |
-| **BGP FlowSpec** | Announces via GoBGP (traffic-rate, discard actions) |
+| **BGP FlowSpec** | Announces through rustbgpd or GoBGP (policing and discard actions) |
 | **Reconciliation** | Auto-expires mitigations, repairs RIB drift every 30s |
 | **Dashboard** | Real-time web UI with WebSocket updates and toast notifications |
 | **Manual Mitigation** | "Mitigate Now" form for operator-initiated events |
@@ -220,7 +184,7 @@ Configure GoBGP neighbors in `configs/gobgp.conf` and set up FlowSpec import pol
 3. **Signal correlation** → Group related signals by (victim_ip, vector), check corroboration
 4. **Playbook match** → Determine action (police/discard) based on vector
 5. **Guardrails check** → Validate quotas, safelist, prefix length
-6. **FlowSpec announce** → Send rule to GoBGP via gRPC
+6. **FlowSpec announce** → Send rule to the selected speaker via its adapter
 7. **Router enforcement** → Traffic filtered at line rate
 8. **Auto-expiry** → Rule withdrawn when TTL expires
 
@@ -265,7 +229,7 @@ FlowSpec (RFC 5575, RFC 8955) is supported by:
 
 - **Docker** (recommended) or Rust 1.88+ for building from source
 - **PostgreSQL 14+** for state storage
-- **GoBGP** is included in Docker Compose
+- **rustbgpd** is the primary Compose profile; GoBGP remains selectable
 
 ---
 

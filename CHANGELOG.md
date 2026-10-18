@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Include rustbgpd in normal builds and select speakers with `bgp.backend`.
+  Add explicit rustbgpd-first and GoBGP Compose profiles in one controller image,
+  private owner-authenticated management, UID 999 runtime and persistent writable
+  config seeding that preserves operator edits. Lead the quickstart with the
+  existing prebuilt main controller/dashboard images and retain an explicit local
+  source-build option. Prevent Docker copy-up from resetting private empty-volume
+  ownership/modes. Disable unused GoBGP profiling/metrics HTTP listeners.
+
 - Add an isolated pinned rustbgpd↔GoBGP FlowSpec peer test for exact dual-family
   receipt, withdrawal/re-announcement and retained nonselected local intent.
 
@@ -60,9 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   withdrawal and recovery through the same client after a speaker restart.
 - Reconciliation repair outcome counters and operator recovery/alert guidance.
 
-- Experimental rustbgpd speaker adapter behind `bgp-rustbgpd`, with explicit
+- rustbgpd speaker adapter included through the default `bgp-rustbgpd` feature, with explicit
   backend selection, authenticated gRPC, local-rule read-back, and IPv4/IPv6
-  discard/policing support. Existing GoBGP and mock configurations remain valid.
+  discard/policing support.
 
 ### Changed
 

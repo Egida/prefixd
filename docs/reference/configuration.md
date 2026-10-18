@@ -148,61 +148,41 @@ http:
 
 ```yaml
 bgp:
-  # Modes: gobgp, sidecar (existing GoBGP name), rustbgpd, mock
-  mode: sidecar
-  
-  # GoBGP gRPC endpoint
-  gobgp_grpc: "gobgp:50051"
-  
-  # Local AS number
+  backend: rustbgpd
+  rustbgpd:
+    endpoint: "unix:///run/rustbgpd/grpc.sock"
   local_asn: 65010
-  
-  # Router ID
   router_id: "10.10.0.10"
 ```
 
-`sidecar` remains the default. The experimental rustbgpd adapter requires a
-binary built with `--features bgp-rustbgpd` and a separate subsection:
+Set `bgp.backend` to `rustbgpd` (the default) or `gobgp`. Normal builds contain
+both adapters; `--no-default-features` builds retain GoBGP without rustbgpd.
+The internal `bgp.mode` field and settings API representation remain unchanged;
+YAML also accepts `mode` as a field alias. Specify only one selector: duplicate
+`backend`/`mode` fields and unknown values are rejected.
 
 ```yaml
 bgp:
-  mode: rustbgpd
-  rustbgpd:
-    endpoint: "http://127.0.0.1:50051"
-    bearer_token_env: "PREFIXD_RUSTBGPD_TOKEN"
-    # For a remote endpoint, use https:// and a trusted server CA:
-    # ca_cert_path: "/etc/prefixd/rustbgpd-ca.pem"
-    # For native mTLS, configure both client identity files:
-    # client_cert_path: "/etc/prefixd/client.pem"
-    # client_key_path: "/etc/prefixd/client-key.pem"
+  backend: gobgp
+  gobgp_grpc: "127.0.0.1:50051"
   local_asn: 65010
   router_id: "10.10.0.10"
 ```
 
-For owner-only co-location, use `endpoint: unix:///var/lib/rustbgpd/grpc.sock`
-and omit `bearer_token_env` unless the socket listener also requires a token.
-The shared runtime directory and socket must belong to the controller UID and
-have no group/world permissions. Native mTLS requires HTTPS and a complete
-`client_cert_path`/`client_key_path` pair; the CA authenticates the server, and
-its certificate must match the endpoint hostname. Credential paths and token
-references do not change the persistent speaker identity. See the
-[speaker transport examples](speaker-backends.md) for daemon-side permissions
-and certificate principal requirements.
+rustbgpd uses owner-only UDS locally, or verified HTTPS with bearer credentials
+and/or a client certificate for remote access. See the complete
+[transport examples](speaker-backends.md#rustbgpd-configuration). HTTP is limited
+to literal loopback addresses. The listener identity needs the `operator` role;
+prefixd's ASN, router ID and neighbor fields do not configure rustbgpd's sessions.
 
-Existing YAML may omit the new client identity fields. Rust callers constructing
+Existing YAML may omit the client identity fields. Rust callers constructing
 `RustBgpdConfig` literals must add the two optional fields or use
 `..Default::default()` for omitted transport options.
 
-`gobgp_grpc` is optional when using rustbgpd or mock. Bearer authentication is
-required for plaintext TCP; plaintext permits only literal loopback addresses.
-HTTPS verifies the server against system roots and any configured PEM CA.
-The authenticated rustbgpd principal needs the `operator` role for injection and
-withdrawal. Its BGP ASN, router ID, neighbors and export policies are configured
-in rustbgpd itself; these prefixd fields do not configure its sessions.
-
 Speaker selection and credentials are startup configuration, not hot-reloaded.
-The settings API continues to omit speaker endpoints and credential details.
-See [speaker backends](speaker-backends.md) for the rollout and current limits.
+The settings API retains the existing `bgp.mode` representation and omits
+speaker endpoints and credential details. Switching an existing target requires
+the [ownership upgrade procedure](../how-to/upgrading.md#speaker-ownership-upgrade).
 
 ### Storage
 

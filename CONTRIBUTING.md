@@ -21,6 +21,9 @@ cargo +1.88.0 check --locked --all-targets --all-features
 cargo +1.88.0 check --locked --no-default-features --bins
 ```
 
+The production Docker builder pins Rust 1.99.1 and its image digest in
+`Dockerfile`. That build toolchain is separate from the minimum supported compiler.
+
 ### Setup
 
 ```bash
@@ -28,30 +31,35 @@ cargo +1.88.0 check --locked --no-default-features --bins
 git clone https://github.com/lance0/prefixd.git
 cd prefixd
 
-# Start dependencies
-docker compose up -d postgres gobgp
-
 # Build
-cargo build
+cargo build --locked
 
-# Run tests
-cargo test --features test-utils
-
-# Run with example config
-cargo run -- --config ./configs
+# Run tests; Docker must be available for disposable PostgreSQL fixtures
+cargo test --locked --features test-utils
 ```
+
+For a running controller and dashboard, follow the
+[rustbgpd quickstart](docs/tutorials/quickstart.md), including its separate
+prebuilt-image and source-build commands. The Compose speaker RPC endpoints are
+private to the selected profile; a host `cargo run` cannot use those example
+addresses unchanged.
 
 ### Running Integration Tests
 
-Integration tests require Docker (testcontainers):
+The speaker scripts create and clean up their own pinned Docker fixtures. They
+do not use the Compose stack or an existing router lab. Run them from the
+repository root with Docker available:
 
 ```bash
-# All tests including integration
-cargo test --features test-utils
+# Controller tests, including disposable PostgreSQL fixtures
+cargo test --locked --features test-utils
 
-# GoBGP integration tests (requires gobgp container)
-docker compose up -d gobgp
-cargo test --test integration_gobgp -- --ignored
+# Released rustbgpd controller and receiving-peer fixtures
+scripts/test-rustbgpd.sh
+PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 scripts/test-rustbgpd.sh
+
+# GoBGP compatibility fixtures
+scripts/test-gobgp.sh
 ```
 
 ---
@@ -132,7 +140,7 @@ pre-commit install
 src/
 ├── alerting/      # Webhook alerting (Slack, Discord, Teams, PagerDuty, etc.)
 ├── api/           # HTTP handlers and routes
-├── bgp/           # GoBGP client, FlowSpec construction
+├── bgp/           # Speaker traits, rustbgpd and GoBGP adapters
 ├── config/        # YAML configuration parsing
 ├── db/            # PostgreSQL repository
 ├── domain/        # Core types (AttackEvent, Mitigation, etc.)
@@ -154,7 +162,7 @@ tests/
 frontend/         # Next.js dashboard
 docs/             # Documentation
 configs/          # Example configuration files
-proto/            # GoBGP protobuf definitions
+proto/            # Speaker protobuf definitions
 ```
 
 ---
@@ -178,10 +186,11 @@ cargo test test_name
 
 ```bash
 # Requires Docker
-cargo test --features test-utils
+cargo test --locked --features test-utils
 
-# GoBGP tests (slower, require container)
-cargo test --test integration_gobgp -- --ignored
+# Owned speaker fixtures (Docker; independent of Compose)
+scripts/test-rustbgpd.sh
+scripts/test-gobgp.sh
 ```
 
 ### Test Coverage

@@ -7,7 +7,8 @@
 #   1. KVM support: ls /dev/kvm
 #   2. Download cJunosEvolved from Juniper (free, no account needed)
 #   3. Load image: docker load -i cJunosEvolved-25.4R1.13-EVO.tar.gz
-#   4. prefixd stack running: docker compose up -d
+#   4. Fresh GoBGP compatibility stack: docker compose --profile gobgp up -d --pull always --no-build
+#      Do not also select rustbgpd; these legacy examples do not qualify it.
 #
 # Usage:
 #   sudo containerlab deploy -t cjunos-flowspec.clab.yml

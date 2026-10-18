@@ -64,8 +64,10 @@ on cached endpoint lists, version numbers or test totals.
 
 ## Protect routing state
 
-- rustbgpd is the preferred integration target. GoBGP remains the deployment
-  default until rollout gates pass; rustbgpd currently needs `bgp-rustbgpd`.
+- rustbgpd is the preferred backend and is included in normal builds. Select
+  the `rustbgpd` Compose profile or the explicit `gobgp` profile;
+  both use the same controller image. Qualify profile startup, persistent settings,
+  security and the shared route lifecycle before promoting deployment defaults.
   Do not describe planned adapters or unqualified router behavior as supported.
 - Keep the required writer separate from optional rule and peer observation.
   Unsupported observation, an observation error and a successful empty result
@@ -122,7 +124,7 @@ CPU and job budget:
 | --- | --- |
 | Rust formatting | `cargo fmt --all -- --check` |
 | Strict Rust lint | `cargo clippy --locked --all-targets --all-features -- -D warnings` |
-| Default backend tests | `cargo test --locked --features test-utils` |
+| GoBGP-only backend tests | `cargo test --locked --no-default-features --features test-utils` |
 | All-feature backend tests | `cargo test --locked --all-features` |
 | Released rustbgpd fixtures | `scripts/test-rustbgpd.sh` and `PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 scripts/test-rustbgpd.sh` |
 | Frontend checks, in `frontend/` | `bun install --frozen-lockfile`, `bun run test`, `bun run build`, `bun audit` |

@@ -2,6 +2,12 @@
 
 Containerlab topologies for testing FlowSpec with routers.
 
+These legacy topologies use the explicit **GoBGP compatibility profile**. They
+do not qualify rustbgpd or prove dataplane enforcement. For the primary stack,
+use the [rustbgpd quickstart](../docs/tutorials/quickstart.md). Use the startup
+commands below only for a fresh, isolated lab; changing an existing deployment's
+target does not change its existing [speaker ownership binding](../docs/how-to/upgrading.md#speaker-ownership-upgrade).
+
 ## Lab Options
 
 | Lab | Router | Virtualization | Notes |
@@ -26,7 +32,9 @@ prefixd -> prefixd-gobgp (AS 65010) -> cJunosEvolved (AS 65003)
 1. **KVM support**: `ls /dev/kvm`
 2. **Download cJunosEvolved** from [Juniper](https://support.juniper.net/support/downloads/?p=cjunos-evolved) (free, no account)
 3. **Load image**: `docker load -i cJunosEvolved-25.4R1.13-EVO.tar.gz`
-4. **prefixd stack running**: `docker compose up -d`
+4. **GoBGP compatibility stack running**, from the repository root:
+   `docker compose --profile gobgp up -d --pull always --no-build`.
+   Do not also enable the rustbgpd profile.
 
 ### Quick Start
 
@@ -35,10 +43,12 @@ prefixd -> prefixd-gobgp (AS 65010) -> cJunosEvolved (AS 65003)
 cd lab
 sudo clab deploy -t cjunos-flowspec.clab.yml
 
+# First configure configs/gobgp.conf with this lab's neighbor 172.30.31.3,
+# peer AS 65003 and IPv4 FlowSpec family; the shipped peer is a placeholder.
 # Connect prefixd-gobgp to clab network
 docker network connect clab-mgmt-evo prefixd-gobgp --ip 172.30.31.10
 
-# Restart GoBGP to load cJunos neighbor config
+# Restart GoBGP after editing its config (same container/network namespace)
 docker restart prefixd-gobgp
 
 # Wait ~3-5 min for cJunos to boot, then verify BGP session
@@ -77,7 +87,10 @@ FRR (Free Range Routing) runs natively in containers without KVM. Works on any L
 
 ```bash
 # Start prefixd stack first
-docker compose up -d
+docker compose --profile gobgp up -d --pull always --no-build
+
+# Configure configs/gobgp.conf with the FRR neighbor and AS from frr-bgpd.conf;
+# the shipped peer is a documentation placeholder.
 
 # Deploy FRR lab
 cd lab
@@ -123,23 +136,22 @@ See `vjunos-flowspec.clab.yml` for the topology definition.
 | cJunosEvolved | 8 GB | 4 cores | ~3-5 min | Yes |
 | vJunos-router | 5 GB | 4 cores | ~10 min | Yes (bare metal) |
 
-## End-to-End Test
+## Legacy helper script
 
-Once a lab is deployed and BGP is established, run the automated test script:
+`test-flowspec.sh` is historical and is **not a current qualification gate**.
+It still defaults to the unpublished `http://localhost:8080`, probes obsolete
+`/healthz`, omits the required event timestamp, builds bearer headers through
+unsafe shell word splitting, and reads mitigation `id` instead of
+`mitigation_id`. Optional router checks also do not fail when receipt is absent.
+Setting an endpoint alone does not repair this flow or authenticate it against
+the default credentials-mode deployment. Repair these checks before relying on
+its announce/withdraw result.
 
-```bash
-# Basic test: send event, verify FlowSpec rule appears in GoBGP RIB
-./test-flowspec.sh
-
-# Full lifecycle: announce, verify, withdraw, verify removal
-./test-flowspec.sh --withdraw
-```
-
-The script checks prefixd health, GoBGP status, BGP neighbors, sends a test attack event, and verifies the FlowSpec rule propagates. If FRR or cJunos are detected, it checks those too.
-
-Environment variables:
-- `PREFIXD_API` - API endpoint (default: `http://localhost:8080`)
-- `PREFIXD_API_TOKEN` - Bearer token if auth is enabled
+For maintained controller tests, use the owned fixtures in
+[`scripts/test-gobgp.sh`](../scripts/test-gobgp.sh) and
+[`scripts/test-rustbgpd.sh`](../scripts/test-rustbgpd.sh). They create separate
+containers and do not attach to this lab. Hardware/vendor qualification still
+needs explicit receiving-router and forwarding checks with retained receipts.
 
 ## Troubleshooting
 
