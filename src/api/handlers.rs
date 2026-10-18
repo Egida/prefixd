@@ -22,7 +22,7 @@ use crate::db::{
 use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackEventInput, AttackVector, FlowSpecAction,
     FlowSpecNlri, FlowSpecRule, MatchCriteria, Mitigation, MitigationIntent, MitigationStatus,
-    execute_withdrawal, find_mitigation_owner, request_withdrawal,
+    execute_withdrawal, find_mitigation_owner, request_withdrawal, validate_confidence,
 };
 use crate::error::{GuardrailError, PrefixdError};
 use crate::guardrails::Guardrails;
@@ -562,6 +562,7 @@ pub struct AddSafelistRequest {
     request_body = AttackEventInput,
     responses(
         (status = 202, description = "Event accepted", body = EventResponse),
+        (status = 400, description = "Invalid input, including non-finite or out-of-range confidence"),
         (status = 409, description = "Duplicate event"),
         (status = 422, description = "Guardrail rejection"),
     )
@@ -719,6 +720,7 @@ async fn handle_unban(
     state: Arc<AppState>,
     input: AttackEventInput,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
+    validate_confidence(input.confidence).map_err(AppError)?;
     let ext_id = match &input.event_id {
         Some(id) => id.clone(),
         None => {
@@ -826,6 +828,7 @@ async fn handle_ban(
     state: Arc<AppState>,
     input: AttackEventInput,
 ) -> Result<(StatusCode, Json<EventResponse>), AppError> {
+    validate_confidence(input.confidence).map_err(AppError)?;
     // shortcut: one controller per speaker; use a leader fence before supporting active-active controllers.
     let _mitigation_guard = state.mitigation_lock.lock().await;
     state.verified_speaker_binding().map_err(AppError)?;
@@ -3175,6 +3178,98 @@ mod tests {
     use crate::domain::AttackVector;
     use chrono::{DateTime, Utc};
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn confidence_typed_nonfinite_inputs_are_rejected_at_shared_ingestion_boundaries() {
+        use crate::bgp::MockAnnouncer;
+        use crate::config::{BgpMode, Inventory, Playbooks, Settings};
+        use crate::correlation::{MatchDimension, SourceConfig, SourceMode};
+        use crate::db::{ListParams, MockRepository, RepositoryTrait};
+        use crate::domain::AttackEventInput;
+        use std::sync::Arc;
+
+        let mut settings: Settings =
+            crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+        settings.bgp.mode = BgpMode::Mock;
+        settings.http.auth.mode = crate::config::AuthMode::None;
+        settings.correlation.enabled = true;
+        settings.correlation.sources.insert(
+            "typed-corrob".into(),
+            SourceConfig {
+                mode: SourceMode::Corroborating,
+                match_dimensions: vec![MatchDimension::Pop],
+                ..Default::default()
+            },
+        );
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(MockAnnouncer::new());
+        let state = crate::AppState::new(
+            settings,
+            Inventory::new(vec![]),
+            Playbooks { playbooks: vec![] },
+            repo.clone(),
+            speaker.clone(),
+            ".".into(),
+        )
+        .unwrap();
+        for confidence in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -f32::EPSILON,
+            1.0 + f32::EPSILON,
+        ] {
+            let mut input: AttackEventInput = serde_json::from_value(serde_json::json!({
+                "timestamp": Utc::now(), "source": "typed-primary",
+                "victim_ip": "203.0.113.10", "vector": "udp_flood",
+            }))
+            .unwrap();
+            input.confidence = Some(confidence);
+            for result in [
+                super::handle_ban(state.clone(), input.clone()).await,
+                super::handle_unban(state.clone(), input).await,
+            ] {
+                let error = match result {
+                    Err(error) => error,
+                    Ok(_) => panic!("invalid typed confidence accepted"),
+                };
+                assert_eq!(error.0.status_code(), axum::http::StatusCode::BAD_REQUEST);
+                assert!(error.0.to_string().contains("confidence must be finite"));
+            }
+            let input = super::CorroboratorInput {
+                source: "typed-corrob".into(),
+                vector: None,
+                customer_id: None,
+                pop: Some("typed-pop".into()),
+                service_id: None,
+                interface: None,
+                confidence: Some(confidence),
+                raw_details: None,
+            };
+            let error = match super::ingest_corroborator_inner(state.clone(), input).await {
+                Err(error) => error,
+                Ok(_) => panic!("invalid typed corroborator confidence accepted"),
+            };
+            assert_eq!(error.0.status_code(), axum::http::StatusCode::BAD_REQUEST);
+            assert!(error.0.to_string().contains("confidence must be finite"));
+        }
+        assert!(
+            repo.list_events(&ListParams {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        assert!(repo.list_open_signal_groups().await.unwrap().is_empty());
+        assert_eq!(
+            repo.count_cached_corroborators(Utc::now()).await.unwrap(),
+            0
+        );
+        assert_eq!(repo.count_active_global().await.unwrap(), 0);
+        assert_eq!(speaker.announced_count().await, 0);
+    }
 
     #[test]
     fn test_fastnetmon_syn_percentage_boundaries() {
@@ -5734,7 +5829,9 @@ pub struct CorroboratorInput {
     pub service_id: Option<String>,
     #[serde(default)]
     pub interface: Option<String>,
+    /// Optional finite confidence in the inclusive range 0..=1.
     #[serde(default)]
+    #[schema(minimum = 0, maximum = 1)]
     pub confidence: Option<f32>,
     #[serde(default)]
     pub raw_details: Option<serde_json::Value>,
@@ -5770,7 +5867,7 @@ pub struct CorroboratorResponse {
     request_body = CorroboratorInput,
     responses(
         (status = 200, description = "Signal ingested", body = CorroboratorResponse),
-        (status = 400, description = "Invalid source mode or missing dimensions"),
+        (status = 400, description = "Invalid source mode, dimensions or confidence"),
         (status = 401, description = "Authentication required"),
     )
 )]
@@ -5793,6 +5890,7 @@ async fn ingest_corroborator_inner(
     state: Arc<AppState>,
     input: CorroboratorInput,
 ) -> Result<impl IntoResponse, AppError> {
+    validate_confidence(input.confidence).map_err(AppError)?;
     use crate::correlation::{CorrelationEngine, CorroboratingSignal, EventDimensions, SourceMode};
 
     let correlation_config = state.correlation_config.read().await.clone();

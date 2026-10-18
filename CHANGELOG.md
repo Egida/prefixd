@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Reject non-finite or out-of-range signal confidence before primary event or
+  corroborator ingestion changes state. Preserve optional confidence, inclusive
+  zero/one boundaries and corrected retries with the same external event ID.
+
 - Check backend dependency licenses, sources and advisories with cargo-deny in
   the existing security job. Reject unapproved licenses, sources and wildcard
   requirements while retaining duplicate warnings and the separate full-lock
