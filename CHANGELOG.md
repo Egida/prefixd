@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Check backend dependency licenses, sources and advisories with cargo-deny in
+  the existing security job. Reject unapproved licenses, sources and wildcard
+  requirements while retaining duplicate warnings and the separate full-lock
+  audit's explicit RSA exception.
+
 - Reject `http.auth.mode: mtls` without native TLS and nonempty server certificate,
   key and client-CA paths before database, speaker or listener startup. Programmatic
   application-state construction enforces the same validation. Configure all three

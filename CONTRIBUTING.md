@@ -120,6 +120,18 @@ cargo fmt -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
+### Dependency policy
+
+Install `cargo-deny` and run
+`cargo deny --workspace --all-features --locked check advisories bans licenses sources`
+for the backend dependency gate. `deny.toml` checks development/build dependencies,
+licenses and sources, rejects wildcard requirements, and keeps duplicate versions
+visible as warnings. Reassess the exact certificate-data license exceptions on
+version changes. The separate full-lock Rust advisory audit retains the RSA exception for SQLx's
+optional, uncompiled MySQL dependency. Cargo-deny's selected graph does not
+currently include it; passing cargo-deny is not an exception-free full-lock audit.
+The Rust advisory and frontend `bun audit` checks remain required in CI.
+
 ### Pre-commit Hooks
 
 Optional but recommended:
