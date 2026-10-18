@@ -643,6 +643,13 @@ Content-Type: application/json
 
 Acknowledging marks a mitigation as reviewed by a human without changing its status. Re-acknowledging an already-acknowledged mitigation returns an error. Rejected mitigations cannot be acknowledged.
 
+Results preserve request order, including duplicate IDs. `acknowledged` and
+`failed` count request entries, matching the corresponding result statuses.
+A fresh ID repeated within one request produces a successful result for each
+occurrence while its stored row is updated once. Subsequent requests for that
+already-acknowledged ID produce an error for each occurrence. The 100-entry limit
+includes duplicates.
+
 ---
 
 ## Signal Groups

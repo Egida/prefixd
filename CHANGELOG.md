@@ -152,6 +152,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Count successful entries in bulk acknowledgement responses so duplicate IDs
+  agree with the ordered per-entry results while each stored row is updated once.
+
 - Saturate large timeseries day/hour conversions before applying the existing
   range maximum and bucket minimum, preserving invalid-input defaults.
 

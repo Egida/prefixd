@@ -5656,3 +5656,165 @@ async fn test_authenticated_timeseries_duration_overflow_matches_postgres_bounds
     assert_eq!(unknown["metric"], "unknown");
     assert_eq!(unknown["buckets"], mitigation_buckets.unwrap());
 }
+
+#[tokio::test]
+async fn duplicate_acknowledgements_count_entries_and_update_each_postgres_row_once() {
+    use prefixd::config::AuthMode;
+    use std::sync::{Arc, atomic::Ordering::SeqCst};
+    use uuid::Uuid;
+
+    let context = TestContext::new().await;
+    let speaker = Arc::new(CreationSpeaker::new(context.repo.clone(), 0));
+    let mut state = creation_state(&context, speaker.clone(), false);
+    let cached = Arc::get_mut(&mut state).unwrap();
+    cached.settings.http.auth.mode = AuthMode::Bearer;
+    cached.bearer_token = Some("duplicate-ack-token".into());
+    let app = prefixd::api::create_test_router(state);
+    let mut targets = Vec::new();
+    for ip in ["203.0.113.10", "203.0.113.11", "203.0.113.12"] {
+        let mut request = creation_request("manual", ip, "duplicate-ack-seed");
+        request.headers_mut().insert(
+            "authorization",
+            axum::http::HeaderValue::from_static("Bearer duplicate-ack-token"),
+        );
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let json = creation_json(response).await;
+        targets.push(Uuid::parse_str(json["mitigation_id"].as_str().unwrap()).unwrap());
+    }
+    // Count actual UPDATE executions in this fixture's disposable database, across pool connections.
+    sqlx::raw_sql(
+        r#"
+        CREATE TABLE ack_update_receipts (mitigation_id UUID NOT NULL);
+        CREATE FUNCTION record_ack_update() RETURNS TRIGGER LANGUAGE plpgsql AS $$
+        BEGIN
+            INSERT INTO ack_update_receipts (mitigation_id) VALUES (NEW.mitigation_id);
+            RETURN NEW;
+        END;
+        $$;
+        CREATE TRIGGER capture_ack_update AFTER UPDATE OF acknowledged_at, acknowledged_by
+            ON mitigations FOR EACH ROW EXECUTE FUNCTION record_ack_update();
+    "#,
+    )
+    .execute(&context.pool)
+    .await
+    .unwrap();
+    let original_rules = serde_json::to_value(speaker.list_active().await.unwrap()).unwrap();
+    assert_eq!(original_rules.as_array().unwrap().len(), 3);
+    assert_eq!(speaker.adds.load(SeqCst), 3);
+    let params = prefixd::db::ListParams {
+        limit: 10,
+        ..Default::default()
+    };
+    let original_audit =
+        serde_json::to_value(context.repo.list_audit(&params).await.unwrap()).unwrap();
+    let mut expected_updates = [0_i64; 3];
+    for (ids, succeeded, failed, changed, statuses) in [
+        (
+            vec![targets[0], targets[0], Uuid::nil()],
+            2,
+            1,
+            Some(0),
+            vec!["acknowledged", "acknowledged", "error"],
+        ),
+        (
+            vec![targets[0], targets[0]],
+            0,
+            2,
+            None,
+            vec!["error", "error"],
+        ),
+        (vec![targets[1]], 1, 0, Some(1), vec!["acknowledged"]),
+        (
+            vec![targets[0], targets[1]],
+            0,
+            2,
+            None,
+            vec!["error", "error"],
+        ),
+    ] {
+        let mut before = Vec::new();
+        for id in &targets {
+            before.push(context.repo.get_mitigation(*id).await.unwrap().unwrap());
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/v1/mitigations/acknowledge")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer duplicate-ack-token")
+                    .body(Body::from(
+                        serde_json::json!({"mitigation_ids":ids, "operator_id":"forged-actor"})
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let json = creation_json(response).await;
+        assert_eq!(
+            json["acknowledged"], succeeded,
+            "acknowledged counter for {ids:?}"
+        );
+        assert_eq!(json["failed"], failed);
+        assert_eq!(succeeded + failed, ids.len());
+        let results = json["results"].as_array().unwrap();
+        assert_eq!(results.len(), ids.len());
+        for ((result, id), status) in results.iter().zip(&ids).zip(statuses) {
+            assert_eq!(result["mitigation_id"], id.to_string());
+            assert_eq!(result["status"], status);
+            if status == "error" {
+                assert_eq!(
+                    result["error"],
+                    "not found, already acknowledged, or rejected"
+                );
+            } else {
+                assert!(result.get("error").is_none());
+            }
+        }
+        if let Some(index) = changed {
+            expected_updates[index] += 1;
+        }
+        for (index, previous) in before.iter().enumerate() {
+            let row = context
+                .repo
+                .get_mitigation(previous.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let mut expected = previous.clone();
+            if changed == Some(index) {
+                assert!(previous.acknowledged_at.is_none());
+                assert!(row.acknowledged_at.is_some());
+                expected.acknowledged_at = row.acknowledged_at;
+                expected.acknowledged_by = Some("bearer-token".into());
+            }
+            assert_eq!(
+                serde_json::to_value(row).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+            let updates: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM ack_update_receipts WHERE mitigation_id = $1",
+            )
+            .bind(previous.mitigation_id)
+            .fetch_one(&context.pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                updates, expected_updates[index],
+                "one actual UPDATE per newly acknowledged row"
+            );
+        }
+        assert_eq!(speaker.adds.load(SeqCst), 3);
+        assert_eq!(speaker.deletes.load(SeqCst), 0);
+        assert_eq!(
+            serde_json::to_value(speaker.list_active().await.unwrap()).unwrap(),
+            original_rules
+        );
+        assert_eq!(
+            serde_json::to_value(context.repo.list_audit(&params).await.unwrap()).unwrap(),
+            original_audit
+        );
+    }
+}

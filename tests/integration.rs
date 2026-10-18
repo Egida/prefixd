@@ -9679,6 +9679,141 @@ mod manual_protocol {
     }
 
     #[tokio::test]
+    async fn duplicate_acknowledgements_count_entries_without_remutating_rows() {
+        use uuid::Uuid;
+        let (mut app_state, repo, speaker) = state(AuthMode::None);
+        let cached = Arc::get_mut(&mut app_state).unwrap();
+        cached.settings.http.auth.mode = AuthMode::Bearer;
+        cached.bearer_token = Some("duplicate-ack-token".into());
+        let mut targets = Vec::new();
+        for ip in ["203.0.113.10", "203.0.113.11", "203.0.113.12"] {
+            let response = create_test_router(app_state.clone())
+                .oneshot(
+                    Request::post("/v1/mitigations")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer duplicate-ack-token")
+                        .body(Body::from(payload(ip, "udp").to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            targets.push(Uuid::parse_str(json["mitigation_id"].as_str().unwrap()).unwrap());
+        }
+        let original_rules =
+            serde_json::to_value(speaker.inner.list_active().await.unwrap()).unwrap();
+        assert_eq!(original_rules.as_array().unwrap().len(), 3);
+        assert_eq!(speaker.mutations.load(SeqCst), 3);
+        let params = prefixd::db::ListParams {
+            limit: 10,
+            ..Default::default()
+        };
+        let original_audit = serde_json::to_value(repo.list_audit(&params).await.unwrap()).unwrap();
+        for (ids, succeeded, failed, changed, statuses) in [
+            (
+                vec![targets[0], targets[0], Uuid::nil()],
+                2,
+                1,
+                Some(0),
+                vec!["acknowledged", "acknowledged", "error"],
+            ),
+            (
+                vec![targets[0], targets[0]],
+                0,
+                2,
+                None,
+                vec!["error", "error"],
+            ),
+            (vec![targets[1]], 1, 0, Some(1), vec!["acknowledged"]),
+            (
+                vec![targets[0], targets[1]],
+                0,
+                2,
+                None,
+                vec!["error", "error"],
+            ),
+        ] {
+            let mut before = Vec::new();
+            for id in &targets {
+                before.push(repo.get_mitigation(*id).await.unwrap().unwrap());
+            }
+            let response = create_test_router(app_state.clone())
+                .oneshot(
+                    Request::post("/v1/mitigations/acknowledge")
+                        .header("content-type", "application/json")
+                        .header("authorization", "Bearer duplicate-ack-token")
+                        .body(Body::from(
+                            serde_json::json!({"mitigation_ids":ids, "operator_id":"forged-actor"})
+                                .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(
+                json["acknowledged"], succeeded,
+                "acknowledged counter for {ids:?}"
+            );
+            assert_eq!(json["failed"], failed);
+            assert_eq!(succeeded + failed, ids.len());
+            let results = json["results"].as_array().unwrap();
+            assert_eq!(results.len(), ids.len());
+            for ((result, id), status) in results.iter().zip(&ids).zip(statuses) {
+                assert_eq!(result["mitigation_id"], id.to_string());
+                assert_eq!(result["status"], status);
+                if status == "error" {
+                    assert_eq!(
+                        result["error"],
+                        "not found, already acknowledged, or rejected"
+                    );
+                } else {
+                    assert!(result.get("error").is_none());
+                }
+            }
+            for (index, previous) in before.iter().enumerate() {
+                let row = repo
+                    .get_mitigation(previous.mitigation_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let mut expected = previous.clone();
+                if changed == Some(index) {
+                    assert!(previous.acknowledged_at.is_none());
+                    assert!(row.acknowledged_at.is_some());
+                    expected.acknowledged_at = row.acknowledged_at;
+                    expected.acknowledged_by = Some("bearer-token".into());
+                }
+                assert_eq!(
+                    serde_json::to_value(row).unwrap(),
+                    serde_json::to_value(expected).unwrap()
+                );
+            }
+            assert_eq!(
+                speaker.mutations.load(SeqCst),
+                3,
+                "acknowledgement must not issue speaker mutations"
+            );
+            assert_eq!(
+                serde_json::to_value(speaker.inner.list_active().await.unwrap()).unwrap(),
+                original_rules
+            );
+            assert_eq!(
+                serde_json::to_value(repo.list_audit(&params).await.unwrap()).unwrap(),
+                original_audit
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn icmp_selectors_preserve_ttl_and_auth_guardrails() {
         for (ip, protocol) in [("203.0.113.10", "icmp"), ("2001:db8::10", "icmpv6")] {
             for ttl in [0, 29, 1801] {
