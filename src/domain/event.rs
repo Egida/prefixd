@@ -114,7 +114,9 @@ pub struct AttackEvent {
     pub event_id: Uuid,
     pub external_event_id: Option<String>,
     pub source: String,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub event_timestamp: DateTime<Utc>,
+    #[sqlx(try_from = "crate::db::CheckedTimestamp")]
     pub ingested_at: DateTime<Utc>,
     pub victim_ip: String,
     pub vector: String,

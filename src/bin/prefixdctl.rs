@@ -889,7 +889,9 @@ async fn cmd_operators(cmd: OperatorCommands, format: OutputFormat) -> Result<()
                 id: uuid::Uuid,
                 username: String,
                 role: String,
+                #[sqlx(try_from = "prefixd::db::CheckedTimestamp")]
                 created_at: chrono::DateTime<chrono::Utc>,
+                #[sqlx(try_from = "prefixd::db::CheckedTimestamp")]
                 last_login: Option<chrono::DateTime<chrono::Utc>>,
             }
 
@@ -947,6 +949,7 @@ async fn cmd_migrations(format: OutputFormat) -> Result<(), String> {
     struct MigrationRow {
         version: i32,
         name: String,
+        #[sqlx(try_from = "prefixd::db::CheckedTimestamp")]
         applied_at: chrono::DateTime<chrono::Utc>,
     }
 
