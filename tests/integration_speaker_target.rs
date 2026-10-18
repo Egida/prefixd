@@ -231,6 +231,8 @@ async fn target_registration_serializes_aliases_and_rejects_foreign_assignments(
         endpoint: "https://secure.example:50051".into(),
         bearer_token_env: "OLD_TOKEN".into(),
         ca_cert_path: Some("/old.pem".into()),
+        client_cert_path: Some("/old-client.pem".into()),
+        client_key_path: Some("/old-key.pem".into()),
     });
     let old = ctx
         .repo
@@ -243,6 +245,8 @@ async fn target_registration_serializes_aliases_and_rejects_foreign_assignments(
         .unwrap();
     secure.bgp.rustbgpd.as_mut().unwrap().bearer_token_env = "NEW_TOKEN".into();
     secure.bgp.rustbgpd.as_mut().unwrap().ca_cert_path = Some("/new.pem".into());
+    secure.bgp.rustbgpd.as_mut().unwrap().client_cert_path = Some("/new-client.pem".into());
+    secure.bgp.rustbgpd.as_mut().unwrap().client_key_path = Some("/new-key.pem".into());
     secure.mode = OperationMode::DryRun;
     let rotated = ctx
         .repo

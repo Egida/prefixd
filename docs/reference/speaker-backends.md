@@ -62,6 +62,8 @@ restarting an existing deployment. Reload does not change the running POP, speak
 configuration or controller mode. Credential rotation preserves identity; target
 changes need an explicit drained transfer. These bindings assume one controller
 per POP and exclusive physical-target use, not process leases or DNS-alias fencing.
+HTTP(S) addresses may have only a root path: gRPC discards endpoint path prefixes,
+so they cannot distinguish targets and are rejected before registration.
 
 External repository implementations can read the normalized identity through
 `SpeakerTarget::{backend, endpoint, namespace}` and issue a binding with the
@@ -124,11 +126,56 @@ the token authenticates that listener identity. The client sends the bearer
 token, not a user-supplied principal header. Credential values are never YAML
 configuration fields or settings API output.
 
-For a remote endpoint use `https://speaker.example:50051` and set
-`ca_cert_path` to the PEM CA certificate that authenticates the server. The
-certificate must match the endpoint hostname. Plain HTTP accepts only literal
-loopback IPs, including `127.0.0.1` and `[::1]`; a hostname is not a loopback
-guarantee. UDS and client-certificate mTLS are follow-up work.
+For co-located processes use the owner-only Unix socket:
+
+```yaml
+bgp:
+  mode: rustbgpd
+  rustbgpd:
+    endpoint: "unix:///var/lib/rustbgpd/grpc.sock"
+  local_asn: 65010
+  router_id: "10.10.0.10"
+```
+
+Mount the runtime directory at a stable absolute path and run both processes
+with the same UID. The directory must be owner-only (normally `0700`), the
+socket owner-only (normally `0600`), and neither path may traverse symlinks.
+prefixd checks ownership, permissions and the Unix peer UID on every connection,
+including reconnects after socket recreation. An owner-only rustbgpd listener
+without an explicit principal authorizes its owner as `local-operator`; no token
+or role mapping is needed. If its UDS listener sets `token_file`, also configure
+`bearer_token_env` in prefixd. Changing the socket path changes the persistent
+speaker target; recreating it or rotating credentials does not.
+
+For remote native mTLS use:
+
+```yaml
+bgp:
+  mode: rustbgpd
+  rustbgpd:
+    endpoint: "https://speaker.example:50051"
+    ca_cert_path: "/etc/prefixd/speaker-ca.pem"
+    client_cert_path: "/etc/prefixd/client.pem"
+    client_key_path: "/etc/prefixd/client-key.pem"
+  local_asn: 65010
+  router_id: "10.10.0.10"
+```
+
+The server certificate must match the endpoint hostname and chain to the
+configured CA or system roots. Client certificate and key must be configured
+together. On rustbgpd set all three `tls_cert_file`, `tls_key_file` and
+`tls_client_ca_file`; partial server TLS configuration is invalid. Native mTLS
+has no TLS-without-client-certificates mode. Map the verified client certificate
+principal to `operator` under `[security.grpc.roles]`, rather than setting a TCP
+listener principal. rustbgpd uses the full first `rustbgpd:` URI SAN, otherwise
+an email SAN or Subject CN. No principal header is sent by prefixd.
+
+Existing HTTPS bearer connections through a verified TLS endpoint remain valid;
+client identity is optional for that case. Plain HTTP still requires a bearer
+token and accepts only literal loopback IPs, including `127.0.0.1` and `[::1]`;
+container DNS and other hostnames are not a loopback guarantee. TLS fields are
+rejected on plaintext and Unix endpoints. Private key contents and token values
+never belong in YAML or settings API output.
 
 The relevant vendored controller message fields were checked against rustbgpd
 `v0.77.0`. This is a protocol baseline, not proof that an arbitrary binary

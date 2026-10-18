@@ -224,6 +224,7 @@ async fn authenticated_controller_rpc_contract() {
         endpoint: format!("http://{address}"),
         bearer_token_env: "unused".into(),
         ca_cert_path: None,
+        ..Default::default()
     };
     let speaker = RustBgpdAnnouncer::connect_with_token(&config, "test-secret")
         .await
@@ -353,6 +354,7 @@ async fn tls_verifies_the_server_certificate() {
         endpoint: format!("https://{address}"),
         bearer_token_env: "unused".into(),
         ca_cert_path: None,
+        ..Default::default()
     };
     assert!(
         RustBgpdAnnouncer::connect_with_token(&config, "test-secret")
@@ -385,6 +387,7 @@ async fn rejects_unsafe_transport_and_credentials() {
             endpoint: endpoint.into(),
             bearer_token_env: "unused".into(),
             ca_cert_path: None,
+            ..Default::default()
         };
         assert!(
             RustBgpdAnnouncer::connect_with_token(&config, "test-secret")
@@ -396,6 +399,7 @@ async fn rejects_unsafe_transport_and_credentials() {
         endpoint: "http://127.0.0.1:1".into(),
         bearer_token_env: "PREFIXD_UNSET_TEST_TOKEN_7CA4".into(),
         ca_cert_path: None,
+        ..Default::default()
     };
     for token in ["", "secret\n", "two words"] {
         assert!(
@@ -443,7 +447,7 @@ async fn complete_rpc_deadline_bounds_stalled_response_body() {
             .connect()
             .await
             .unwrap(),
-        token: "Bearer test-secret".parse().unwrap(),
+        token: Some("Bearer test-secret".parse().unwrap()),
     };
     tokio::time::pause();
     let start = tokio::time::Instant::now();
@@ -458,5 +462,116 @@ async fn complete_rpc_deadline_bounds_stalled_response_body() {
     assert!(start.elapsed() >= Duration::from_secs(90));
     assert!(start.elapsed() < Duration::from_secs(91));
     tokio::time::resume();
+    server.abort();
+}
+
+#[tokio::test]
+async fn secure_transport_configuration_rejects_partial_identity_without_leaking_paths() {
+    for endpoint in [
+        "https://127.0.0.1:1",
+        "http://127.0.0.1:1",
+        "unix:///private/socket",
+    ] {
+        for (cert, key) in [(Some("private-cert"), None), (None, Some("private-key"))] {
+            let config = RustBgpdConfig {
+                endpoint: endpoint.into(),
+                client_cert_path: cert.map(str::to_owned),
+                client_key_path: key.map(str::to_owned),
+                ..Default::default()
+            };
+            let error = RustBgpdAnnouncer::connect(&config)
+                .await
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains("configured together"));
+            assert!(!error.contains("private-"));
+        }
+    }
+    let config = RustBgpdConfig {
+        endpoint: "https://127.0.0.1:1".into(),
+        client_cert_path: Some("private-cert".into()),
+        client_key_path: Some("private-key".into()),
+        ..Default::default()
+    };
+    let error = RustBgpdAnnouncer::connect(&config)
+        .await
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(!error.contains("private-"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn owner_socket_rejects_permissive_directory_socket_and_symlinks() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let path = directory.path().join("grpc.sock");
+    let listener = tokio::net::UnixListener::bind(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(connect_owner_socket(&path).await.is_ok());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o660)).unwrap();
+    assert!(connect_owner_socket(&path).await.is_err());
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
+    assert!(connect_owner_socket(&path).await.is_err());
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let link = directory.path().join("link.sock");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    assert!(connect_owner_socket(&link).await.is_err());
+    drop(listener);
+}
+
+#[tokio::test]
+async fn native_mtls_presents_the_client_certificate() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let incoming = futures_util::stream::unfold(listener, |listener| async {
+        Some((listener.accept().await.map(|(stream, _)| stream), listener))
+    });
+    let tls = tonic::transport::ServerTlsConfig::new()
+        .identity(tonic::transport::Identity::from_pem(
+            include_bytes!("testdata/transport-server-cert.pem"),
+            include_bytes!("testdata/transport-server-key.pem"),
+        ))
+        .client_ca_root(tonic::transport::Certificate::from_pem(include_bytes!(
+            "testdata/transport-ca.pem"
+        )));
+    let server = tokio::spawn(
+        tonic::transport::Server::builder()
+            .tls_config(tls)
+            .unwrap()
+            .add_service(pb::injection_service_server::InjectionServiceServer::new(
+                Fake::default(),
+            ))
+            .serve_with_incoming(incoming),
+    );
+    let path = |name: &str| {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/bgp/testdata")
+            .join(name)
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    let mut config = RustBgpdConfig {
+        endpoint: format!("https://{address}"),
+        ca_cert_path: Some(path("transport-ca.pem")),
+        ..Default::default()
+    };
+    if let Ok(client) = RustBgpdAnnouncer::connect_with_token(&config, "test-secret").await {
+        assert!(client.announce(&rule("192.0.2.231/32", 0)).await.is_err());
+    }
+    config.client_cert_path = Some(path("transport-client-cert.pem"));
+    config.client_key_path = Some(path("transport-client-key.pem"));
+    let client = RustBgpdAnnouncer::connect_with_token(&config, "test-secret")
+        .await
+        .unwrap();
+    client.announce(&rule("192.0.2.231/32", 0)).await.unwrap();
     server.abort();
 }

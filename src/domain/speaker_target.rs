@@ -44,8 +44,23 @@ impl SpeakerTarget {
                 });
             }
         };
+        if backend == "rustbgpd" {
+            let path = config
+                .rustbgpd
+                .as_ref()
+                .expect("configuration checked above")
+                .unix_socket_path()
+                .map_err(|_| PrefixdError::Config("invalid rustbgpd Unix endpoint".into()))?;
+            if let Some(path) = path {
+                return Ok(Self {
+                    backend,
+                    endpoint: format!("unix://{}", path.display()),
+                    namespace: "GLOBAL",
+                });
+            }
+        }
         let invalid = || {
-            PrefixdError::Config("invalid speaker endpoint: use a credential-free HTTP(S) address without userinfo, query or fragment".into())
+            PrefixdError::Config("invalid speaker endpoint: use a credential-free HTTP(S) address without userinfo, path prefix, query or fragment".into())
         };
         // Reject even empty userinfo/query/fragment and URL-parser whitespace repair.
         if endpoint.is_empty()
@@ -62,6 +77,7 @@ impl SpeakerTarget {
         let url = reqwest::Url::parse(&address).map_err(|_| invalid())?;
         if !matches!(url.scheme(), "http" | "https")
             || url.host_str().is_none()
+            || url.path() != "/"
             || !url.username().is_empty()
             || url.password().is_some()
             || url.query().is_some()
@@ -188,6 +204,7 @@ mod tests {
             endpoint: "https://speaker.example:50051".into(),
             bearer_token_env: "ORIGINAL_TOKEN".into(),
             ca_cert_path: Some("/original.pem".into()),
+            ..Default::default()
         });
         let before = SpeakerTarget::from_config(&alias).unwrap();
         alias.rustbgpd.as_mut().unwrap().bearer_token_env = "ROTATED_TOKEN".into();
@@ -195,6 +212,35 @@ mod tests {
         assert_eq!(before, SpeakerTarget::from_config(&alias).unwrap());
         assert_ne!(original, before);
         assert!(!format!("{before:?}").contains("speaker.example"));
+    }
+
+    #[test]
+    fn unix_target_survives_credential_rotation_and_normalizes_paths() {
+        let mut settings = config("unused");
+        settings.mode = BgpMode::Rustbgpd;
+        settings.rustbgpd = Some(crate::config::RustBgpdConfig {
+            endpoint: "unix:///run/prefixd/./grpc.sock".into(),
+            ..Default::default()
+        });
+        let original = SpeakerTarget::from_config(&settings).unwrap();
+        assert_eq!(original.endpoint(), "unix:///run/prefixd/grpc.sock");
+        let secure = settings.rustbgpd.as_mut().unwrap();
+        secure.endpoint = "unix:///run/prefixd/grpc.sock".into();
+        secure.bearer_token_env = "ROTATED".into();
+        assert_eq!(original, SpeakerTarget::from_config(&settings).unwrap());
+        for endpoint in [
+            "unix://host/socket",
+            "unix:///run/../secret",
+            "unix:///run/socket?secret",
+            "unix:///run/%73ocket",
+            "unix:///",
+        ] {
+            settings.rustbgpd.as_mut().unwrap().endpoint = endpoint.into();
+            let error = SpeakerTarget::from_config(&settings)
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("secret"));
+        }
     }
 
     #[test]
@@ -207,6 +253,8 @@ mod tests {
             "http://host?",
             "http://host#",
             "http://host/ secret",
+            "http://host/secret",
+            "https://host/%73ecret",
             "unix:///secret",
             "",
         ] {
