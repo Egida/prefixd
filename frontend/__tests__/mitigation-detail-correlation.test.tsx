@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, waitFor, act } from "@testing-library/react"
+import { render, screen, waitFor, act, within } from "@testing-library/react"
 import { Suspense } from "react"
 
 // ─── Mocks ──────────────────────────────────────────────
@@ -223,6 +223,23 @@ describe("Mitigation Detail – Correlation Section", () => {
 
     // Why explanation text
     expect(screen.getByText(/Corroboration achieved/)).toBeTruthy()
+  })
+
+  it.each([
+    [0, "0%"], [null, "Unavailable"], [NaN, "Invalid"],
+  ])("preserves source confidence %s in mitigation reasons", async (confidence, label) => {
+    mockUseMitigation.mockReturnValue({ data: {
+      ...correlatedMitigation,
+      correlation: { ...correlatedMitigation.correlation, derived_confidence: 0 },
+    }, mutate: vi.fn() })
+    mockUseSignalGroupDetail.mockReturnValue({ data: {
+      ...signalGroupDetailData,
+      events: [{ ...signalGroupDetailData.events[0], confidence }],
+    } })
+    await renderPage()
+    const row = within(screen.getByRole("table")).getByText("fastnetmon").closest("tr")!
+    expect(within(row).getAllByRole("cell")[1]).toHaveTextContent(label)
+    expect(screen.getByRole("meter", { name: "Confidence" })).toHaveAttribute("aria-valuenow", "0")
   })
 
   it("shows contributing sources table with confidence and weight from signal group detail", async () => {

@@ -231,6 +231,28 @@ async fn authenticated_controller_rpc_contract() {
         .unwrap();
     let v4 = rule("192.0.2.231/32", 0);
     let v6 = rule("2001:0DB8:0:0:0:0:0:231/128", 8_000_000);
+    for template in [&v4, &v6] {
+        for actions in [
+            vec![],
+            vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
+            vec![FlowSpecAction {
+                action_type: crate::domain::ActionType::Police,
+                rate_bps: None,
+            }],
+            vec![FlowSpecAction::police(0)],
+            vec![FlowSpecAction::police(16_777_217)],
+            vec![FlowSpecAction::police(u64::MAX)],
+            vec![FlowSpecAction {
+                action_type: crate::domain::ActionType::Discard,
+                rate_bps: Some(8),
+            }],
+        ] {
+            let mut invalid = template.clone();
+            invalid.actions = actions;
+            assert!(speaker.announce(&invalid).await.is_err());
+            assert_eq!(fake.attempts.load(SeqCst), 0);
+        }
+    }
     speaker.announce(&v4).await.unwrap();
     speaker.announce(&v4).await.unwrap();
     speaker.announce(&v6).await.unwrap();

@@ -30,6 +30,8 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { usePermissions } from "@/hooks/use-permissions"
 import { cn } from "@/lib/utils"
+import { formatConfidence } from "@/lib/confidence"
+import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
 
 function formatBps(bps: number | null): string {
   if (!bps) return "N/A"
@@ -393,17 +395,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                   {/* Derived Confidence with visual bar */}
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Derived Confidence</p>
-                    <div className="flex items-center gap-3">
-                      <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
-                        <div
-                          className="h-full rounded-full bg-primary transition-all"
-                          style={{ width: `${Math.round(mitigation.correlation.derived_confidence * 100)}%` }}
-                        />
-                      </div>
-                      <span className="text-sm font-mono font-medium tabular-nums w-10 text-right">
-                        {Math.round(mitigation.correlation.derived_confidence * 100)}%
-                      </span>
-                    </div>
+                    <ConfidenceBar value={mitigation.correlation.derived_confidence} />
                   </div>
 
                   {/* Source Count with source names */}
@@ -446,7 +438,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                               <tr key={event.event_id} className="border-b border-border/50 last:border-0">
                                 <td className="py-1.5 pr-3">{event.source}</td>
                                 <td className="py-1.5 pr-3 text-right tabular-nums">
-                                  {event.confidence != null ? `${Math.round(event.confidence * 100)}%` : "N/A"}
+                                  {formatConfidence(event.confidence)}
                                 </td>
                                 <td className="py-1.5 text-right tabular-nums">{event.source_weight.toFixed(1)}</td>
                               </tr>

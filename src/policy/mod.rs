@@ -1,16 +1,12 @@
-mod correlation;
 mod escalation;
 
-pub use correlation::*;
 pub use escalation::*;
 
 use std::net::IpAddr;
 
-use crate::config::{AllowedPorts, IpContext, PlaybookAction, Playbooks};
+use crate::config::{AllowedPorts, IpContext, Playbooks};
 
-use crate::domain::{
-    ActionParams, ActionType, AttackEvent, AttackVector, MatchCriteria, MitigationIntent,
-};
+use crate::domain::{ActionParams, AttackEvent, AttackVector, MatchCriteria, MitigationIntent};
 use crate::error::{GuardrailError, PrefixdError, Result};
 
 pub struct PolicyEngine {
@@ -71,14 +67,13 @@ impl PolicyEngine {
         };
 
         // Build action
-        let (action_type, action_params) = match step.action {
-            PlaybookAction::Police => (
-                ActionType::Police,
-                ActionParams {
-                    rate_bps: step.rate_bps,
-                },
-            ),
-            PlaybookAction::Discard => (ActionType::Discard, ActionParams { rate_bps: None }),
+        let action = step.flowspec_action();
+        action.traffic_rate_bytes_per_second().map_err(|error| {
+            PrefixdError::GuardrailViolation(GuardrailError::InvalidAction(error))
+        })?;
+        let action_type = action.action_type;
+        let action_params = ActionParams {
+            rate_bps: action.rate_bps,
         };
 
         let ttl = if step.ttl_seconds > 0 {
@@ -146,8 +141,8 @@ impl PolicyEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Playbook, PlaybookMatch, PlaybookStep, PolicyProfile};
-    use crate::domain::AttackVector;
+    use crate::config::{Playbook, PlaybookAction, PlaybookMatch, PlaybookStep, PolicyProfile};
+    use crate::domain::{ActionType, AttackVector};
     use uuid::Uuid;
 
     fn make_event(victim_ip: &str, vector: &str, ports: &[u16]) -> AttackEvent {

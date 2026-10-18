@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Check backend dependency licenses, sources and advisories with cargo-deny in
+  the existing security job. Reject unapproved licenses, sources and wildcard
+  requirements while retaining duplicate warnings and the separate full-lock
+  audit's explicit RSA exception.
+
+- Preserve exact policing rates through both speaker encoders, including 1–7 bps
+  instead of turning them into discard. Reject missing, zero or inexact police
+  rates and rates on discard before saving or extending intent, and when loading
+  or editing playbooks. Keep historical malformed actions withdrawable by their
+  exact local match.
+
 - Reject `http.auth.mode: mtls` without native TLS and nonempty server certificate,
   key and client-CA paths before database, speaker or listener startup. Programmatic
   application-state construction enforces the same validation. Configure all three
@@ -77,6 +88,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refresh cursor encoding to base64 0.23.1 with only its standard-library feature;
   retain the scalar, unpadded cursor format and strict decoding.
 
+- Isolate integration-test HMAC secrets in bounded child processes, use cached
+  bearer-token fixtures and forbid unsafe code in the integration-test crate.
+  Cover real bearer startup loading and missing/empty-token rejection in child tests.
+
+- Remove the unused policy correlation prototype and ineffective
+  `timers.correlation_window_seconds` configuration/API-settings field. The active
+  multi-signal engine continues to use `correlation.window_seconds`.
+
+- Forbid unsafe code in the library and both binaries, and require explained
+  handwritten lint exemptions in those crates. Narrow ignored request-actor
+  suppressions to their fields.
+
 - Put active mitigation intent, signal evidence, expiry and honest router-observation
   limits first in the operator workspace. Refresh the light/dark theme, Geist
   typography and navigation; preserve user zoom and remove decorative pulses,
@@ -101,12 +124,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Display confidence fractions consistently as percentages across event, mitigation
+  and correlation views. Preserve zero, distinguish missing and invalid values, and
+  avoid implying that confidence confirms mitigation or router installation.
+
 - Restore immediate dashboard retries after failed GET requests while continuing
   to share requests that are still pending.
+
+- Repair discard/policing action drift as well as missing FlowSpec matches on
+  exclusively administered speaker targets. Reject ambiguous owners and invalid
+  observed inventories, preserve unknown rules, and recheck lifecycle state before
+  each upsert. Converged polls do not repeat announcements; this adds no fence
+  against another controller writing the same local match.
 
 - Reject non-finite correlation confidence thresholds and source/default weights
   on YAML loading and API edits, including numeric overflow.
   Preserve the active correlation configuration after a rejected reload or edit.
+
+- Keep disabled authentication consistently anonymous: reject named login with
+  HTTP 403, ignore retained operator sessions before request tracing, and hide
+  named dashboard controls. Logout still deletes retained sessions. Wait for a
+  known authentication mode before presenting the login form.
 
 - Accept explicit `icmpv6` in manual mitigation requests as IPv6 protocol 58.
   Keep `icmp` as IPv4 protocol 1 and reject cross-family ICMP choices before
@@ -209,6 +247,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   equivalent IPv6 addresses do not trigger repeated reconciliation injections.
 
 ### Documentation
+
+- Replace the historical roadmap checklist with current remaining work and
+  reconcile speaker/framework decisions with shipped defaults, transports and
+  durable intent. Remove the unusable duplicate PostgreSQL example; use the
+  maintained rustbgpd or GoBGP configuration instead.
 
 - Organize guides, references, explanations and historical evidence with a
   documentation index and local-stack tutorial; retain ADR identifiers.

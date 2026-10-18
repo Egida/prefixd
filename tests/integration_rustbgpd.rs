@@ -45,6 +45,25 @@ async fn live_rustbgpd_controller_roundtrip() {
 
 #[tokio::test]
 #[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
+async fn faithful_policing_and_historical_action_withdrawal() {
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    contract::run_action_contract(&speaker).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
+async fn action_drift_reconciles_exactly_once() {
+    let fixture = fixture::Speaker::start().await;
+    let speaker = std::sync::Arc::new(fixture.connect().await);
+    let settings = fixture_settings(&fixture, "action-drift-contract");
+    contract::run_action_reconciliation_contract(speaker, &settings.bgp)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
 async fn live_rustbgpd_ttl_reconciliation() {
     use prefixd::{
         db::{MockRepository, RepositoryTrait},
@@ -146,6 +165,14 @@ impl FlowSpecAnnouncer for PollingSpeaker {
 
 #[async_trait::async_trait]
 impl FlowSpecWriter for PollingSpeaker {
+    fn matches_nlri(
+        &self,
+        left: &prefixd::domain::FlowSpecNlri,
+        right: &prefixd::domain::FlowSpecNlri,
+    ) -> prefixd::error::Result<bool> {
+        self.inner.matches_nlri(left, right)
+    }
+
     async fn announce(&self, rule: &FlowSpecRule) -> prefixd::error::Result<()> {
         self.inner.announce(rule).await
     }

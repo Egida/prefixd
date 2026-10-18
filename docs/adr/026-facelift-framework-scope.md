@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted. Updates the scheduling decision in
+Accepted; implementation context refreshed 2026-10-18. Updates the scheduling
+decision in
 [ADR 024](024-loco-staged-migration.md).
 
 ## Date
@@ -11,15 +12,17 @@ Accepted. Updates the scheduling decision in
 
 ## Context
 
-The facelift must make rustbgpd the primary speaker, retain selectable GoBGP
-and ExaBGP, and give operators a clear mitigation workflow. Existing adapters,
-configuration, authentication, PostgreSQL repositories and reconciliation already
+The facelift makes rustbgpd the primary speaker, retains selectable GoBGP,
+and gives operators a clear mitigation workflow. ExaBGP and other write-only
+adapters remain future work. Existing adapters, configuration, authentication,
+PostgreSQL repositories and reconciliation already
 provide seams for this work.
 
-The announcement ledger currently has a schema but no runtime implementation.
-Some mutation paths call the speaker before persisting desired state. Recovery
-therefore needs explicit durable intent, pending cleanup and acknowledgement
-semantics before a write-only speaker can be supported safely.
+New mitigation intent is now persisted before announcement. Durable withdrawal
+requests preserve the original rule, actor, reason and operation ID for cleanup.
+The complete desired/acknowledged announcement ledger still has no runtime
+implementation. A write-only speaker needs that state and verified restart replay
+before it can be supported safely.
 
 Adding framework boot, configuration and ORM migrations at the same time would
 change those boundaries without resolving a speaker requirement. Historical
@@ -55,6 +58,7 @@ without a simultaneous runtime rewrite. The existing architecture still needs
 smaller modules, explicit errors and reliable durable mutations; deferral does
 not remove those obligations.
 
-Framework conveniences remain unavailable until separately justified. This
-decision establishes implementation scope, not a claim that the new speaker
-defaults, ledger, deployment profiles or UI have already shipped.
+Framework conveniences remain unavailable until separately justified. Shipped
+speaker defaults, transports, profiles and their qualification are recorded in
+[speaker backends](../reference/speaker-backends.md). They do not establish the
+generic write-only ledger or router traffic enforcement.

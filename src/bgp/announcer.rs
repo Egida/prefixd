@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::domain::FlowSpecRule;
+use crate::domain::{FlowSpecNlri, FlowSpecRule};
 use crate::error::Result;
 
 #[derive(Debug, Clone)]
@@ -44,6 +44,21 @@ impl std::fmt::Display for SessionState {
 /// Success acknowledges the backend's local mutation stage, not router enforcement.
 #[async_trait]
 pub trait FlowSpecWriter: Send + Sync {
+    /// Whether both matches address the same backend-local route for upsert and delete.
+    /// Writers that normalize match terms must use the same normalization here.
+    fn matches_nlri(&self, left: &FlowSpecNlri, right: &FlowSpecNlri) -> Result<bool> {
+        let prefix = |nlri: &FlowSpecNlri| {
+            nlri.dst_prefix.parse::<ipnet::IpNet>().map_err(|_| {
+                crate::error::PrefixdError::BgpAnnouncementFailed(
+                    "invalid destination prefix".into(),
+                )
+            })
+        };
+        Ok(prefix(left)? == prefix(right)?
+            && left.protocol == right.protocol
+            && left.dst_ports == right.dst_ports)
+    }
+
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()>;
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()>;
 }
@@ -89,6 +104,39 @@ impl dyn FlowSpecAnnouncer + '_ {
         SpeakerCapabilities {
             rule_reader: self.reader().is_some(),
             peer_observer: self.peer_observer().is_some(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_match_identity_preserves_port_order_and_duplicate_terms() {
+        let writer = crate::bgp::MockAnnouncer::new();
+        for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
+            let left = FlowSpecNlri {
+                dst_prefix: prefix.into(),
+                protocol: Some(17),
+                dst_ports: vec![443, 53],
+            };
+            assert!(writer.matches_nlri(&left, &left).unwrap());
+            let mut right = left.clone();
+            if prefix.contains(':') {
+                right.dst_prefix = "2001:0DB8:0:0:0:0:0:1/128".into();
+                assert!(writer.matches_nlri(&left, &right).unwrap());
+            }
+            right.dst_ports.reverse();
+            assert!(!writer.matches_nlri(&left, &right).unwrap());
+            right.dst_ports = vec![443, 53, 53];
+            assert!(!writer.matches_nlri(&left, &right).unwrap());
+            right.dst_ports = left.dst_ports.clone();
+            right.protocol = Some(6);
+            assert!(!writer.matches_nlri(&left, &right).unwrap());
+            right.dst_prefix = "invalid".into();
+            assert!(writer.matches_nlri(&left, &right).is_err());
+            assert!(writer.matches_nlri(&right, &left).is_err());
         }
     }
 }

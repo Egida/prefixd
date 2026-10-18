@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { cleanup, fireEvent, render, screen, act } from "@testing-library/react"
-import { ActiveMitigationsMini, formatConfidence, formatSourceCount, formatTimeRemaining } from "@/components/dashboard/active-mitigations-mini"
+import { ActiveMitigationsMini, formatSourceCount, formatTimeRemaining } from "@/components/dashboard/active-mitigations-mini"
 import { formatControllerUptime } from "@/components/dashboard/bgp-session-status"
 import type { Mitigation } from "@/lib/api"
 
@@ -20,14 +20,6 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(now) })
 afterEach(() => { cleanup(); vi.useRealTimers() })
 
 describe("operator evidence formatting", () => {
-  it.each([
-    [undefined, "Confidence unavailable"], [NaN, "Confidence unavailable"],
-    [-0.1, "Confidence unavailable"], [1.1, "Confidence unavailable"],
-    [0, "0% confidence"], [0.88, "88% confidence"], [1, "100% confidence"],
-  ])("does not fabricate confidence for %s", (value, label) => {
-    expect(formatConfidence(value)).toBe(label)
-  })
-
   it.each([
     [undefined, "Sources unavailable"], [NaN, "Sources unavailable"],
     [-1, "Sources unavailable"], [1.5, "Sources unavailable"],
@@ -61,7 +53,7 @@ describe("active mitigation worklist", () => {
     }]} />)
     expect(screen.getByRole("link", { name: "203.0.113.10/32" })).toHaveAttribute("href", "/mitigations/rule-1")
     expect(screen.getByText("DNS flood detected")).toBeInTheDocument()
-    expect(screen.getByText(/2 sources · 88% confidence/)).toBeInTheDocument()
+    expect(screen.getByText(/2 sources · Confidence: 88%/)).toBeInTheDocument()
     expect(screen.getByText("discard")).toBeInTheDocument()
     expect(screen.getByText("Unobserved")).toBeInTheDocument()
     expect(screen.getByText("<1m")).toBeInTheDocument()
@@ -71,8 +63,8 @@ describe("active mitigation worklist", () => {
 
   it("does not infer confidence or one source from a mitigation without correlation", () => {
     render(<ActiveMitigationsMini mitigations={[mitigation]} />)
-    expect(screen.getByText(/Sources unavailable · Confidence unavailable/)).toBeInTheDocument()
-    expect(screen.queryByText(/100% confidence|1 source/)).not.toBeInTheDocument()
+    expect(screen.getByText(/Sources unavailable · Confidence: Unavailable/)).toBeInTheDocument()
+    expect(screen.queryByText(/Confidence: 100%|1 source/)).not.toBeInTheDocument()
   })
 
   it("updates an overdue deadline without claiming the rule has been withdrawn", () => {

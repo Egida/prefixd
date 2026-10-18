@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     config::RustBgpdConfig,
-    domain::{ActionType, FlowSpecAction, FlowSpecNlri, FlowSpecRule},
+    domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule},
     error::{PrefixdError, Result},
 };
 use async_trait::async_trait;
@@ -282,22 +282,9 @@ fn encode(rule: &FlowSpecRule) -> Result<pb::AddFlowSpecRequest> {
     if rule.actions.len() != 1 {
         return Err(invalid("exactly one traffic rate action is required"));
     }
-    let action = &rule.actions[0];
-    let rate = match action.action_type {
-        ActionType::Discard if action.rate_bps.is_none() => 0.0,
-        ActionType::Police => {
-            let bps = action
-                .rate_bps
-                .filter(|bps| *bps > 0)
-                .ok_or_else(|| invalid("police requires a positive rate"))?;
-            let rate = (bps as f64 / 8.0) as f32;
-            if rate as f64 * 8.0 >= u64::MAX as f64 || (rate as f64 * 8.0) as u64 != bps {
-                return Err(invalid("police rate cannot be represented exactly"));
-            }
-            rate
-        }
-        _ => return Err(invalid("unsupported traffic action")),
-    };
+    let rate = rule.actions[0]
+        .traffic_rate_bytes_per_second()
+        .map_err(|error| invalid(&error.to_string()))?;
     Ok(pb::AddFlowSpecRequest {
         afi_safi,
         components,
@@ -407,6 +394,10 @@ impl FlowSpecAnnouncer for RustBgpdAnnouncer {
 
 #[async_trait]
 impl FlowSpecWriter for RustBgpdAnnouncer {
+    fn matches_nlri(&self, left: &FlowSpecNlri, right: &FlowSpecNlri) -> Result<bool> {
+        Ok(encode_match(left)? == encode_match(right)?)
+    }
+
     async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
         let payload = encode(rule)?;
         let response = self
@@ -539,6 +530,95 @@ impl PeerObserver for RustBgpdAnnouncer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::ActionType;
+
+    #[tokio::test]
+    async fn match_identity_uses_the_same_canonicalization_as_add_and_delete() {
+        let writer = RustBgpdAnnouncer {
+            channel: Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            token: None,
+        };
+        for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
+            let left = FlowSpecNlri {
+                dst_prefix: prefix.into(),
+                protocol: Some(17),
+                dst_ports: vec![443, 53],
+            };
+            let mut right = left.clone();
+            right.dst_ports.reverse();
+            if prefix.contains(':') {
+                right.dst_prefix = "2001:0DB8:0:0:0:0:0:1/128".into();
+            }
+            assert!(writer.matches_nlri(&left, &right).unwrap());
+            right.dst_ports = vec![443, 53, 53];
+            assert!(!writer.matches_nlri(&left, &right).unwrap());
+            right.dst_ports = left.dst_ports.clone();
+            right.protocol = Some(6);
+            assert!(!writer.matches_nlri(&left, &right).unwrap());
+            right.dst_prefix = "invalid".into();
+            assert!(writer.matches_nlri(&left, &right).is_err());
+            assert!(writer.matches_nlri(&right, &left).is_err());
+        }
+    }
+
+    #[test]
+    fn action_boundaries_preserve_exact_rates_in_both_families() {
+        for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
+            let mut rule = FlowSpecRule::new(
+                FlowSpecNlri {
+                    dst_prefix: prefix.into(),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                },
+                FlowSpecAction::discard(),
+            );
+            for action in std::iter::once(FlowSpecAction::discard()).chain(
+                [1, 7, 8, 9, 16_777_216, 16_777_218, 1_000_000_000].map(FlowSpecAction::police),
+            ) {
+                rule.actions = vec![action.clone()];
+                let encoded = encode(&rule).unwrap();
+                let Some(pb::flow_spec_action::Action::TrafficRate(rate)) =
+                    &encoded.actions[0].action
+                else {
+                    panic!("expected traffic rate");
+                };
+                let ec = (0x8006_u64 << 48) | u64::from(rate.rate.to_bits());
+                let decoded = decode(
+                    pb::FlowSpecRouteEntry {
+                        components: encoded.components,
+                        actions: encoded.actions,
+                        afi_safi: encoded.afi_safi,
+                        peer_address: "0.0.0.0".into(),
+                        extended_communities: vec![ec],
+                        ..Default::default()
+                    },
+                    encoded.afi_safi,
+                )
+                .unwrap();
+                assert_eq!(decoded.actions[0].action_type, action.action_type);
+                assert_eq!(decoded.actions[0].rate_bps, action.rate_bps);
+            }
+            for actions in [
+                vec![],
+                vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
+                vec![FlowSpecAction {
+                    action_type: ActionType::Police,
+                    rate_bps: None,
+                }],
+                vec![FlowSpecAction::police(0)],
+                vec![FlowSpecAction::police(16_777_217)],
+                vec![FlowSpecAction::police(u64::MAX)],
+                vec![FlowSpecAction {
+                    action_type: ActionType::Discard,
+                    rate_bps: Some(8),
+                }],
+            ] {
+                rule.actions = actions;
+                assert!(encode(&rule).is_err());
+            }
+        }
+    }
+
     #[test]
     fn codec_roundtrip_and_rejects_lossy_values() {
         let rule = FlowSpecRule::new(

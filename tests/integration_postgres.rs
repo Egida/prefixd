@@ -34,7 +34,7 @@ async fn test_cli_operator_password_terminal() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let backend = AuthBackend::new(ctx.repo.clone());
+    let backend = AuthBackend::new(ctx.repo.clone(), prefixd::config::AuthMode::Credentials);
     for username in ["pty-admin", "pty-explicit"] {
         let operator = backend
             .authenticate(Credentials {
@@ -357,7 +357,13 @@ async fn test_authenticated_withdrawal_audit_success_and_failure_boundaries() {
         ".".into(),
     )
     .unwrap();
-    let auth = create_auth_layer(context.pool.clone(), context.repo.clone(), false).await;
+    let auth = create_auth_layer(
+        context.pool.clone(),
+        context.repo.clone(),
+        state.settings.http.auth.mode,
+        false,
+    )
+    .await;
     let app = prefixd::api::create_router(state.clone(), auth);
     let response = app
         .clone()
@@ -3328,6 +3334,89 @@ async fn creation_json(response: axum::response::Response) -> serde_json::Value 
         .await
         .unwrap();
     serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn invalid_manual_actions_never_reach_postgres_or_the_speaker() {
+    use std::sync::{Arc, atomic::Ordering::SeqCst};
+    let context = TestContext::new().await;
+    let speaker = Arc::new(CreationSpeaker::new(context.repo.clone(), 0));
+    let state = creation_state(&context, speaker.clone(), false);
+    let app = prefixd::api::create_test_router(state);
+    for ip in ["203.0.113.10", "2001:db8::10"] {
+        for (action, rate) in [
+            ("police", None),
+            ("police", Some(0)),
+            ("police", Some(16_777_217)),
+            ("police", Some(u64::MAX)),
+            ("discard", Some(0)),
+            ("discard", Some(8)),
+        ] {
+            let payload = serde_json::json!({"victim_ip":ip, "protocol":"udp", "action":action,
+                "rate_bps":rate, "ttl_seconds":60, "reason":"invalid action fixture"});
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/mitigations")
+                        .header("content-type", "application/json")
+                        .body(Body::from(payload.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = creation_json(response).await;
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("invalid request:")
+            );
+        }
+    }
+    let counts: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM mitigations), (SELECT COUNT(*) FROM events), (SELECT COUNT(*) FROM audit_log), (SELECT COUNT(*) FROM flowspec_announcements)"
+    ).fetch_one(&context.pool).await.unwrap();
+    assert_eq!(counts, (0, 0, 0, 0));
+    assert_eq!(speaker.adds.load(SeqCst), 0);
+    assert_eq!(speaker.deletes.load(SeqCst), 0);
+
+    for (ip, action, rate) in [
+        ("203.0.113.10", "discard", None),
+        ("2001:db8::10", "police", Some(1)),
+    ] {
+        let payload = serde_json::json!({"victim_ip":ip, "protocol":"udp", "action":action,
+            "rate_bps":rate, "ttl_seconds":60, "reason":"valid action control"});
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/mitigations")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = creation_json(response).await;
+        let id = uuid::Uuid::parse_str(body["mitigation_id"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            context
+                .repo
+                .get_mitigation(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .action_params
+                .rate_bps,
+            rate
+        );
+    }
+    assert_eq!(speaker.adds.load(SeqCst), 2);
 }
 
 #[tokio::test]

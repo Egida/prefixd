@@ -90,7 +90,10 @@ pub fn mitigation_rule(mitigation: &Mitigation) -> FlowSpecRule {
 }
 
 /// Caller holds the controller's lifecycle mutex through preparation, RPC and finalization.
-#[allow(clippy::too_many_arguments)] // Immutable operation data plus its verified target.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Persist immutable withdrawal metadata together with its verified speaker target"
+)]
 pub async fn request_withdrawal(
     repo: &dyn RepositoryTrait,
     mitigation: &Mitigation,
@@ -117,7 +120,7 @@ pub async fn request_withdrawal(
     repo.begin_withdrawal(&request).await
 }
 
-fn ownership_key(rule: &FlowSpecRule) -> String {
+pub(crate) fn ownership_key(rule: &FlowSpecRule) -> String {
     let mut nlri = rule.nlri.clone();
     nlri.dst_ports.sort_unstable();
     nlri.dst_ports.dedup();

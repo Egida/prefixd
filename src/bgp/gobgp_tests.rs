@@ -1,5 +1,6 @@
 use super::super::apipb::{
-    Destination, ListPathResponse, ListPeerResponse, Peer, PeerConf, PeerState,
+    AddPathResponse, DeletePathResponse, Destination, ListPathResponse, ListPeerResponse, Peer,
+    PeerConf, PeerState,
 };
 use super::*;
 use futures_util::{Stream, StreamExt};
@@ -258,6 +259,8 @@ struct Fake {
     delay_ipv4: bool,
     polled: Arc<tokio::sync::Notify>,
     polls: Arc<AtomicUsize>,
+    adds: Arc<Mutex<Vec<AddPathRequest>>>,
+    deletes: Arc<Mutex<Vec<DeletePathRequest>>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -340,6 +343,24 @@ impl tonic::server::ServerStreamingService<ListPeerRequest> for Fake {
     }
 }
 
+impl tonic::server::UnaryService<AddPathRequest> for Fake {
+    type Response = AddPathResponse;
+    type Future = BoxFuture<Response<Self::Response>, Status>;
+    fn call(&mut self, request: Request<AddPathRequest>) -> Self::Future {
+        self.adds.lock().unwrap().push(request.into_inner());
+        Box::pin(async { Ok(Response::new(AddPathResponse::default())) })
+    }
+}
+
+impl tonic::server::UnaryService<DeletePathRequest> for Fake {
+    type Response = DeletePathResponse;
+    type Future = BoxFuture<Response<Self::Response>, Status>;
+    fn call(&mut self, request: Request<DeletePathRequest>) -> Self::Future {
+        self.deletes.lock().unwrap().push(request.into_inner());
+        Box::pin(async { Ok(Response::new(DeletePathResponse::default())) })
+    }
+}
+
 impl Service<http::Request<tonic::body::Body>> for Fake {
     type Response = http::Response<tonic::body::Body>;
     type Error = Infallible;
@@ -353,6 +374,22 @@ impl Service<http::Request<tonic::body::Body>> for Fake {
         let fake = self.clone();
         Box::pin(async move {
             let response = match request.uri().path() {
+                "/api.GoBgpService/AddPath" => {
+                    tonic::server::Grpc::new(tonic_prost::ProstCodec::<
+                        AddPathResponse,
+                        AddPathRequest,
+                    >::default())
+                    .unary(fake, request)
+                    .await
+                }
+                "/api.GoBgpService/DeletePath" => {
+                    tonic::server::Grpc::new(tonic_prost::ProstCodec::<
+                        DeletePathResponse,
+                        DeletePathRequest,
+                    >::default())
+                    .unary(fake, request)
+                    .await
+                }
                 "/api.GoBgpService/ListPath" => {
                     tonic::server::Grpc::new(tonic_prost::ProstCodec::<
                         ListPathResponse,
@@ -408,6 +445,65 @@ fn inventory(responses: Vec<PathReply>) -> Fake {
     Fake {
         paths: Arc::new(Mutex::new(responses.into())),
         ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn invalid_actions_never_announce_but_can_withdraw_the_exact_match() {
+    let fake = Fake::default();
+    let adds = fake.adds.clone();
+    let deletes = fake.deletes.clone();
+    let (speaker, _server) = serve(fake).await;
+    for (prefix, afi) in [
+        ("192.0.2.1/32", AFI_IP),
+        ("2001:0DB8:0:0:0:0:0:1/128", AFI_IP6),
+    ] {
+        let mut historical = rule(prefix);
+        let expected_nlri = speaker.build_flowspec_path(&historical).unwrap().nlri;
+        let mut foreign = historical.clone();
+        foreign.nlri.dst_ports = vec![54];
+        let foreign_nlri = speaker.build_flowspec_path(&foreign).unwrap().nlri;
+        for actions in [
+            vec![],
+            vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
+            vec![FlowSpecAction {
+                action_type: ActionType::Police,
+                rate_bps: None,
+            }],
+            vec![FlowSpecAction::police(0)],
+            vec![FlowSpecAction::police(16_777_217)],
+            vec![FlowSpecAction::police(u64::MAX)],
+            vec![FlowSpecAction {
+                action_type: ActionType::Discard,
+                rate_bps: Some(8),
+            }],
+        ] {
+            historical.actions = actions;
+            assert!(speaker.announce(&historical).await.is_err());
+            assert!(adds.lock().unwrap().is_empty());
+            speaker.withdraw(&historical).await.unwrap();
+            let request = deletes.lock().unwrap().pop().unwrap();
+            assert_eq!(request.table_type, TableType::Global as i32);
+            assert!(request.uuid.is_empty());
+            assert!(request.vrf_id.is_empty());
+            let path = request.path.expect("never request family-wide deletion");
+            assert_eq!(path.nlri, expected_nlri);
+            assert_ne!(path.nlri, foreign_nlri);
+            assert_eq!(
+                path.family,
+                Some(Family {
+                    afi,
+                    safi: SAFI_FLOWSPEC
+                })
+            );
+            assert_eq!(request.family, path.family);
+            assert!(path.is_withdraw);
+            assert!(path.pattrs.is_empty());
+            assert_eq!(path.source_asn, 0);
+            assert!(path.source_id.is_empty());
+            assert!(path.neighbor_ip.is_empty());
+            assert_eq!(path.identifier, 0);
+        }
     }
 }
 

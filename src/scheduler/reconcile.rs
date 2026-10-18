@@ -8,11 +8,39 @@ use crate::correlation::{CorrelationEngine, SignalGroupStatus};
 use crate::db::RepositoryTrait;
 use crate::domain::{
     FlowSpecAction, FlowSpecNlri, FlowSpecRule, MitigationStatus, execute_withdrawal,
-    request_withdrawal,
+    ownership_key, request_withdrawal,
 };
 use crate::state::AppState;
 use crate::ws::WsMessage;
 use tokio::sync::RwLock;
+
+fn wire_action(rule: &FlowSpecRule) -> crate::error::Result<u32> {
+    let [action] = rule.actions.as_slice() else {
+        return Err(crate::error::PrefixdError::BgpAnnouncementFailed(
+            "exactly one traffic rate action is required".into(),
+        ));
+    };
+    action
+        .traffic_rate_bytes_per_second()
+        .map(f32::to_bits)
+        .map_err(|error| crate::error::PrefixdError::BgpAnnouncementFailed(error.to_string()))
+}
+
+fn pending_ownership_keys(
+    requests: &[crate::domain::WithdrawalRequest],
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    requests
+        .iter()
+        .map(|request| {
+            let rule: FlowSpecRule = serde_json::from_str(&request.rule_json)?;
+            anyhow::ensure!(
+                rule.nlri_hash() == request.nlri_hash,
+                "withdrawal rule identity does not match persisted intent"
+            );
+            Ok(ownership_key(&rule))
+        })
+        .collect()
+}
 
 pub struct ReconciliationLoop {
     repo: Arc<dyn RepositoryTrait>,
@@ -451,15 +479,24 @@ impl ReconciliationLoop {
     }
 
     async fn sync_announcements(&self) -> anyhow::Result<()> {
+        use std::collections::{HashMap, HashSet};
+
         self.verified_speaker_binding()?;
         // An unreadable withdrawal ledger cannot safely authorize a repair.
         let pop = self.owning_pop();
         let pending = self.repo.pending_withdrawals(pop).await?;
-        let pending_keys: std::collections::HashSet<_> = pending
-            .iter()
-            .map(|request| request.nlri_hash.as_str())
-            .collect();
+        let pending_keys = pending_ownership_keys(&pending)?;
         let mut active = self.repo.active_mitigation_inventory(pop).await?;
+        active.retain(|mitigation| {
+            mitigation.is_active() && pop.is_none_or(|pop| mitigation.pop == pop)
+        });
+        // Pending and expired siblings still make ownership ambiguous.
+        let mut owner_counts = HashMap::<String, usize>::new();
+        for mitigation in &active {
+            *owner_counts
+                .entry(ownership_key(&self.build_flowspec_rule(mitigation)))
+                .or_default() += 1;
+        }
         active.retain(|mitigation| {
             matches!(
                 mitigation.status,
@@ -490,7 +527,7 @@ impl ReconciliationLoop {
         let now = chrono::Utc::now();
         active.retain(|mitigation| {
             mitigation.expires_at > now
-                && !pending_keys.contains(self.build_flowspec_rule(mitigation).nlri_hash().as_str())
+                && !pending_keys.contains(&ownership_key(&self.build_flowspec_rule(mitigation)))
         });
 
         let Some(reader) = self.announcer.reader() else {
@@ -501,14 +538,59 @@ impl ReconciliationLoop {
             return Ok(());
         };
         let announced = reader.list_active().await?;
-        let announced_hashes: std::collections::HashSet<_> =
-            announced.iter().map(|r| r.nlri_hash()).collect();
+        let mut announced_actions = HashMap::new();
+        // Complete validation precedes every repair, including unknown local rows.
+        for rule in &announced {
+            let action = wire_action(rule)?;
+            anyhow::ensure!(
+                announced_actions
+                    .insert(rule.nlri_hash(), (rule, action))
+                    .is_none(),
+                "speaker inventory has multiple local rules for one NLRI"
+            );
+        }
 
-        // Re-announce missing rules
+        // Upsert only uniquely owned missing or differing-action intent.
         let mut repair_error = None;
         for candidate in &active {
-            if announced_hashes.contains(&self.build_flowspec_rule(candidate).nlri_hash()) {
+            let candidate_rule = self.build_flowspec_rule(candidate);
+            let key = ownership_key(&candidate_rule);
+            let nlri_hash = candidate_rule.nlri_hash();
+            if owner_counts[&key] != 1 {
+                tracing::warn!(mitigation_id = %candidate.mitigation_id,
+                    "announcement repair blocked by multiple active owners");
+                repair_error = Some(crate::error::PrefixdError::Conflict(
+                    "FlowSpec rule has multiple active owners".into(),
+                ));
                 continue;
+            }
+            let action = match wire_action(&candidate_rule) {
+                Ok(action) => action,
+                Err(error) => {
+                    repair_error = Some(error);
+                    continue;
+                }
+            };
+            if let Some((observed, observed_action)) = announced_actions.get(&nlri_hash) {
+                match self
+                    .announcer
+                    .matches_nlri(&candidate_rule.nlri, &observed.nlri)
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        repair_error = Some(crate::error::PrefixdError::Conflict(
+                            "observed FlowSpec match differs from the saved backend match".into(),
+                        ));
+                        continue;
+                    }
+                    Err(error) => {
+                        repair_error = Some(error);
+                        continue;
+                    }
+                }
+                if observed_action == &action {
+                    continue;
+                }
             }
             let _guard = match &self.state {
                 Some(state) => Some(state.mitigation_lock.lock().await),
@@ -516,10 +598,13 @@ impl ReconciliationLoop {
             };
             let mitigation = match self.repo.get_mitigation(candidate.mitigation_id).await {
                 Ok(Some(mitigation))
-                    if matches!(
-                        mitigation.status,
-                        MitigationStatus::Active | MitigationStatus::Escalated
-                    ) && mitigation.expires_at > chrono::Utc::now()
+                    if mitigation.mitigation_id == candidate.mitigation_id
+                        && mitigation.pop == candidate.pop
+                        && matches!(
+                            mitigation.status,
+                            MitigationStatus::Active | MitigationStatus::Escalated
+                        )
+                        && mitigation.expires_at > chrono::Utc::now()
                         && pop.is_none_or(|pop| mitigation.pop == pop) =>
                 {
                     mitigation
@@ -530,23 +615,46 @@ impl ReconciliationLoop {
                     continue;
                 }
             };
-            let current_pending = self.repo.pending_withdrawals(pop).await?;
             let rule = self.build_flowspec_rule(&mitigation);
-            if mitigation.expires_at <= chrono::Utc::now()
-                || current_pending.iter().any(|request| {
-                    request.mitigation_id == mitigation.mitigation_id
-                        || request.nlri_hash == rule.nlri_hash()
-                })
+            if rule.nlri_hash() != nlri_hash {
+                continue;
+            }
+            match self
+                .announcer
+                .matches_nlri(&candidate_rule.nlri, &rule.nlri)
+            {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    repair_error = Some(error);
+                    continue;
+                }
+            }
+            let current_pending = self.repo.pending_withdrawals(pop).await?;
+            if pending_ownership_keys(&current_pending)?.contains(&key)
+                || current_pending
+                    .iter()
+                    .any(|request| request.mitigation_id == mitigation.mitigation_id)
             {
                 continue;
             }
-            let hash = rule.nlri_hash();
-
-            if !announced_hashes.contains(&hash) {
+            let action = match wire_action(&rule) {
+                Ok(action) => action,
+                Err(error) => {
+                    repair_error = Some(error);
+                    continue;
+                }
+            };
+            self.verified_speaker_binding()?;
+            if mitigation.expires_at <= chrono::Utc::now() {
+                continue;
+            }
+            if announced_actions.get(&nlri_hash).map(|(_, action)| action) != Some(&action) {
                 tracing::warn!(
                     mitigation_id = %mitigation.mitigation_id,
-                    nlri_hash = %hash,
-                    "re-announcing missing rule"
+                    nlri_hash = %rule.nlri_hash(),
+                    reason = if announced_actions.contains_key(&nlri_hash) { "action_drift" } else { "missing" },
+                    "repairing local announcement"
                 );
 
                 if !self.dry_run {
@@ -576,7 +684,7 @@ impl ReconciliationLoop {
         }
 
         // Alert on unknown routes (routes in BGP not tracked by us)
-        let desired_hashes: std::collections::HashSet<_> = active
+        let desired_hashes: HashSet<_> = active
             .iter()
             .map(|m| self.build_flowspec_rule(m).nlri_hash())
             .collect();
@@ -671,7 +779,13 @@ mod tests {
                     "temporary repair failure".into(),
                 ));
             }
-            self.inner.announce(rule).await
+            self.inner.announce(rule).await?;
+            if self.mode.load(SeqCst) == 6 && rule.nlri.dst_prefix == "192.0.2.1/32" {
+                return Err(PrefixdError::BgpAnnouncementFailed(
+                    "accepted repair with lost acknowledgement".into(),
+                ));
+            }
+            Ok(())
         }
         async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
             let mode = self.mode.load(SeqCst);
@@ -695,7 +809,22 @@ mod tests {
                     "inventory unavailable".into(),
                 ));
             }
-            self.inner.list_active().await
+            let mut rules = self.inner.list_active().await?;
+            match self.mode.load(SeqCst) {
+                7 => rules.push(rules[0].clone()),
+                8..=10 => {
+                    let mut unsupported = rules[0].clone();
+                    unsupported.nlri.dst_prefix = "192.0.2.254/32".into();
+                    unsupported.actions = match self.mode.load(SeqCst) {
+                        8 => vec![],
+                        9 => vec![FlowSpecAction::police(16_777_217)],
+                        _ => vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
+                    };
+                    rules.push(unsupported);
+                }
+                _ => {}
+            }
+            Ok(rules)
         }
     }
     #[async_trait::async_trait]
@@ -1207,6 +1336,542 @@ mod tests {
         reconciler.reconcile().await.unwrap();
         assert_eq!(speaker.list_active().await.unwrap().len(), 2);
         assert_eq!(speaker.announcements.load(SeqCst), 3);
+    }
+
+    fn action_mitigation(prefix: &str, action: FlowSpecAction) -> Mitigation {
+        let mut mitigation = expired_mitigation(prefix.split('/').next().unwrap());
+        mitigation.match_criteria.dst_prefix = prefix.into();
+        mitigation.scope_hash = mitigation.match_criteria.compute_scope_hash();
+        mitigation.action_type = action.action_type;
+        mitigation.action_params.rate_bps = action.rate_bps;
+        mitigation.expires_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+        mitigation
+    }
+
+    fn action_speaker(mode: usize) -> Arc<FailingWithdrawal> {
+        Arc::new(FailingWithdrawal {
+            inner: MockAnnouncer::new(),
+            mode: AtomicUsize::new(mode),
+            announcements: AtomicUsize::new(0),
+            inventories: AtomicUsize::new(0),
+        })
+    }
+
+    fn action_state(
+        repo: Arc<MockRepository>,
+        speaker: Arc<dyn FlowSpecAnnouncer>,
+    ) -> Arc<AppState> {
+        let mut settings: crate::config::Settings =
+            crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+        settings.pop = "test".into();
+        settings.bgp.mode = crate::config::BgpMode::Mock;
+        settings.http.auth.mode = crate::config::AuthMode::None;
+        settings.mode = crate::config::OperationMode::Enforced;
+        AppState::new(
+            settings,
+            crate::config::Inventory::new(vec![]),
+            crate::config::Playbooks { playbooks: vec![] },
+            repo,
+            speaker,
+            ".".into(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn action_drift_repairs_both_families_once_and_preserves_unknown_rules() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for (wanted, observed) in [
+            (FlowSpecAction::discard(), FlowSpecAction::police(7)),
+            (FlowSpecAction::police(1), FlowSpecAction::discard()),
+            (FlowSpecAction::police(9), FlowSpecAction::police(8)),
+            (
+                FlowSpecAction::police(16_777_218),
+                FlowSpecAction::police(16_777_216),
+            ),
+        ] {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = action_speaker(0);
+            let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+            let mut expected = Vec::new();
+            for prefix in ["192.0.2.1/32", "2001:0DB8:0:0:0:0:0:1/128"] {
+                let mut mitigation = action_mitigation(prefix, wanted.clone());
+                mitigation.match_criteria.dst_ports = vec![53, 443];
+                repo.insert_mitigation(&mitigation).await.unwrap();
+                let rule = reconciler.build_flowspec_rule(&mitigation);
+                let mut drifted = rule.clone();
+                if prefix.contains(':') {
+                    drifted.nlri.dst_prefix = "2001:db8::1/128".into();
+                }
+                drifted.actions = vec![observed.clone()];
+                speaker.inner.announce(&drifted).await.unwrap();
+                let mut unknown = rule.clone();
+                unknown.nlri.dst_ports = vec![54];
+                unknown.actions = vec![FlowSpecAction::police(7)];
+                speaker.inner.announce(&unknown).await.unwrap();
+                expected.extend([rule, unknown]);
+            }
+            let success = crate::observability::metrics::RECONCILIATION_REPAIRS
+                .with_label_values(&["success"]);
+            let announced = crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                .with_label_values(&["announced"]);
+            let before = (success.get(), announced.get());
+            reconciler.sync_announcements().await.unwrap();
+            assert_eq!(speaker.announcements.load(SeqCst), 2);
+            assert_eq!(
+                (success.get(), announced.get()),
+                (before.0 + 2.0, before.1 + 2.0)
+            );
+            assert_eq!(repo.lifecycle_read_counts(), (2, 3));
+            for _ in 0..2 {
+                reconciler.sync_announcements().await.unwrap();
+                let actual = speaker.inner.list_active().await.unwrap();
+                assert_eq!(actual.len(), expected.len());
+                for rule in &expected {
+                    let found = actual
+                        .iter()
+                        .find(|row| row.nlri_hash() == rule.nlri_hash())
+                        .unwrap();
+                    assert_eq!(wire_action(found).unwrap(), wire_action(rule).unwrap());
+                }
+            }
+            assert_eq!(repo.lifecycle_read_counts(), (2, 5));
+            assert_eq!(speaker.announcements.load(SeqCst), 2);
+            assert_eq!(
+                (success.get(), announced.get()),
+                (before.0 + 2.0, before.1 + 2.0)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn observed_port_order_alias_fails_before_convergence_or_repair() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for observed_action in [FlowSpecAction::discard(), FlowSpecAction::police(7)] {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = action_speaker(0);
+            let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+            let mut expected = Vec::new();
+            for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
+                let mut owner = action_mitigation(prefix, FlowSpecAction::discard());
+                owner.match_criteria.dst_ports = vec![443, 53];
+                repo.insert_mitigation(&owner).await.unwrap();
+                let mut alias = reconciler.build_flowspec_rule(&owner);
+                alias.nlri.dst_ports.reverse();
+                alias.actions = vec![observed_action.clone()];
+                speaker.inner.announce(&alias).await.unwrap();
+                expected.push(alias);
+            }
+            let successes = crate::observability::metrics::RECONCILIATION_REPAIRS
+                .with_label_values(&["success"]);
+            let errors =
+                crate::observability::metrics::RECONCILIATION_REPAIRS.with_label_values(&["error"]);
+            let announcements = crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+                .with_label_values(&["announced"]);
+            let before = (successes.get(), errors.get(), announcements.get());
+            for _ in 0..2 {
+                assert!(reconciler.sync_announcements().await.is_err());
+                assert_eq!(speaker.announcements.load(SeqCst), 0);
+                let actual = speaker.inner.list_active().await.unwrap();
+                assert_eq!(actual.len(), expected.len());
+                for rule in &expected {
+                    let found = actual
+                        .iter()
+                        .find(|row| row.nlri_hash() == rule.nlri_hash())
+                        .unwrap();
+                    assert_eq!(found.nlri.dst_ports, rule.nlri.dst_ports);
+                    assert_eq!(wire_action(found).unwrap(), wire_action(rule).unwrap());
+                }
+                assert_eq!((successes.get(), errors.get(), announcements.get()), before);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn distinct_duplicate_term_nlri_does_not_hide_missing_intent_or_block_quiet_polls() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for (wanted_ports, unknown_ports) in [(vec![53], vec![53, 53]), (vec![53, 53], vec![53])] {
+            for unknown_action in [FlowSpecAction::discard(), FlowSpecAction::police(7)] {
+                let repo = Arc::new(MockRepository::new());
+                let speaker = action_speaker(0);
+                let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+                let mut expected = Vec::new();
+                for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
+                    let mut owner = action_mitigation(prefix, FlowSpecAction::discard());
+                    owner.match_criteria.dst_ports = wanted_ports.clone();
+                    repo.insert_mitigation(&owner).await.unwrap();
+                    let desired = reconciler.build_flowspec_rule(&owner);
+                    let mut unknown = desired.clone();
+                    unknown.nlri.dst_ports = unknown_ports.clone();
+                    unknown.actions = vec![unknown_action.clone()];
+                    assert_eq!(ownership_key(&desired), ownership_key(&unknown));
+                    assert_ne!(desired.nlri_hash(), unknown.nlri_hash());
+                    speaker.inner.announce(&unknown).await.unwrap();
+                    expected.extend([desired, unknown]);
+                }
+                for _ in 0..3 {
+                    reconciler.sync_announcements().await.unwrap();
+                    assert_eq!(speaker.announcements.load(SeqCst), 2);
+                    let actual = speaker.inner.list_active().await.unwrap();
+                    assert_eq!(actual.len(), expected.len());
+                    for rule in &expected {
+                        let found = actual
+                            .iter()
+                            .find(|row| row.nlri_hash() == rule.nlri_hash())
+                            .unwrap();
+                        assert_eq!(wire_action(found).unwrap(), wire_action(rule).unwrap());
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ambiguous_or_invalid_desired_key_leaves_independent_repairs_available() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for sibling in ["active", "pending", "expired", "invalid"] {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = action_speaker(0);
+            let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+            let mut blocked = action_mitigation("2001:db8::1/128", FlowSpecAction::discard());
+            if sibling == "invalid" {
+                blocked.action_type = ActionType::Police;
+                blocked.action_params.rate_bps = Some(0);
+            } else {
+                let mut other = blocked.clone();
+                other.mitigation_id = uuid::Uuid::new_v4();
+                other.match_criteria.dst_prefix = "2001:0DB8:0:0:0:0:0:1/128".into();
+                other.match_criteria.dst_ports = vec![53, 53];
+                other.scope_hash = "legacy duplicate owner".into();
+                if sibling == "pending" {
+                    other.status = MitigationStatus::Pending;
+                }
+                if sibling == "expired" {
+                    other.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+                }
+                repo.insert_mitigation(&other).await.unwrap();
+            }
+            repo.insert_mitigation(&blocked).await.unwrap();
+            let healthy = action_mitigation("192.0.2.2/32", FlowSpecAction::police(9));
+            repo.insert_mitigation(&healthy).await.unwrap();
+            let mut observed = reconciler.build_flowspec_rule(&blocked);
+            observed.actions = vec![FlowSpecAction::police(7)];
+            speaker.inner.announce(&observed).await.unwrap();
+            assert!(reconciler.sync_announcements().await.is_err(), "{sibling}");
+            assert_eq!(speaker.announcements.load(SeqCst), 1, "{sibling}");
+            let actual = speaker.inner.list_active().await.unwrap();
+            assert_eq!(actual.len(), 2);
+            let unchanged = actual
+                .iter()
+                .find(|row| ownership_key(row) == ownership_key(&observed))
+                .unwrap();
+            assert_eq!(
+                wire_action(unchanged).unwrap(),
+                wire_action(&observed).unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn action_drift_uses_only_its_pop_and_dry_run_sends_no_rpc() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = action_speaker(0);
+        let local = action_mitigation("192.0.2.1/32", FlowSpecAction::police(9));
+        let mut foreign = local.clone();
+        foreign.mitigation_id = uuid::Uuid::new_v4();
+        foreign.pop = "another-target".into();
+        foreign.action_params.rate_bps = Some(0);
+        for owner in [&local, &foreign] {
+            repo.insert_mitigation(owner).await.unwrap();
+        }
+        let state = action_state(repo.clone(), speaker.clone());
+        let mut observed = crate::domain::mitigation_rule(&local);
+        observed.actions = vec![FlowSpecAction::discard()];
+        speaker.inner.announce(&observed).await.unwrap();
+        let success =
+            crate::observability::metrics::RECONCILIATION_REPAIRS.with_label_values(&["success"]);
+        let before = success.get();
+        ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, true)
+            .with_app_state(state.clone())
+            .sync_announcements()
+            .await
+            .unwrap();
+        assert_eq!(speaker.announcements.load(SeqCst), 0);
+        assert_eq!(success.get(), before);
+        ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+            .with_app_state(state)
+            .sync_announcements()
+            .await
+            .unwrap();
+        assert_eq!(speaker.announcements.load(SeqCst), 1);
+        assert_eq!(
+            wire_action(&speaker.inner.list_active().await.unwrap()[0]).unwrap(),
+            wire_action(&crate::domain::mitigation_rule(&local)).unwrap()
+        );
+        assert_eq!(
+            repo.get_mitigation(foreign.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .action_params
+                .rate_bps,
+            Some(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn entire_observed_action_inventory_is_validated_before_any_repair() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for mode in [4, 7, 8, 9, 10] {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = action_speaker(mode);
+            let owner = action_mitigation("192.0.2.1/32", FlowSpecAction::discard());
+            repo.insert_mitigation(&owner).await.unwrap();
+            let mut drifted = crate::domain::mitigation_rule(&owner);
+            drifted.actions = vec![FlowSpecAction::police(7)];
+            speaker.inner.announce(&drifted).await.unwrap();
+            let reconciler = ReconciliationLoop::new(repo, speaker.clone(), 30, false);
+            let repairs = &crate::observability::metrics::RECONCILIATION_REPAIRS;
+            let before = (
+                repairs.with_label_values(&["success"]).get(),
+                repairs.with_label_values(&["error"]).get(),
+            );
+            assert!(
+                reconciler.sync_announcements().await.is_err(),
+                "mode={mode}"
+            );
+            assert_eq!(speaker.announcements.load(SeqCst), 0, "mode={mode}");
+            assert_eq!(
+                (
+                    repairs.with_label_values(&["success"]).get(),
+                    repairs.with_label_values(&["error"]).get()
+                ),
+                before
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_cleanup_blocks_drift_even_with_a_historical_invalid_action() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for malformed in [false, true] {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = action_speaker(0);
+            let owner = action_mitigation("192.0.2.1/32", FlowSpecAction::discard());
+            repo.insert_mitigation(&owner).await.unwrap();
+            let mut historical = owner.clone();
+            historical.action_type = ActionType::Police;
+            historical.action_params.rate_bps = Some(0);
+            let mut pending = crate::domain::WithdrawalRequest::new(
+                &historical,
+                false,
+                "operator",
+                "test",
+                "cleanup".into(),
+                true,
+            )
+            .unwrap();
+            if malformed {
+                pending.rule_json = "{".into();
+            }
+            repo.begin_withdrawal(&pending).await.unwrap();
+            let mut observed = crate::domain::mitigation_rule(&owner);
+            observed.actions = vec![FlowSpecAction::police(7)];
+            speaker.inner.announce(&observed).await.unwrap();
+            let reconciler = ReconciliationLoop::new(repo, speaker.clone(), 30, false);
+            assert_eq!(reconciler.sync_announcements().await.is_err(), malformed);
+            assert_eq!(speaker.announcements.load(SeqCst), 0);
+            assert_eq!(
+                speaker.inner.list_active().await.unwrap()[0].actions[0].rate_bps,
+                Some(7)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_and_uncertain_action_repairs_retry_only_when_still_drifted() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for mode in [3, 6] {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = action_speaker(mode);
+            for prefix in ["192.0.2.2/32", "192.0.2.1/32"] {
+                let owner = action_mitigation(prefix, FlowSpecAction::police(9));
+                repo.insert_mitigation(&owner).await.unwrap();
+                let mut drifted = crate::domain::mitigation_rule(&owner);
+                drifted.actions = vec![FlowSpecAction::discard()];
+                speaker.inner.announce(&drifted).await.unwrap();
+            }
+            let reconciler = ReconciliationLoop::new(repo, speaker.clone(), 30, false);
+            let metrics = &crate::observability::metrics::RECONCILIATION_REPAIRS;
+            let before = (
+                metrics.with_label_values(&["success"]).get(),
+                metrics.with_label_values(&["error"]).get(),
+            );
+            assert!(reconciler.sync_announcements().await.is_err());
+            assert_eq!(speaker.announcements.load(SeqCst), 2);
+            assert_eq!(
+                metrics.with_label_values(&["success"]).get(),
+                before.0 + 1.0
+            );
+            assert_eq!(metrics.with_label_values(&["error"]).get(), before.1 + 1.0);
+            speaker.mode.store(0, SeqCst);
+            reconciler.sync_announcements().await.unwrap();
+            reconciler.sync_announcements().await.unwrap();
+            assert_eq!(
+                speaker.announcements.load(SeqCst),
+                if mode == 3 { 3 } else { 2 }
+            );
+            for rule in speaker.inner.list_active().await.unwrap() {
+                assert_eq!(rule.actions[0].rate_bps, Some(9));
+            }
+        }
+    }
+
+    struct PausedActionInventory {
+        inner: Arc<FailingWithdrawal>,
+        observed: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+    impl FlowSpecAnnouncer for PausedActionInventory {
+        fn backend(&self) -> &'static str {
+            "mock"
+        }
+        fn reader(&self) -> Option<&dyn FlowSpecReader> {
+            Some(self)
+        }
+    }
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for PausedActionInventory {
+        async fn announce(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.inner.announce(rule).await
+        }
+        async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
+            self.inner.withdraw(rule).await
+        }
+    }
+    #[async_trait::async_trait]
+    impl FlowSpecReader for PausedActionInventory {
+        async fn list_active(&self) -> Result<Vec<FlowSpecRule>> {
+            let snapshot = self.inner.list_active().await?;
+            self.observed.notify_one();
+            self.release.notified().await;
+            Ok(snapshot)
+        }
+    }
+
+    #[tokio::test]
+    async fn action_repair_rechecks_lifecycle_and_uses_the_current_payload() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for change in [
+            "withdrawn",
+            "pending",
+            "expired",
+            "foreign",
+            "key",
+            "duplicate_term",
+            "port_order",
+            "replacement",
+            "action",
+            "converged",
+            "invalid",
+            "cleanup",
+        ] {
+            let repo = Arc::new(MockRepository::new());
+            let inner = action_speaker(0);
+            let speaker = Arc::new(PausedActionInventory {
+                inner: inner.clone(),
+                observed: Default::default(),
+                release: Default::default(),
+            });
+            let mut owner = action_mitigation("192.0.2.1/32", FlowSpecAction::discard());
+            owner.match_criteria.dst_ports = vec![443, 53];
+            repo.insert_mitigation(&owner).await.unwrap();
+            let mut observed = crate::domain::mitigation_rule(&owner);
+            observed.actions = vec![FlowSpecAction::police(1)];
+            inner.inner.announce(&observed).await.unwrap();
+            let state = action_state(repo.clone(), speaker.clone());
+            let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+                .with_app_state(state.clone());
+            let mut repair = Box::pin(reconciler.sync_announcements());
+            assert!(futures_util::poll!(&mut repair).is_pending());
+            tokio::time::timeout(Duration::from_secs(5), speaker.observed.notified())
+                .await
+                .unwrap();
+            let guard = state.mitigation_lock.lock().await;
+            match change {
+                "withdrawn" | "replacement" => {
+                    owner.status = MitigationStatus::Withdrawn;
+                    inner.inner.withdraw(&observed).await.unwrap();
+                }
+                "pending" => owner.status = MitigationStatus::Pending,
+                "expired" => owner.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1),
+                "foreign" => owner.pop = "another-target".into(),
+                "key" => owner.match_criteria.dst_prefix = "192.0.2.3/32".into(),
+                "duplicate_term" => owner.match_criteria.dst_ports.push(53),
+                "port_order" => owner.match_criteria.dst_ports.reverse(),
+                "action" | "converged" | "invalid" => {
+                    owner.action_type = ActionType::Police;
+                    owner.action_params.rate_bps = Some(match change {
+                        "action" => 9,
+                        "converged" => 1,
+                        _ => 0,
+                    });
+                }
+                "cleanup" => {
+                    request_withdrawal(
+                        repo.as_ref(),
+                        &owner,
+                        false,
+                        "operator",
+                        "test",
+                        "test".into(),
+                        true,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            repo.update_mitigation(&owner).await.unwrap();
+            if change == "replacement" {
+                let replacement = action_mitigation("192.0.2.1/32", FlowSpecAction::police(7));
+                repo.insert_mitigation(&replacement).await.unwrap();
+                inner
+                    .inner
+                    .announce(&crate::domain::mitigation_rule(&replacement))
+                    .await
+                    .unwrap();
+            }
+            speaker.release.notify_one();
+            // Explicit polling reaches the held lifecycle lock without scheduler timing.
+            assert!(
+                futures_util::poll!(&mut repair).is_pending(),
+                "repair must wait for lifecycle lock: {change}"
+            );
+            assert_eq!(
+                inner.announcements.load(SeqCst),
+                0,
+                "repair must wait for lifecycle lock: {change}"
+            );
+            drop(guard);
+            let result = tokio::time::timeout(Duration::from_secs(5), repair)
+                .await
+                .unwrap();
+            assert_eq!(result.is_err(), change == "invalid", "{change}");
+            assert_eq!(
+                inner.announcements.load(SeqCst),
+                usize::from(change == "action"),
+                "{change}"
+            );
+            if change == "action" || change == "replacement" {
+                assert_eq!(
+                    inner.inner.list_active().await.unwrap()[0].actions[0].rate_bps,
+                    Some(if change == "action" { 9 } else { 7 })
+                );
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]

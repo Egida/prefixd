@@ -377,9 +377,15 @@ through `POST /v1/events`, which applies playbooks.
 | `protocol` | string | yes | `"udp"`, `"tcp"`, `"icmp"` (IPv4 protocol 1), `"icmpv6"` (IPv6 protocol 58), or `"any"`; `""` also selects any protocol |
 | `dst_ports` | array | no | Destination ports (default `[]`) |
 | `action` | string | yes | `"discard"` or `"police"` |
-| `rate_bps` | integer | conditional | Required when action is `"police"` |
+| `rate_bps` | integer | conditional | Positive, exactly representable traffic rate for `"police"`; omit or use `null` for `"discard"` |
 | `ttl_seconds` | integer | yes | Requested time-to-live; subject to configured minimum and maximum |
 | `expires_at_cap` | RFC 3339 timestamp | no | Initial creation's absolute expiry ceiling, for maintenance recreation |
+
+Policing rates must round-trip exactly through the speaker's `f32` bytes/second
+encoding. Rates of 1, 7, 8 and 9 bits/second are supported, including fractional
+bytes/second. Zero, missing rates and values such as 16,777,217 bits/second or
+`18446744073709551615` that lose precision are rejected with `400` before intent
+is saved or the speaker is called. Discard requests must not carry a rate.
 
 ICMP selectors must match the victim's address family: use `"icmp"` for IPv4
 and `"icmpv6"` for IPv6. A mismatch returns `400` before intent is saved or the
@@ -424,7 +430,7 @@ TTL while the controller is stopped.
 
 | Status | Reason |
 |--------|--------|
-| 400 | Invalid request (bad IP, invalid protocol or protocol/address-family mismatch, police without rate_bps, etc.) |
+| 400 | Invalid request (bad IP, invalid protocol or protocol/address-family mismatch, missing/zero/inexact police rate, discard with a rate, etc.) |
 | 401 | Authentication required |
 | 409 | Scope already has an active canonical owner or pending withdrawal |
 | 422 | Guardrail rejection (safelist, quotas, prefix length, etc.) |
@@ -1251,7 +1257,12 @@ Content-Type: application/json
 }
 ```
 
-Sets `session` cookie for subsequent requests.
+Sets a session cookie for subsequent requests.
+
+**Response (401 Unauthorized):** Invalid credentials.
+
+**Response (403 Forbidden):** `http.auth.mode: none` disables named login. The
+request is rejected before operator lookup or the username login throttle.
 
 ### Logout
 
@@ -1261,7 +1272,8 @@ POST /v1/auth/logout
 
 **Response (200 OK)**
 
-Clears session cookie.
+Deletes the stored session and clears its cookie. This endpoint remains available
+in `none` mode so clients can remove a session retained from another mode.
 
 ### Current User
 
@@ -1279,7 +1291,8 @@ GET /v1/auth/me
 }
 ```
 
-**Response (401 Unauthorized):** Not logged in.
+**Response (401 Unauthorized):** Not logged in, or authentication mode is `none`.
+Anonymous access does not create an authenticated operator profile.
 
 ---
 
@@ -1676,7 +1689,8 @@ Content-Type: application/json
 - Unique playbook names (max 128 chars)
 - Valid vector (`udp_flood`, `syn_flood`, `ack_flood`, `icmp_flood`, `unknown`)
 - At least one step per playbook
-- `police` steps require `rate_bps > 0`
+- `police` steps require `rate_bps > 0` exactly representable as an `f32` bytes/second traffic rate
+- `discard` steps must omit `rate_bps` or set it to `null`
 - `ttl_seconds` must be 1-86400
 - `require_confidence_at_least` must be 0.0-1.0
 - First step must not have escalation requirements
@@ -1685,7 +1699,7 @@ Content-Type: application/json
 
 ```json
 {
-  "errors": ["playbook[0] (\"bad\"): police action requires rate_bps > 0"]
+  "errors": ["playbook[0] (\"bad\") step[0]: action 'police' requires rate_bps > 0"]
 }
 ```
 

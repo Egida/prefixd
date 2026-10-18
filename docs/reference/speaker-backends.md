@@ -80,6 +80,19 @@ error so existing repository implementations remain source-compatible. They must
 implement this contract before real-speaker startup can succeed; the default
 never issues a binding or silently disables ownership checks.
 
+## Traffic-rate actions
+
+Both writers accept one action: discard without a rate, or police with a positive
+integer bit rate that round-trips exactly through the `f32` bytes/second wire
+representation. Fractional bytes are preserved, so 1–7 bits/second remain police
+actions. Invalid actions are rejected before manual or detector intent is saved
+or extended; startup, reload and playbook edits apply the same rate policy.
+
+Withdrawals use the exact local match and do not depend on its saved action.
+This allows cleanup of historical zero, missing or imprecise policing rates.
+It does not change the exclusive speaker ownership requirement or add action-drift
+reconciliation.
+
 ## GoBGP read-back
 
 GoBGP inventory reads both IPv4 and IPv6 FlowSpec GLOBAL tables, including
@@ -268,9 +281,28 @@ Expiry enumeration also filters POP before decoding and fails on malformed
 eligible owned rows. Existing durable withdrawals are still attempted when expiry
 enumeration fails; every withdrawal retains its independent ownership validation.
 
-The scheduler currently compares NLRI identity. Repairing action-only drift
-needs separate coverage and implementation. Successful injection does not
-prove export-policy acceptance, router receipt, or traffic enforcement.
+The scheduler compares NLRI identity and exact supported traffic-rate actions.
+A missing rule or a differing discard/policing action is repaired with an upsert;
+the next converged poll sends no announcement. Pending and expired siblings still
+count when checking unique ownership. Ambiguous owners or invalid desired actions
+block their own ownership key while independent repairs continue. Multiple local
+rows for one NLRI or unsupported observed actions fail the complete observation
+stage before any repair; withdrawal cleanup remains independent. Ownership checks
+treat repeated identical port terms as equivalent, while observation preserves
+their distinct NLRI identity. The writer also confirms that an observed match
+addresses the saved backend route before accepting convergence or repairing it.
+GoBGP preserves port-term order: a reordered alias is rejected without a write.
+rustbgpd uses the same sorted-port encoding for comparison, injection and deletion.
+Repairs retain the saved match so its immutable withdrawal intent remains valid.
+
+Action repair assumes one running controller per POP and exclusive administration
+of its physical speaker target. The persistent binding is consistency evidence,
+not a process fence. Neither reader distinguishes an external controller's local
+rule with the same match from action drift; such shared-writer protection is not
+provided. Unknown matches and other POPs' desired rows do not authorize writes.
+GoBGP import policy must preserve supported actions for convergence. Successful
+injection does not prove retained post-policy state, export-policy acceptance,
+router receipt, or traffic enforcement.
 
 Mandatory TTLs are enforced by the running controller. Losing prefixd does not
 drop a separate daemon's router sessions or automatically expire its rules.
@@ -308,21 +340,16 @@ This is a fixed-target, single-controller contract. Drain pending requests befor
 changing targets or downgrading; see [the upgrade guide](../how-to/upgrading.md#pending-withdrawals-and-rollback).
 Application status and local speaker intent do not prove router enforcement.
 
-## Delivery order
+## Remaining backend work
 
-| Stage | Work and gate |
-|-------|---------------|
-| 1 | Support rustbgpd and GoBGP through the shared controller, authenticated RPC and codec tests |
-| 2 | Retry failed expiry withdrawals; real daemon TTL/restart recovery and transport/deployment wiring |
-| 3 | Shared readable-backend contract, secure profiles, persistent settings and actual route lifecycle gate shipping; peer receipt and vendor-router enforcement remain separately qualified |
-| 4 | Optional observation split implemented; durable confirmed announcement state remains required (pending withdrawal cleanup exists) |
-| 5 | Health availability metadata and CLI/dashboard observation states implemented; retain legacy public fields |
-| 6 | HTTP shim, a second transport proof, shared conformance and per-backend CI |
+Both readable adapters have shared contracts, released-daemon CI, secure
+profiles, restart recovery and durable withdrawal cleanup. Optional observation
+and health availability metadata are implemented.
 
-The capability/ledger work can proceed before the default switch, but a
-write-only backend cannot ship before its reconciliation path is verified.
-Generic exec transport, runtime plugin loading, and unrelated framework or UI
-rewrites are outside this first slice.
+Action-only drift repair, separately qualified vendor forwarding and a complete
+desired/acknowledged announcement ledger remain open. A write-only backend needs
+verified reconciliation and restart replay before shipping. ExaBGP, a generic
+HTTP shim, exec transport and runtime plugin loading are not supported today.
 
 ## Contributor and certification gates
 

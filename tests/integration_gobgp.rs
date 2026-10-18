@@ -21,6 +21,147 @@ async fn test_announce_and_list_active() {
     contract::run_readable_contract(&announcer).await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
+async fn faithful_policing_and_historical_action_withdrawal() {
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    contract::run_action_contract(&speaker).await.unwrap();
+    for afi in [1, 2] {
+        assert!(
+            fixture
+                .paths(afi, prefixd::bgp::apipb::TableType::Global)
+                .await
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
+async fn action_drift_reconciles_exactly_once() {
+    let fixture = fixture::Speaker::start().await;
+    let speaker = std::sync::Arc::new(fixture.connect().await);
+    let config = prefixd::config::BgpConfig {
+        mode: prefixd::config::BgpMode::Gobgp,
+        gobgp_grpc: fixture.endpoint.clone(),
+        local_asn: 65010,
+        router_id: "192.0.2.10".into(),
+        rustbgpd: None,
+        neighbors: vec![],
+    };
+    contract::run_action_reconciliation_contract(speaker, &config)
+        .await
+        .unwrap();
+    for afi in [1, 2] {
+        assert!(
+            fixture
+                .paths(afi, prefixd::bgp::apipb::TableType::Global)
+                .await
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
+async fn action_reconciliation_rejects_port_order_alias_without_mutation() {
+    use prefixd::{
+        db::{MockRepository, RepositoryTrait},
+        domain::{
+            ActionParams, ActionType, AttackVector, MatchCriteria, Mitigation, MitigationIntent,
+            SpeakerTarget, mitigation_rule,
+        },
+        observability::metrics,
+        scheduler::ReconciliationLoop,
+    };
+    let fixture = fixture::Speaker::start().await;
+    let speaker = std::sync::Arc::new(fixture.connect().await);
+    let config = prefixd::config::BgpConfig {
+        mode: prefixd::config::BgpMode::Gobgp,
+        gobgp_grpc: fixture.endpoint.clone(),
+        local_asn: 65010,
+        router_id: "192.0.2.10".into(),
+        rustbgpd: None,
+        neighbors: vec![],
+    };
+    for observed_action in [FlowSpecAction::discard(), FlowSpecAction::police(7)] {
+        let repo = std::sync::Arc::new(MockRepository::new());
+        let pop = "port-order-contract";
+        let binding = repo
+            .register_speaker_target(pop, &SpeakerTarget::from_config(&config).unwrap(), false)
+            .await
+            .unwrap();
+        let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+            .with_speaker_binding(binding);
+        let mut expected = Vec::new();
+        for prefix in ["192.0.2.247/32", "2001:db8::247/128"] {
+            let mut owner = Mitigation::from_intent(
+                MitigationIntent {
+                    event_id: uuid::Uuid::new_v4(),
+                    customer_id: None,
+                    service_id: None,
+                    pop: pop.into(),
+                    match_criteria: MatchCriteria {
+                        dst_prefix: prefix.into(),
+                        protocol: Some(17),
+                        dst_ports: vec![443, 53],
+                    },
+                    action_type: ActionType::Discard,
+                    action_params: ActionParams { rate_bps: None },
+                    ttl_seconds: 300,
+                    reason: "port order alias qualification".into(),
+                },
+                prefix.split('/').next().unwrap().into(),
+                AttackVector::UdpFlood,
+            );
+            owner.activate();
+            repo.insert_mitigation(&owner).await.unwrap();
+            let desired = mitigation_rule(&owner);
+            let mut alias = desired.clone();
+            alias.nlri.dst_ports.reverse();
+            alias.actions = vec![observed_action.clone()];
+            assert_eq!(desired.nlri_hash(), alias.nlri_hash());
+            assert!(!speaker.matches_nlri(&desired.nlri, &alias.nlri).unwrap());
+            speaker.announce(&alias).await.unwrap();
+            let mut unknown = desired;
+            unknown.nlri.dst_ports = vec![54];
+            unknown.actions = vec![FlowSpecAction::police(1)];
+            speaker.announce(&unknown).await.unwrap();
+            expected.extend([alias, unknown]);
+        }
+        contract::wait_inventory(speaker.as_ref(), &expected)
+            .await
+            .unwrap();
+        let successes = metrics::RECONCILIATION_REPAIRS.with_label_values(&["success"]);
+        let errors = metrics::RECONCILIATION_REPAIRS.with_label_values(&["error"]);
+        let announcements = metrics::ANNOUNCEMENTS_TOTAL.with_label_values(&["announced"]);
+        let before = (successes.get(), errors.get(), announcements.get());
+        for _ in 0..2 {
+            assert!(reconciler.reconcile().await.is_err());
+            contract::wait_inventory(speaker.as_ref(), &expected)
+                .await
+                .unwrap();
+            assert_eq!((successes.get(), errors.get(), announcements.get()), before);
+        }
+        // These aliases are fixture-owned external rows, not the saved mitigation match.
+        for rule in &expected {
+            speaker.withdraw(rule).await.unwrap();
+        }
+        contract::wait_inventory(speaker.as_ref(), &[])
+            .await
+            .unwrap();
+    }
+    for afi in [1, 2] {
+        assert!(
+            fixture
+                .paths(afi, prefixd::bgp::apipb::TableType::Global)
+                .await
+                .is_empty()
+        );
+    }
+}
+
 /// Use an isolated speaker: the unsupported local row deliberately blocks strict inventory.
 #[tokio::test]
 #[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]

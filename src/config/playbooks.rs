@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::path::Path;
 
-use crate::domain::AttackVector;
+use crate::domain::{ActionType, AttackVector, FlowSpecAction};
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Playbooks {
@@ -50,11 +50,37 @@ pub enum PlaybookAction {
     Discard,
 }
 
+impl PlaybookStep {
+    pub fn flowspec_action(&self) -> FlowSpecAction {
+        FlowSpecAction {
+            action_type: match self.action {
+                PlaybookAction::Police => ActionType::Police,
+                PlaybookAction::Discard => ActionType::Discard,
+            },
+            rate_bps: self.rate_bps,
+        }
+    }
+}
+
 impl Playbooks {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let playbooks: Playbooks = crate::config::parse_yaml(&content)?;
+        playbooks.validate_actions()?;
         Ok(playbooks)
+    }
+
+    fn validate_actions(&self) -> Result<()> {
+        for (i, playbook) in self.playbooks.iter().enumerate() {
+            for (j, step) in playbook.steps.iter().enumerate() {
+                step.flowspec_action()
+                    .traffic_rate_bytes_per_second()
+                    .map_err(|error| {
+                        anyhow::anyhow!("playbook[{i}] ({:?}) step[{j}]: {error}", playbook.name)
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     /// Validate all playbook rules, returning a list of errors (empty = valid).
@@ -105,14 +131,8 @@ impl Playbooks {
                     ));
                 }
 
-                if step.action == PlaybookAction::Police {
-                    match step.rate_bps {
-                        None | Some(0) => {
-                            errors
-                                .push(format!("{}: police action requires rate_bps > 0", step_ctx));
-                        }
-                        _ => {}
-                    }
+                if let Err(error) = step.flowspec_action().traffic_rate_bytes_per_second() {
+                    errors.push(format!("{step_ctx}: {error}"));
                 }
 
                 if let Some(conf) = step.require_confidence_at_least {
@@ -131,6 +151,7 @@ impl Playbooks {
 
     /// Save playbooks to a YAML file, creating a .bak backup first.
     pub fn save<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        self.validate_actions()?;
         let path = path.as_ref();
         let parent = path
             .parent()
@@ -285,7 +306,57 @@ mod tests {
         p.steps[0].rate_bps = None;
         let pb = Playbooks { playbooks: vec![p] };
         let errors = pb.validate();
-        assert!(errors.iter().any(|e| e.contains("rate_bps > 0")));
+        assert!(errors.iter().any(|e| e.contains("requires rate_bps")));
+    }
+
+    #[test]
+    fn action_validation_covers_load_save_and_later_steps() {
+        for (action, rate) in [
+            (PlaybookAction::Police, None),
+            (PlaybookAction::Police, Some(0)),
+            (PlaybookAction::Police, Some(16_777_217)),
+            (PlaybookAction::Police, Some(u64::MAX)),
+            (PlaybookAction::Discard, Some(0)),
+            (PlaybookAction::Discard, Some(8)),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("playbooks.yaml");
+            let original = Playbooks {
+                playbooks: vec![valid_playbook()],
+            };
+            original.save(&path).unwrap();
+            let original_bytes = std::fs::read(&path).unwrap();
+            let mut invalid = original;
+            let mut step = invalid.playbooks[0].steps[0].clone();
+            step.action = action;
+            step.rate_bps = rate;
+            invalid.playbooks[0].steps.push(step);
+            assert!(!invalid.validate().is_empty());
+            assert!(invalid.save(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+            assert!(!path.with_extension("yaml.bak").exists());
+            std::fs::write(&path, serde_saphyr::to_string(&invalid).unwrap()).unwrap();
+            assert!(
+                Playbooks::load(&path)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("step[1]")
+            );
+        }
+        for rate in [1, 7, 8, 9, 16_777_216, 16_777_218, 1_000_000_000] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("playbooks.yaml");
+            let mut valid = Playbooks {
+                playbooks: vec![valid_playbook()],
+            };
+            valid.playbooks[0].steps[0].rate_bps = Some(rate);
+            assert!(valid.validate().is_empty());
+            valid.save(&path).unwrap();
+            assert_eq!(
+                Playbooks::load(&path).unwrap().playbooks[0].steps[0].rate_bps,
+                Some(rate)
+            );
+        }
     }
 
     #[test]

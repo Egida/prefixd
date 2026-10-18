@@ -111,7 +111,7 @@ pub static RECONCILIATION_RUNS: Lazy<CounterVec> = Lazy::new(|| {
 pub static RECONCILIATION_REPAIRS: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
         "prefixd_reconciliation_repairs_total",
-        "Missing local announcement repair attempts, by RPC outcome (not router enforcement)",
+        "Missing or differing-action local announcement repair attempts, by RPC outcome (not router enforcement)",
         &["status"]
     )
     .unwrap()

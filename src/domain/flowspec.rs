@@ -62,7 +62,40 @@ pub struct FlowSpecAction {
     pub rate_bps: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FlowSpecActionError {
+    #[error("action 'police' requires rate_bps")]
+    MissingPoliceRate,
+    #[error("action 'police' requires rate_bps > 0")]
+    ZeroPoliceRate,
+    #[error(
+        "police rate_bps {0} cannot be represented exactly as an f32 bytes/second traffic rate"
+    )]
+    InexactPoliceRate(u64),
+    #[error("action 'discard' must not include rate_bps")]
+    UnexpectedDiscardRate,
+}
+
 impl FlowSpecAction {
+    /// Encode the supported traffic-rate action without changing its bit rate.
+    pub fn traffic_rate_bytes_per_second(&self) -> Result<f32, FlowSpecActionError> {
+        match (self.action_type, self.rate_bps) {
+            (ActionType::Discard, None) => Ok(0.0),
+            (ActionType::Discard, Some(_)) => Err(FlowSpecActionError::UnexpectedDiscardRate),
+            (ActionType::Police, None) => Err(FlowSpecActionError::MissingPoliceRate),
+            (ActionType::Police, Some(0)) => Err(FlowSpecActionError::ZeroPoliceRate),
+            (ActionType::Police, Some(bps)) => {
+                // Fractional bytes are valid; integer division would turn 1–7 bps into discard.
+                let rate = (bps as f64 / 8.0) as f32;
+                let decoded_bps = f64::from(rate) * 8.0;
+                if decoded_bps >= u64::MAX as f64 || decoded_bps as u64 != bps {
+                    return Err(FlowSpecActionError::InexactPoliceRate(bps));
+                }
+                Ok(rate)
+            }
+        }
+    }
+
     pub fn police(rate_bps: u64) -> Self {
         Self {
             action_type: ActionType::Police,
@@ -135,6 +168,68 @@ impl std::fmt::Display for AnnouncementStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn traffic_rate_preserves_exact_bit_rates_and_rejects_invalid_actions() {
+        for bps in [
+            1,
+            7,
+            8,
+            9,
+            16_777_216,
+            16_777_218,
+            1_000_000_000,
+            1 << 63,
+            u64::MAX - ((1 << 40) - 1),
+        ] {
+            let rate = FlowSpecAction::police(bps)
+                .traffic_rate_bytes_per_second()
+                .unwrap();
+            assert!(rate > 0.0);
+            assert_eq!((f64::from(rate) * 8.0) as u64, bps);
+        }
+        assert_eq!(
+            FlowSpecAction::discard().traffic_rate_bytes_per_second(),
+            Ok(0.0)
+        );
+        for (action, error) in [
+            (
+                FlowSpecAction {
+                    action_type: ActionType::Police,
+                    rate_bps: None,
+                },
+                FlowSpecActionError::MissingPoliceRate,
+            ),
+            (
+                FlowSpecAction::police(0),
+                FlowSpecActionError::ZeroPoliceRate,
+            ),
+            (
+                FlowSpecAction::police(16_777_217),
+                FlowSpecActionError::InexactPoliceRate(16_777_217),
+            ),
+            (
+                FlowSpecAction::police(u64::MAX),
+                FlowSpecActionError::InexactPoliceRate(u64::MAX),
+            ),
+            (
+                FlowSpecAction {
+                    action_type: ActionType::Discard,
+                    rate_bps: Some(0),
+                },
+                FlowSpecActionError::UnexpectedDiscardRate,
+            ),
+            (
+                FlowSpecAction {
+                    action_type: ActionType::Discard,
+                    rate_bps: Some(8),
+                },
+                FlowSpecActionError::UnexpectedDiscardRate,
+            ),
+        ] {
+            assert_eq!(action.traffic_rate_bytes_per_second(), Err(error));
+        }
+    }
 
     #[test]
     fn equivalent_ipv6_prefix_spellings_have_the_same_rule_identity() {

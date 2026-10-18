@@ -112,12 +112,118 @@ pub async fn wait_inventory(
             .await
             .context("complete local inventory deadline")?
             .context("complete local inventory failed")?;
-        match exact_inventory(&actual, expected) {
+        let comparison = exact_inventory(&actual, expected).and_then(|()| {
+            for wanted in expected {
+                let observed = actual
+                    .iter()
+                    .find(|rule| rule.nlri_hash() == wanted.nlri_hash())
+                    .context("expected NLRI missing after complete comparison")?;
+                ensure!(
+                    speaker.matches_nlri(&wanted.nlri, &observed.nlri)?,
+                    "observed match does not address the saved backend route"
+                );
+            }
+            Ok(())
+        });
+        match comparison {
             Ok(()) => return Ok(()),
             Err(error) if tokio::time::Instant::now() >= deadline => return Err(error),
             Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
         }
     }
+}
+
+#[allow(
+    dead_code,
+    reason = "Only real speaker targets qualify traffic-rate encoding."
+)]
+pub async fn run_action_contract(speaker: &dyn FlowSpecAnnouncer) -> Result<()> {
+    use prefixd::domain::ActionType;
+    let mut wanted: Vec<_> = ["192.0.2.245/32", "2001:0DB8:0:0:0:0:0:245/128"]
+        .into_iter()
+        .map(|prefix| {
+            FlowSpecRule::new(
+                FlowSpecNlri {
+                    dst_prefix: prefix.into(),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                },
+                FlowSpecAction::police(1_000_000),
+            )
+        })
+        .collect();
+    // Same destinations but different matches protect against prefix/family-wide deletion.
+    let foreign: Vec<_> = wanted
+        .iter()
+        .cloned()
+        .map(|mut rule| {
+            rule.nlri.dst_ports = vec![54];
+            rule
+        })
+        .collect();
+    for rule in &foreign {
+        speaker.announce(rule).await?;
+    }
+    for rate in [1, 7, 8, 9, 1_000_000] {
+        for rule in &mut wanted {
+            rule.actions = vec![FlowSpecAction::police(rate)];
+            speaker.announce(rule).await?;
+        }
+        let mut expected = foreign.clone();
+        expected.extend(wanted.clone());
+        wait_inventory(speaker, &expected)
+            .await
+            .context("exact fractional-byte police rate")?;
+    }
+    for actions in [
+        vec![],
+        vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
+        vec![FlowSpecAction {
+            action_type: ActionType::Police,
+            rate_bps: None,
+        }],
+        vec![FlowSpecAction::police(0)],
+        vec![FlowSpecAction::police(16_777_217)],
+        vec![FlowSpecAction::police(u64::MAX)],
+        vec![FlowSpecAction {
+            action_type: ActionType::Discard,
+            rate_bps: Some(8),
+        }],
+    ] {
+        for rule in &wanted {
+            speaker.announce(rule).await?;
+        }
+        let mut expected = foreign.clone();
+        expected.extend(wanted.clone());
+        wait_inventory(speaker, &expected).await?;
+        for rule in &wanted {
+            let mut historical = rule.clone();
+            historical.actions = actions.clone();
+            ensure!(
+                speaker.announce(&historical).await.is_err(),
+                "invalid action must not announce"
+            );
+        }
+        wait_inventory(speaker, &expected)
+            .await
+            .context("invalid action preserves all installed rules")?;
+        for rule in &wanted {
+            let mut historical = rule.clone();
+            historical.actions = actions.clone();
+            speaker
+                .withdraw(&historical)
+                .await
+                .context("withdraw historical invalid action")?;
+            expected.retain(|expected| expected.nlri_hash() != rule.nlri_hash());
+            wait_inventory(speaker, &expected)
+                .await
+                .context("withdraw only the exact local match")?;
+        }
+    }
+    for rule in &foreign {
+        speaker.withdraw(rule).await?;
+    }
+    wait_inventory(speaker, &[]).await
 }
 
 pub async fn run_readable_contract(speaker: &dyn FlowSpecAnnouncer) -> Result<()> {
@@ -174,6 +280,162 @@ pub async fn run_readable_contract(speaker: &dyn FlowSpecAnnouncer) -> Result<()
     wait_inventory(speaker, &[])
         .await
         .context("final inventory")
+}
+
+#[allow(
+    dead_code,
+    reason = "Only real speaker targets qualify reconciliation against wire readback."
+)]
+pub async fn run_action_reconciliation_contract(
+    speaker: std::sync::Arc<dyn FlowSpecAnnouncer>,
+    config: &prefixd::config::BgpConfig,
+) -> Result<()> {
+    use prefixd::{
+        db::{MockRepository, RepositoryTrait},
+        domain::{
+            ActionParams, AttackVector, MatchCriteria, Mitigation, MitigationIntent, SpeakerTarget,
+            execute_withdrawal, mitigation_rule, request_withdrawal,
+        },
+        observability::metrics,
+        scheduler::ReconciliationLoop,
+    };
+    let repo = std::sync::Arc::new(MockRepository::new());
+    let pop = "action-drift-contract";
+    let binding = repo
+        .register_speaker_target(pop, &SpeakerTarget::from_config(config)?, false)
+        .await?;
+    let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+        .with_speaker_binding(binding.clone());
+    let mut owners = Vec::new();
+    let mut unknown = Vec::new();
+    wait_inventory(speaker.as_ref(), &[]).await?;
+    for prefix in ["192.0.2.246/32", "2001:0DB8:0:0:0:0:0:246/128"] {
+        let mut owner = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: pop.into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: prefix.into(),
+                    protocol: Some(17),
+                    dst_ports: vec![443, 53],
+                },
+                action_type: prefixd::domain::ActionType::Discard,
+                action_params: ActionParams { rate_bps: None },
+                ttl_seconds: 300,
+                reason: "action drift qualification".into(),
+            },
+            prefix.split('/').next().unwrap().into(),
+            AttackVector::UdpFlood,
+        );
+        owner.activate();
+        repo.insert_mitigation(&owner).await?;
+        let mut foreign_owner = owner.clone();
+        foreign_owner.mitigation_id = uuid::Uuid::new_v4();
+        foreign_owner.pop = "another-target".into();
+        foreign_owner.action_type = prefixd::domain::ActionType::Police;
+        foreign_owner.action_params.rate_bps = Some(8_000_000);
+        repo.insert_mitigation(&foreign_owner).await?;
+        let mut control = mitigation_rule(&owner);
+        control.nlri.dst_ports = vec![54];
+        control.actions = vec![FlowSpecAction::police(1)];
+        speaker.announce(&control).await?;
+        unknown.push(control);
+        let mut duplicate_term_control = mitigation_rule(&owner);
+        duplicate_term_control.nlri.dst_ports = vec![443, 53, 53];
+        duplicate_term_control.actions = vec![FlowSpecAction::police(7)];
+        speaker.announce(&duplicate_term_control).await?;
+        unknown.push(duplicate_term_control);
+        owners.push(owner);
+    }
+    for (wanted, drifted_action) in [
+        (FlowSpecAction::discard(), FlowSpecAction::police(7)),
+        (FlowSpecAction::police(1), FlowSpecAction::discard()),
+        (FlowSpecAction::police(7), FlowSpecAction::police(8)),
+        (FlowSpecAction::police(8), FlowSpecAction::police(9)),
+        (FlowSpecAction::police(9), FlowSpecAction::police(1)),
+    ] {
+        let mut drifted = unknown.clone();
+        let mut desired = unknown.clone();
+        for owner in &mut owners {
+            owner.action_type = wanted.action_type;
+            owner.action_params.rate_bps = wanted.rate_bps;
+            repo.update_mitigation(owner).await?;
+            let rule = mitigation_rule(owner);
+            let mut changed = rule.clone();
+            changed.actions = vec![drifted_action.clone()];
+            speaker.announce(&changed).await?;
+            drifted.push(changed);
+            desired.push(rule);
+        }
+        wait_inventory(speaker.as_ref(), &drifted)
+            .await
+            .context("prove action-only drift before reconciliation")?;
+        let successes = metrics::RECONCILIATION_REPAIRS.with_label_values(&["success"]);
+        let errors = metrics::RECONCILIATION_REPAIRS.with_label_values(&["error"]);
+        let announcements = metrics::ANNOUNCEMENTS_TOTAL.with_label_values(&["announced"]);
+        let before = (successes.get(), errors.get(), announcements.get());
+        reconciler.reconcile().await?;
+        wait_inventory(speaker.as_ref(), &desired)
+            .await
+            .context("complete dual-family action repair")?;
+        ensure!(
+            (successes.get(), errors.get(), announcements.get())
+                == (before.0 + 2.0, before.1, before.2 + 2.0),
+            "each differing local action needs exactly one accepted repair"
+        );
+        reconciler.reconcile().await?;
+        wait_inventory(speaker.as_ref(), &desired).await?;
+        ensure!(
+            (successes.get(), errors.get(), announcements.get())
+                == (before.0 + 2.0, before.1, before.2 + 2.0),
+            "converged poll must not repeat action repairs"
+        );
+    }
+    let mut remaining: Vec<_> = owners
+        .iter()
+        .map(mitigation_rule)
+        .chain(unknown.iter().cloned())
+        .collect();
+    for owner in &owners {
+        // Delete through the immutable original persisted match, never a readback representation.
+        ensure!(
+            owner.match_criteria.dst_ports == vec![443, 53],
+            "persisted port order changed"
+        );
+        let request = request_withdrawal(
+            repo.as_ref(),
+            owner,
+            false,
+            "operator",
+            "contract",
+            "withdraw repaired original intent".into(),
+            true,
+            Some(&binding),
+        )
+        .await?;
+        execute_withdrawal(
+            repo.as_ref(),
+            speaker.as_ref(),
+            false,
+            &request,
+            Some(&binding),
+        )
+        .await?;
+        remaining.retain(|rule| rule.nlri_hash() != mitigation_rule(owner).nlri_hash());
+        wait_inventory(speaker.as_ref(), &remaining)
+            .await
+            .context("original saved intent deletes repaired rule")?;
+    }
+    reconciler.reconcile().await?;
+    wait_inventory(speaker.as_ref(), &unknown)
+        .await
+        .context("withdrawn rules stay absent and unknown controls survive")?;
+    for rule in &unknown {
+        speaker.withdraw(rule).await?;
+    }
+    wait_inventory(speaker.as_ref(), &[]).await
 }
 
 #[allow(
