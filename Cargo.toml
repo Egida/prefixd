@@ -2,7 +2,7 @@
 name = "prefixd"
 version = "0.19.1"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "BGP FlowSpec routing policy daemon for DDoS mitigation"
 license = "MIT"
 

@@ -64,6 +64,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   backend selection, authenticated gRPC, local-rule read-back, and IPv4/IPv6
   discard/policing support. Existing GoBGP and mock configurations remain valid.
 
+### Changed
+
+- Declare Rust 1.88 as the minimum compiler and add locked Linux CI checks for
+  production binaries with rustbgpd, all targets/features and no-default-feature
+  binaries. Current stable tests and lints remain required.
+
 ### Fixed
 
 - Persist new detector and manual mitigation intent before speaker announcement,

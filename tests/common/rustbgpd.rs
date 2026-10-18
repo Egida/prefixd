@@ -310,10 +310,10 @@ prefixd-test = "operator"
             use prefixd::bgp::PeerObserver;
             tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
-                    if let Ok(client) = RustBgpdAnnouncer::connect(&self.config).await {
-                        if client.session_status().await.is_ok() {
-                            break;
-                        }
+                    if let Ok(client) = RustBgpdAnnouncer::connect(&self.config).await
+                        && client.session_status().await.is_ok()
+                    {
+                        break;
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
