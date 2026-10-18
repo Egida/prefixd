@@ -1781,7 +1781,7 @@ Content-Type: application/json
 **Admin only.** Validates, writes to `playbooks.yaml` (with `.bak` backup), and hot-reloads. Returns the updated playbooks response on success.
 
 **Validation rules:**
-- Unique playbook names (max 128 chars)
+- Unique playbook names (max 128 UTF-8 bytes)
 - Valid vector (`udp_flood`, `syn_flood`, `ack_flood`, `icmp_flood`, `unknown`)
 - At least one step per playbook
 - `police` steps require `rate_bps > 0` exactly representable as an `f32` bytes/second traffic rate
@@ -1854,11 +1854,11 @@ Content-Type: application/json
 **Secret merge:** If a secret field (e.g. `webhook_url`, `bot_token`, `routing_key`, `api_key`, `secret`) equals `"***"`, the server carries forward the real secret from the matching existing destination. New destinations must provide actual secrets.
 
 **Validation rules:**
-- Slack/Discord/Teams: `webhook_url` required, max 1024 chars, must be valid `https://` URL
-- Telegram: `bot_token` and `chat_id` required
-- PagerDuty: `routing_key` required, `events_url` max 1024 chars, must be valid `https://` URL
+- Slack/Discord/Teams: `webhook_url` required, max 1024 UTF-8 bytes, must be valid `https://` URL
+- Telegram: `bot_token` and `chat_id` required, `chat_id` max 64 UTF-8 bytes
+- PagerDuty: `routing_key` required, `events_url` max 1024 UTF-8 bytes, must be valid `https://` URL
 - OpsGenie: `api_key` required, `region` must be `us` or `eu`
-- Generic: `url` required, max 1024 chars, must be valid `https://` URL
+- Generic: `url` required, max 1024 UTF-8 bytes, must be valid `https://` URL
 - URL host protections: `localhost`, `.localhost`, and literal private/local IPs (including `169.254.169.254`) are rejected
 
 **Error response (400):**

@@ -168,8 +168,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Report playbook-name and alert-destination string limits in UTF-8 bytes,
-  matching the existing byte checks without changing accepted input lengths.
+- Report playbook name and alert destination string limits in UTF-8 bytes.
+  Count playbook names in bytes in both editors, matching the existing server
+  limit without changing accepted server input lengths.
 
 - **Breaking:** Remove the ineffective `shutdown.preserve_announcements` config
   key, settings JSON field and shutdown log attribute. Remove the key from existing

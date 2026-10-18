@@ -35,6 +35,32 @@ describe("playbook YAML editing", () => {
     }]))
   })
 
+  it.each([
+    { label: "ASCII maximum", name: "a".repeat(128), valid: true },
+    { label: "ASCII over maximum", name: "a".repeat(129), valid: false },
+    { label: "two-byte maximum", name: "é".repeat(64), valid: true },
+    { label: "two-byte over maximum", name: `${"é".repeat(64)}a`, valid: false },
+    { label: "four-byte maximum", name: "\u{10400}".repeat(32), valid: true },
+    { label: "four-byte over maximum", name: `${"\u{10400}".repeat(32)}a`, valid: false },
+  ])("counts UTF-8 name bytes: $label", async ({ name, valid }) => {
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    render(<PlaybookYamlEditor playbooks={playbooks} onSave={onSave} saving={false} />)
+    const initial = (screen.getByRole("textbox") as HTMLTextAreaElement).value
+    edit(initial.replace("udp-policy", name))
+    const apply = screen.getByRole("button", { name: "Apply" })
+
+    if (valid) {
+      expect(apply).toBeEnabled()
+      fireEvent.click(apply)
+      await waitFor(() => expect(onSave).toHaveBeenCalledWith([{ ...playbooks[0], name }]))
+    } else {
+      expect(apply).toBeDisabled()
+      expect(screen.getByText(/name exceeds 128 bytes/)).toBeVisible()
+      fireEvent.click(apply)
+      expect(onSave).not.toHaveBeenCalled()
+    }
+  })
+
   it("preserves merged action values before validation and submission", async () => {
     const onSave = vi.fn().mockResolvedValue(undefined)
     render(<PlaybookYamlEditor playbooks={playbooks} onSave={onSave} saving={false} />)
