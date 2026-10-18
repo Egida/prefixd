@@ -22,9 +22,9 @@ fn rate_action(rate: f32) -> FlowSpecAction {
 }
 
 // Independent raw oracles: do not reuse the adapter's local-reader decoder.
-fn go_received(path: &go::Path, afi: i32) -> FlowSpecRule {
+fn go_received(path: &go::Path, afi: i32, peer: &str) -> FlowSpecRule {
     assert_eq!(path.family, Some(go::Family { afi, safi: 133 }));
-    assert_eq!(path.neighbor_ip, "127.0.0.1");
+    assert_eq!(path.neighbor_ip, peer);
     let Some(go::nlri::Nlri::FlowSpec(nlri)) = &path.nlri.as_ref().unwrap().nlri else {
         panic!("missing received FlowSpec NLRI")
     };
@@ -178,7 +178,7 @@ pub(crate) async fn wait_go_received(fixture: &gobgp::Speaker, expected: &[FlowS
                         .paths(afi, go::TableType::AdjIn)
                         .await
                         .iter()
-                        .map(|path| go_received(path, afi)),
+                        .map(|path| go_received(path, afi, &fixture.peer_address)),
                 );
             }
             if contract::exact_inventory(&actual, expected).is_ok() {
@@ -202,7 +202,7 @@ pub(crate) async fn wait_rust_views(
             let mut remote_rules = vec![];
             let mut selection = true;
             for family in [3, 4] {
-                for peer in ["0.0.0.0", "127.0.0.1"] {
+                for peer in ["0.0.0.0", fixture.peer_address.as_str()] {
                     let view = fixture.received_flow_spec(family, peer).await;
                     assert!(view.received_view && !view.advertised_view && view.routes.is_empty());
                     for row in view.received_routes {
@@ -239,4 +239,131 @@ pub(crate) async fn wait_rust_views(
     })
     .await
     .expect("exact Rust local/received views and selected/nonselected provenance");
+}
+
+/// Two BGP namespaces on a unique owned bridge; only RPC reaches host loopback.
+pub(crate) struct Pair {
+    pub rust: rustbgpd::Speaker,
+    pub go: gobgp::Speaker,
+    pub network: String,
+}
+
+impl Pair {
+    pub async fn start() -> Self {
+        assert_ne!(
+            std::env::var("TESTCONTAINERS_COMMAND").as_deref(),
+            Ok("keep"),
+            "peer qualification requires owned cleanup"
+        );
+        let network = format!("prefixd-peer-{}", uuid::Uuid::new_v4());
+        eprintln!("owned peer network: {network}");
+        let mut go = gobgp::Speaker::on_network(&network).await;
+        let go_ip = go.container.get_bridge_ip_address().await.unwrap();
+        let rust = rustbgpd::Speaker::start_peered(&network, &go_ip.to_string(), 65010).await;
+        let rust_ip = rust.container.get_bridge_ip_address().await.unwrap();
+        assert_ne!(rust_ip, go_ip);
+        go.peer_address = rust_ip.to_string();
+        go.add_peer_with_asn(179, false, 64512).await;
+        let pair = Self { rust, go, network };
+        pair.assert_isolated().await;
+        pair
+    }
+
+    pub async fn assert_isolated(&self) {
+        for container in [&self.rust.container, &self.go.container] {
+            let output = tokio::process::Command::new("docker")
+                .args(["inspect", container.id()])
+                .output()
+                .await
+                .unwrap();
+            assert!(output.status.success());
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let host = &value[0]["HostConfig"];
+            assert_eq!(host["NetworkMode"], self.network);
+            assert_eq!(host["PublishAllPorts"], false);
+            let mappings = host["PortBindings"].as_object().unwrap();
+            assert_eq!(mappings.len(), 1);
+            let expected_rpc = mappings.keys().next().unwrap();
+            assert_ne!(expected_rpc, "179/tcp");
+            let settings = &value[0]["NetworkSettings"];
+            let networks = settings["Networks"].as_object().unwrap();
+            assert_eq!(networks.len(), 1);
+            let actual_ip = networks[&self.network]["IPAddress"].as_str().unwrap();
+            let expected_ip = if container.id() == self.rust.container.id() {
+                &self.go.peer_address
+            } else {
+                &self.rust.peer_address
+            };
+            assert_eq!(actual_ip, expected_ip);
+            let actual_ports = settings["Ports"].as_object().unwrap();
+            let published: Vec<_> = actual_ports
+                .iter()
+                .filter(|(_, bindings)| !bindings.is_null())
+                .collect();
+            assert_eq!(published.len(), 1);
+            assert_eq!(published[0].0, expected_rpc);
+            for bindings in [mappings.get(expected_rpc).unwrap(), published[0].1] {
+                let bindings = bindings.as_array().unwrap();
+                assert_eq!(bindings.len(), 1);
+                assert_eq!(bindings[0]["HostIp"], "127.0.0.1");
+            }
+            assert!(
+                published[0].1[0]["HostPort"]
+                    .as_str()
+                    .unwrap()
+                    .parse::<u16>()
+                    .unwrap()
+                    > 0
+            );
+            eprintln!(
+                "owned peer isolation: container={}, network={}, bindings={mappings:?}",
+                container.id(),
+                self.network
+            );
+        }
+    }
+
+    pub async fn remove(self) {
+        let Self { rust, go, network } = self;
+        rust.container.rm().await.unwrap();
+        go.container.rm().await.unwrap();
+        wait_removed("network", &network).await;
+    }
+}
+
+/// Require the exact owned-resource absence response, never a daemon/CLI failure.
+pub(crate) async fn wait_removed(kind: &str, id: &str) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let output = tokio::process::Command::new("docker")
+                .args([kind, "inspect", id])
+                .output()
+                .await
+                .unwrap();
+            if !output.status.success() {
+                let error = String::from_utf8(output.stderr).unwrap();
+                let error = error.trim();
+                let expected = if kind == "network" {
+                    vec![
+                        format!("Error: No such network: {id}"),
+                        format!("Error response from daemon: network {id} not found"),
+                    ]
+                } else {
+                    vec![
+                        format!("Error: No such container: {id}"),
+                        format!("Error response from daemon: No such container: {id}"),
+                        format!("Error: No such object: {id}"),
+                    ]
+                };
+                assert!(
+                    expected.iter().any(|message| error == message),
+                    "unexpected Docker inspection failure: {error}"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("owned resource removed");
 }

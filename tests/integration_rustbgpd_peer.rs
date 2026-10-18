@@ -48,15 +48,15 @@ fn rules() -> Vec<FlowSpecRule> {
 #[tokio::test]
 #[ignore = "requires isolated pinned Docker speakers; run scripts/test-rustbgpd.sh"]
 async fn released_peers_receive_exact_routes_and_retain_nonselected_local_intent() {
-    let rust = rustbgpd::Speaker::start_peered(65010).await;
-    let go = gobgp::Speaker::with_router_id("192.0.2.20").await;
-    go.add_peer_with_asn(rust.bgp_port, false, 64512).await;
+    let pair = peer_receipt::Pair::start().await;
+    let rust = &pair.rust;
+    let go = &pair.go;
     let rust_client = rust.connect().await;
     let go_client = go.connect().await;
-    contract::wait_peer_state(&rust_client, "127.0.0.1", true)
+    contract::wait_peer_state(&rust_client, &rust.peer_address, true)
         .await
         .unwrap();
-    contract::wait_peer_state(&go_client, "127.0.0.1", true)
+    contract::wait_peer_state(&go_client, &go.peer_address, true)
         .await
         .unwrap();
     let owned = rules();
@@ -74,16 +74,16 @@ async fn released_peers_receive_exact_routes_and_retain_nonselected_local_intent
     }
     let mut all = owned.clone();
     all.push(unrelated.clone());
-    wait_go_received(&go, &all).await;
-    wait_rust_views(&rust, &all, &[]).await;
+    wait_go_received(go, &all).await;
+    wait_rust_views(rust, &all, &[]).await;
     for rule in &owned {
         rust_client.withdraw(rule).await.unwrap();
     }
-    wait_go_received(&go, std::slice::from_ref(&unrelated)).await;
+    wait_go_received(go, std::slice::from_ref(&unrelated)).await;
     for rule in &owned {
         rust_client.announce(rule).await.unwrap();
     }
-    wait_go_received(&go, &all).await;
+    wait_go_received(go, &all).await;
 
     // The explicit import policy assigns received routes LOCAL_PREF 200; local injection uses 100.
     let remote: Vec<_> = owned
@@ -97,27 +97,49 @@ async fn released_peers_receive_exact_routes_and_retain_nonselected_local_intent
     for rule in &remote {
         go_client.announce(rule).await.unwrap();
     }
-    wait_rust_views(&rust, &all, &remote).await;
+    wait_rust_views(rust, &all, &remote).await;
     contract::wait_inventory(&rust_client, &all).await.unwrap();
     for rule in &owned {
         rust_client.withdraw(rule).await.unwrap();
     }
-    wait_rust_views(&rust, std::slice::from_ref(&unrelated), &remote).await;
+    wait_rust_views(rust, std::slice::from_ref(&unrelated), &remote).await;
     for rule in &owned {
         rust_client.announce(rule).await.unwrap();
     }
-    wait_rust_views(&rust, &all, &remote).await;
+    wait_rust_views(rust, &all, &remote).await;
     contract::wait_inventory(&rust_client, &all).await.unwrap();
     for rule in &remote {
         go_client.withdraw(rule).await.unwrap();
     }
-    wait_rust_views(&rust, &all, &[]).await;
-    wait_go_received(&go, &all).await;
+    wait_rust_views(rust, &all, &[]).await;
+    wait_go_received(go, &all).await;
     for rule in &owned {
         rust_client.withdraw(rule).await.unwrap();
     }
     contract::wait_inventory(&rust_client, std::slice::from_ref(&unrelated))
         .await
         .unwrap();
-    wait_go_received(&go, std::slice::from_ref(&unrelated)).await;
+    wait_go_received(go, std::slice::from_ref(&unrelated)).await;
+    pair.remove().await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated pinned Docker speakers; run scripts/test-rustbgpd.sh"]
+async fn owned_peer_bridge_cleans_up_after_test_failure() {
+    let pair = peer_receipt::Pair::start().await;
+    let network = pair.network.clone();
+    let ids = [
+        pair.rust.container.id().to_owned(),
+        pair.go.container.id().to_owned(),
+    ];
+    let result = tokio::spawn(async move {
+        let _owned_pair = pair;
+        panic!("controlled fixture failure to verify panic-path cleanup");
+    })
+    .await;
+    assert!(result.unwrap_err().is_panic());
+    for id in &ids {
+        peer_receipt::wait_removed("container", id).await;
+    }
+    peer_receipt::wait_removed("network", &network).await;
 }

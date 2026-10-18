@@ -374,7 +374,9 @@ restart cases remain in its released-image matrix. CI retains logs on success
 and failure; an unavailable image or daemon fails qualification.
 
 The separate `integration_rustbgpd_peer` target adds a pinned rustbgpd↔GoBGP
-fixture. GoBGP initiates to rustbgpd's allocated BGP port; both sides negotiate
+fixture. Both speakers use BGP port 179 inside separate containers on a uniquely owned bridge.
+Only their RPC ports are published to ephemeral host-loopback ports; neither
+speaker targets the host's BGP port. Both sides negotiate
 only IPv4/IPv6 FlowSpec. Its raw received-route checks cover exact discard and
 police actions, withdrawal/re-announcement and preservation of unrelated local
 intent. An explicit lab import policy prefers the GoBGP candidate, so the test

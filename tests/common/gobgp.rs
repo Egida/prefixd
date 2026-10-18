@@ -10,7 +10,8 @@ use prefixd::bgp::{
 use std::{net::TcpListener, time::Duration};
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
-    core::{ExecCommand, logs::LogFrame},
+    bollard::models::PortBinding,
+    core::{ExecCommand, IntoContainerPort, logs::LogFrame},
     runners::AsyncRunner,
 };
 use tonic::transport::{Channel, Endpoint};
@@ -23,6 +24,8 @@ pub struct Speaker {
     pub endpoint: String,
     pub bgp_port: u16,
     router_id: String,
+    pub peer_address: String,
+    listen_address: String,
 }
 
 impl Speaker {
@@ -31,6 +34,14 @@ impl Speaker {
     }
 
     pub async fn with_router_id(router_id: &str) -> Self {
+        Self::start_configured(router_id, None).await
+    }
+
+    pub async fn on_network(network: &str) -> Self {
+        Self::start_configured("192.0.2.20", Some(network)).await
+    }
+
+    async fn start_configured(router_id: &str, network: Option<&str>) -> Self {
         let sockets: Vec<_> = (0..2)
             .map(|_| TcpListener::bind("127.0.0.1:0").unwrap())
             .collect();
@@ -38,12 +49,37 @@ impl Speaker {
             .iter()
             .map(|socket| socket.local_addr().unwrap().port())
             .collect();
-        let api_hosts = format!("--api-hosts=127.0.0.1:{}", ports[0]);
+        let api_hosts = if network.is_some() {
+            "--api-hosts=0.0.0.0:50051".into()
+        } else {
+            format!("--api-hosts=127.0.0.1:{}", ports[0])
+        };
         drop(sockets);
-        let container = GenericImage::new("jauderho/gobgp", IMAGE_TAG)
-            .with_network("host")
-            .with_host_config_modifier(|host| {
+        let bridged = network.is_some();
+        let image = GenericImage::new("jauderho/gobgp", IMAGE_TAG);
+        let image = if bridged {
+            image.with_exposed_port(50051.tcp())
+        } else {
+            image
+        };
+        let image = image
+            .with_network(network.unwrap_or("host"))
+            .with_host_config_modifier(move |host| {
                 host.cpuset_cpus = std::env::var("PREFIXD_TEST_CPUSET").ok();
+                if bridged {
+                    host.publish_all_ports = Some(false);
+                    host.port_bindings = Some(
+                        [(
+                            "50051/tcp".into(),
+                            Some(vec![PortBinding {
+                                host_ip: Some("127.0.0.1".into()),
+                                host_port: Some("0".into()),
+                            }]),
+                        )]
+                        .into_iter()
+                        .collect(),
+                    );
+                }
             })
             .with_log_consumer(|frame: &LogFrame| {
                 eprint!("GoBGP fixture: {}", String::from_utf8_lossy(frame.bytes()));
@@ -56,14 +92,24 @@ impl Speaker {
                 "--metrics-path=",
                 "--cpus=2",
                 &api_hosts,
-            ])
-            .start()
-            .await
-            .expect("start pinned GoBGP fixture");
+            ]);
+        let container = image.start().await.expect("start pinned GoBGP fixture");
+        let api_port = if network.is_some() {
+            container.get_host_port_ipv4(50051.tcp()).await.unwrap()
+        } else {
+            ports[0]
+        };
         let fixture = Self {
             container,
-            endpoint: format!("http://127.0.0.1:{}", ports[0]),
-            bgp_port: ports[1],
+            endpoint: format!("http://127.0.0.1:{api_port}"),
+            bgp_port: if network.is_some() { 179 } else { ports[1] },
+            peer_address: "127.0.0.1".into(),
+            listen_address: if network.is_some() {
+                "0.0.0.0"
+            } else {
+                "127.0.0.1"
+            }
+            .into(),
             router_id: router_id.into(),
         };
         let mut version = fixture
@@ -114,8 +160,8 @@ impl Speaker {
                                 "unexpected existing fixture BGP port"
                             );
                             assert_eq!(
-                                global.listen_addresses,
-                                ["127.0.0.1"],
+                                global.listen_addresses.as_slice(),
+                                std::slice::from_ref(&self.listen_address),
                                 "unexpected existing fixture listen addresses"
                             );
                             return;
@@ -126,7 +172,7 @@ impl Speaker {
                                 asn: 65010,
                                 router_id: self.router_id.clone(),
                                 listen_port: self.bgp_port.into(),
-                                listen_addresses: vec!["127.0.0.1".into()],
+                                listen_addresses: vec![self.listen_address.clone()],
                                 ..Default::default()
                             }),
                         };
@@ -157,7 +203,7 @@ impl Speaker {
                 .list_path(pb::ListPathRequest {
                     table_type: table as i32,
                     name: if table == pb::TableType::AdjIn {
-                        "127.0.0.1".into()
+                        self.peer_address.clone()
                     } else {
                         String::new()
                     },
@@ -183,7 +229,7 @@ impl Speaker {
                 .client()
                 .await
                 .list_peer(pb::ListPeerRequest {
-                    address: "127.0.0.1".into(),
+                    address: self.peer_address.clone(),
                     ..Default::default()
                 })
                 .await
@@ -208,12 +254,12 @@ impl Speaker {
             .add_peer(pb::AddPeerRequest {
                 peer: Some(pb::Peer {
                     conf: Some(pb::PeerConf {
-                        neighbor_address: "127.0.0.1".into(),
+                        neighbor_address: self.peer_address.clone(),
                         peer_asn,
                         ..Default::default()
                     }),
                     transport: Some(pb::Transport {
-                        local_address: "127.0.0.1".into(),
+                        local_address: self.listen_address.clone(),
                         remote_port: remote_port.into(),
                         passive_mode: passive,
                         ..Default::default()
