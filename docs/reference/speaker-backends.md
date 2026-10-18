@@ -335,3 +335,45 @@ router evidence separately and include restart/TTL behavior in the release gate.
 The existing `gobgp` health field and `apipb` export remain compatibility
 surfaces. They do not select the active backend. Production write-only adapters
 remain gated on the durable announcement ledger and verified recovery semantics.
+
+
+## Readable backend qualification
+
+`tests/common/speaker_contract.rs` contains the shared async lifecycle oracle used
+by Mock, GoBGP and rustbgpd. It checks complete local inventory cardinality,
+canonical IPv4/IPv6 destinations, optional protocols, eight destination ports,
+exact discard/police actions, duplicate announcement/withdrawal, action replacement
+and re-announcement. The ordinary Rust test suite includes a deliberately broken
+Mock reader whose missing actions must fail that oracle with a useful diagnostic.
+A readable third-party adapter can call `run_readable_contract(&adapter)` against
+an isolated empty speaker; unsupported observation must not be faked as an empty
+inventory. Peer transitions and process restart require backend-owned fixtures.
+
+Run the real fixtures on Linux with Docker:
+
+```sh
+scripts/test-gobgp.sh
+scripts/test-rustbgpd.sh
+PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 scripts/test-rustbgpd.sh
+```
+
+The GoBGP fixture pins image digest
+`sha256:42b8d0017237e388c55936efe1f23632365b24a31751f6e8815f93e12c4d18c2`
+and verifies the binary reports 4.10.0. Raw and API end-to-end tests create their
+own containers and reserve ephemeral loopback listeners; they ignore ambient
+speaker endpoints. Readiness, raw streams and peer convergence are bounded.
+Optional `PREFIXD_TEST_CPUSET` applies to the fixture containers.
+
+The GoBGP peer case observes actual dual-family receipt and withdrawal, checks
+session continuity, forces a received route to win over an existing local path,
+and verifies the local reader still returns that nonselected local path. It also
+checks peer loss and recovery after a real process restart using the original
+clients. A separate restart case rebuilds GoBGP state through the real reconciler
+without deleting unrelated local rules. Existing rustbgpd TTL and same-client
+restart cases remain in its released-image matrix. CI retains logs on success
+and failure; an unavailable image or daemon fails qualification.
+
+These tests observe local acceptance and daemon-to-daemon BGP receipt. They do
+not establish router enforcement, vendor forwarding, or rustbgpd-to-GoBGP peer
+interoperability. The latter remains a separate required peering qualification;
+ExaBGP and other write-only backends are not qualified by this readable suite.

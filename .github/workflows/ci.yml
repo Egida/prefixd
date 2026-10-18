@@ -45,6 +45,33 @@ jobs:
       - name: Test rustbgpd backend
         run: cargo test --features bgp-rustbgpd,test-utils
 
+  gobgp:
+    name: GoBGP (4.10.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-gobgp-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: Pinned readable contract, real peers, restart and API integration
+        run: scripts/test-gobgp.sh
+      - name: Retain GoBGP qualification logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: gobgp-qualification-attempt-${{ github.run_attempt }}
+          path: target/qualification/gobgp.log
+
   rustbgpd:
     name: rustbgpd (${{ matrix.version }})
     runs-on: ubuntu-latest
@@ -69,8 +96,16 @@ jobs:
           key: ${{ runner.os }}-rustbgpd-${{ matrix.version }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-      - name: Released controller lifecycle, TTL and restart recovery
-        run: scripts/test-rustbgpd.sh
+      - name: Released shared controller contract, TTL and restart recovery
+        run: |
+          set -o pipefail
+          scripts/test-rustbgpd.sh 2>&1 | tee rustbgpd-qualification.log
+      - name: Retain rustbgpd qualification logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rustbgpd-qualification-${{ matrix.version }}-attempt-${{ github.run_attempt }}
+          path: rustbgpd-qualification.log
 
   lint:
     name: Lint
@@ -207,7 +242,7 @@ jobs:
   docker:
     name: Docker
     runs-on: ubuntu-latest
-    needs: [test, lint, frontend, security]
+    needs: [test, lint, frontend, security, gobgp, rustbgpd]
     permissions:
       contents: read
       packages: write

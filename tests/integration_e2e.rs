@@ -8,10 +8,11 @@
 //! they appear in the RIB.
 //!
 //! To run:
-//!   cargo test --test integration_e2e -- --ignored
+//!   scripts/test-gobgp.sh
 //!
-//! Requires Docker for testcontainers (Postgres + GoBGP).
+//! Requires Linux and Docker for owned testcontainers (Postgres + pinned GoBGP).
 
+#![cfg(target_os = "linux")]
 mod common;
 
 use std::time::Duration;

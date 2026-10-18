@@ -1,5 +1,7 @@
 #![cfg(all(feature = "bgp-rustbgpd", feature = "test-utils", target_os = "linux"))]
 mod common;
+#[path = "common/speaker_contract.rs"]
+mod contract;
 #[path = "common/rustbgpd.rs"]
 mod fixture;
 use prefixd::{
@@ -38,33 +40,7 @@ fn rule() -> FlowSpecRule {
 async fn live_rustbgpd_controller_roundtrip() {
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;
-    for prefix in ["192.0.2.231/32", "2001:0DB8:0:0:0:0:0:231/128"] {
-        let mut rule = rule();
-        rule.nlri.dst_prefix = prefix.into();
-        for action in [FlowSpecAction::discard(), FlowSpecAction::police(8_000_000)] {
-            rule.actions = vec![action];
-            speaker.announce(&rule).await.unwrap();
-            speaker.announce(&rule).await.unwrap();
-            let active = speaker.list_active().await.unwrap();
-            let actual = active
-                .iter()
-                .find(|r| r.nlri_hash() == rule.nlri_hash())
-                .expect("injected local intent");
-            assert_eq!(actual.actions[0].action_type, rule.actions[0].action_type);
-            assert_eq!(actual.actions[0].rate_bps, rule.actions[0].rate_bps);
-        }
-        speaker.withdraw(&rule).await.unwrap();
-        speaker.withdraw(&rule).await.unwrap();
-        assert!(
-            !speaker
-                .list_active()
-                .await
-                .unwrap()
-                .iter()
-                .any(|r| r.nlri_hash() == rule.nlri_hash())
-        );
-    }
-    speaker.session_status().await.unwrap();
+    contract::run_readable_contract(&speaker).await.unwrap();
 }
 
 #[tokio::test]

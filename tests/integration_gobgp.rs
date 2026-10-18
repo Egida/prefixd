@@ -1,510 +1,33 @@
-//! Integration tests for GoBGP reconciliation.
-//!
-//! These tests require a running GoBGP v4.x instance with gRPC API enabled.
-//!
-//! To run:
-//!   docker compose up -d gobgp
-//!   cargo test --test integration_gobgp -- --ignored --test-threads=1
-//! Set PREFIXD_GOBGP_TEST_ENDPOINT for an isolated non-default listener.
+//! Qualification against an owned, immutable GoBGP 4.10.0 fixture on Linux.
+//! Run `scripts/test-gobgp.sh`; no ambient speaker endpoint is accepted.
+#![cfg(target_os = "linux")]
+#[path = "common/speaker_contract.rs"]
+mod contract;
+#[path = "common/gobgp.rs"]
+mod fixture;
 
-use prefixd::bgp::{FlowSpecReader, FlowSpecWriter, GoBgpAnnouncer, PeerObserver};
-use prefixd::domain::{ActionType, FlowSpecAction, FlowSpecNlri, FlowSpecRule};
+use prefixd::bgp::{FlowSpecReader, FlowSpecWriter, GoBgpAnnouncer};
+use prefixd::domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule};
 use std::time::Duration;
-
-const GOBGP_ENDPOINT: &str = "127.0.0.1:50051";
-
-/// Helper to create and connect a GoBGP announcer
-async fn connect_gobgp() -> GoBgpAnnouncer {
-    let endpoint =
-        std::env::var("PREFIXD_GOBGP_TEST_ENDPOINT").unwrap_or_else(|_| GOBGP_ENDPOINT.into());
-    let mut announcer = GoBgpAnnouncer::new(endpoint);
-    announcer
-        .connect()
-        .await
-        .expect("Failed to connect to GoBGP");
-    announcer
-}
 
 /// Test: Announce a rule, verify it appears in list_active()
 #[tokio::test]
-#[ignore] // Requires running GoBGP
+#[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
 async fn test_announce_and_list_active() {
-    let announcer = connect_gobgp().await;
-
-    let rule = FlowSpecRule::new(
-        FlowSpecNlri {
-            dst_prefix: "198.51.100.1/32".to_string(),
-            protocol: Some(17), // UDP
-            dst_ports: vec![53],
-        },
-        FlowSpecAction {
-            action_type: ActionType::Discard,
-            rate_bps: None,
-        },
-    );
-
-    // Announce
-    announcer.announce(&rule).await.expect("Failed to announce");
-
-    // Small delay for GoBGP to process
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // List active rules
-    let active = announcer
-        .list_active()
-        .await
-        .expect("Failed to list active");
-
-    // Find our rule by NLRI hash
-    let found = active.iter().find(|r| r.nlri_hash() == rule.nlri_hash());
-    assert!(found.is_some(), "Announced rule not found in RIB");
-
-    // Verify parsed rule matches original
-    let parsed = found.unwrap();
-    assert_eq!(parsed.nlri.dst_prefix, rule.nlri.dst_prefix);
-    assert_eq!(parsed.nlri.protocol, rule.nlri.protocol);
-    assert_eq!(parsed.nlri.dst_ports, rule.nlri.dst_ports);
-
-    // Cleanup: withdraw the rule
-    announcer.withdraw(&rule).await.expect("Failed to withdraw");
-}
-
-/// Test: Announce, withdraw, verify it's gone from list_active()
-#[tokio::test]
-#[ignore] // Requires running GoBGP
-async fn test_announce_withdraw_cycle() {
-    let announcer = connect_gobgp().await;
-
-    let rule = FlowSpecRule::new(
-        FlowSpecNlri {
-            dst_prefix: "198.51.100.2/32".to_string(),
-            protocol: Some(6), // TCP
-            dst_ports: vec![80, 443],
-        },
-        FlowSpecAction {
-            action_type: ActionType::Police,
-            rate_bps: Some(100_000_000),
-        },
-    );
-
-    // Announce
-    announcer.announce(&rule).await.expect("Failed to announce");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Verify present
-    let active = announcer
-        .list_active()
-        .await
-        .expect("Failed to list active");
-    assert!(
-        active.iter().any(|r| r.nlri_hash() == rule.nlri_hash()),
-        "Rule should be in RIB after announce"
-    );
-
-    // Withdraw
-    announcer.withdraw(&rule).await.expect("Failed to withdraw");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Verify gone
-    let active = announcer
-        .list_active()
-        .await
-        .expect("Failed to list active");
-    assert!(
-        !active.iter().any(|r| r.nlri_hash() == rule.nlri_hash()),
-        "Rule should NOT be in RIB after withdraw"
-    );
-}
-
-/// Test: Multiple rules with different characteristics
-#[tokio::test]
-#[ignore] // Requires running GoBGP
-async fn test_multiple_rules_roundtrip() {
-    let announcer = connect_gobgp().await;
-
-    let rules = vec![
-        // UDP discard
-        FlowSpecRule::new(
-            FlowSpecNlri {
-                dst_prefix: "198.51.100.10/32".to_string(),
-                protocol: Some(17),
-                dst_ports: vec![53, 123],
-            },
-            FlowSpecAction {
-                action_type: ActionType::Discard,
-                rate_bps: None,
-            },
-        ),
-        // TCP police
-        FlowSpecRule::new(
-            FlowSpecNlri {
-                dst_prefix: "198.51.100.11/32".to_string(),
-                protocol: Some(6),
-                dst_ports: vec![80],
-            },
-            FlowSpecAction {
-                action_type: ActionType::Police,
-                rate_bps: Some(50_000_000),
-            },
-        ),
-        // ICMP discard (no ports)
-        FlowSpecRule::new(
-            FlowSpecNlri {
-                dst_prefix: "198.51.100.12/32".to_string(),
-                protocol: Some(1),
-                dst_ports: vec![],
-            },
-            FlowSpecAction {
-                action_type: ActionType::Discard,
-                rate_bps: None,
-            },
-        ),
-        // Any protocol (no protocol specified)
-        FlowSpecRule::new(
-            FlowSpecNlri {
-                dst_prefix: "198.51.100.13/32".to_string(),
-                protocol: None,
-                dst_ports: vec![],
-            },
-            FlowSpecAction {
-                action_type: ActionType::Discard,
-                rate_bps: None,
-            },
-        ),
-    ];
-
-    // Announce all
-    for rule in &rules {
-        announcer.announce(rule).await.expect("Failed to announce");
-    }
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // List and verify all present
-    let active = announcer
-        .list_active()
-        .await
-        .expect("Failed to list active");
-
-    for rule in &rules {
-        let found = active.iter().find(|r| r.nlri_hash() == rule.nlri_hash());
-        assert!(
-            found.is_some(),
-            "Rule {} not found in RIB",
-            rule.nlri.dst_prefix
-        );
-
-        let parsed = found.unwrap();
-        assert_eq!(parsed.nlri.dst_prefix, rule.nlri.dst_prefix);
-        assert_eq!(parsed.nlri.protocol, rule.nlri.protocol);
-        assert_eq!(parsed.nlri.dst_ports, rule.nlri.dst_ports);
-    }
-
-    // Cleanup: withdraw all
-    for rule in &rules {
-        announcer.withdraw(rule).await.expect("Failed to withdraw");
-    }
-}
-
-/// Test: Reconciliation scenario - detect missing rule
-#[tokio::test]
-#[ignore] // Requires running GoBGP
-async fn test_reconciliation_detects_missing_rule() {
-    let announcer = connect_gobgp().await;
-
-    // Create two rules representing "desired state"
-    let rule1 = FlowSpecRule::new(
-        FlowSpecNlri {
-            dst_prefix: "198.51.100.20/32".to_string(),
-            protocol: Some(17),
-            dst_ports: vec![53],
-        },
-        FlowSpecAction {
-            action_type: ActionType::Discard,
-            rate_bps: None,
-        },
-    );
-
-    let rule2 = FlowSpecRule::new(
-        FlowSpecNlri {
-            dst_prefix: "198.51.100.21/32".to_string(),
-            protocol: Some(17),
-            dst_ports: vec![123],
-        },
-        FlowSpecAction {
-            action_type: ActionType::Discard,
-            rate_bps: None,
-        },
-    );
-
-    // Announce only rule1 (simulating partial state)
-    announcer
-        .announce(&rule1)
-        .await
-        .expect("Failed to announce");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // List active (simulating reconciliation check)
-    let active = announcer
-        .list_active()
-        .await
-        .expect("Failed to list active");
-    let active_hashes: std::collections::HashSet<_> =
-        active.iter().map(|r| r.nlri_hash()).collect();
-
-    // Check which "desired" rules are missing
-    let desired = [&rule1, &rule2];
-    let missing: Vec<_> = desired
-        .iter()
-        .filter(|r| !active_hashes.contains(&r.nlri_hash()))
-        .collect();
-
-    assert_eq!(missing.len(), 1);
-    assert_eq!(missing[0].nlri.dst_prefix, "198.51.100.21/32");
-
-    // Reconciliation would re-announce missing rule
-    announcer
-        .announce(&rule2)
-        .await
-        .expect("Failed to re-announce");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Verify both now present
-    let active = announcer
-        .list_active()
-        .await
-        .expect("Failed to list active");
-    assert!(active.iter().any(|r| r.nlri_hash() == rule1.nlri_hash()));
-    assert!(active.iter().any(|r| r.nlri_hash() == rule2.nlri_hash()));
-
-    // Cleanup
-    announcer.withdraw(&rule1).await.ok();
-    announcer.withdraw(&rule2).await.ok();
-}
-
-/// Test: Reconciliation scenario - detect orphan rule
-#[tokio::test]
-#[ignore] // Requires running GoBGP
-async fn test_reconciliation_detects_orphan_rule() {
-    let announcer = connect_gobgp().await;
-
-    // Announce a rule that will become "orphan" (in BGP but not in desired state)
-    let orphan_rule = FlowSpecRule::new(
-        FlowSpecNlri {
-            dst_prefix: "198.51.100.30/32".to_string(),
-            protocol: Some(17),
-            dst_ports: vec![53],
-        },
-        FlowSpecAction {
-            action_type: ActionType::Discard,
-            rate_bps: None,
-        },
-    );
-
-    // Announce a rule that is in desired state
-    let desired_rule = FlowSpecRule::new(
-        FlowSpecNlri {
-            dst_prefix: "198.51.100.31/32".to_string(),
-            protocol: Some(17),
-            dst_ports: vec![123],
-        },
-        FlowSpecAction {
-            action_type: ActionType::Discard,
-            rate_bps: None,
-        },
-    );
-
-    announcer
-        .announce(&orphan_rule)
-        .await
-        .expect("Failed to announce orphan");
-    announcer
-        .announce(&desired_rule)
-        .await
-        .expect("Failed to announce desired");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Simulate desired state (only desired_rule)
-    let desired_hashes: std::collections::HashSet<_> =
-        vec![desired_rule.nlri_hash()].into_iter().collect();
-
-    // List active and find orphans
-    let active = announcer
-        .list_active()
-        .await
-        .expect("Failed to list active");
-    let orphans: Vec<_> = active
-        .iter()
-        .filter(|r| !desired_hashes.contains(&r.nlri_hash()))
-        .filter(|r| r.nlri.dst_prefix.starts_with("198.51.100.3")) // Filter to our test prefixes
-        .collect();
-
-    assert_eq!(orphans.len(), 1);
-    assert_eq!(orphans[0].nlri.dst_prefix, "198.51.100.30/32");
-
-    // In real reconciliation, we'd log warning about orphan
-    // For cleanup in test, we withdraw it
-    announcer.withdraw(&orphan_rule).await.ok();
-    announcer.withdraw(&desired_rule).await.ok();
-}
-
-/// Test: IPv6 FlowSpec roundtrip through GoBGP
-#[tokio::test]
-#[ignore] // Requires running GoBGP with IPv6 FlowSpec support
-async fn test_ipv6_flowspec_roundtrip() {
-    let announcer = connect_gobgp().await;
-
-    let rule = FlowSpecRule::new(
-        FlowSpecNlri {
-            dst_prefix: "2001:db8:1::1/128".to_string(),
-            protocol: Some(17), // UDP
-            dst_ports: vec![53],
-        },
-        FlowSpecAction {
-            action_type: ActionType::Police,
-            rate_bps: Some(1_000_000_000), // 1 Gbps
-        },
-    );
-
-    // Announce
-    announcer
-        .announce(&rule)
-        .await
-        .expect("Failed to announce IPv6 rule");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    let active = announcer
-        .list_active()
-        .await
-        .expect("Failed to list dual-family inventory");
-    let parsed = active
-        .iter()
-        .find(|candidate| candidate.nlri_hash() == rule.nlri_hash())
-        .expect("IPv6 rule missing from local inventory");
-    assert_eq!(parsed.actions[0].action_type, ActionType::Police);
-    assert_eq!(parsed.actions[0].rate_bps, Some(1_000_000_000));
-
-    // Cleanup
-    announcer
-        .withdraw(&rule)
-        .await
-        .expect("Failed to withdraw IPv6 rule");
-}
-
-/// Test: Session status check
-#[tokio::test]
-#[ignore] // Requires running GoBGP
-async fn test_session_status() {
-    let announcer = connect_gobgp().await;
-
-    let peers = announcer
-        .session_status()
-        .await
-        .expect("Failed to get session status");
-
-    // In docker-compose setup, GoBGP may have no configured peers
-    // Just verify the call succeeds and returns a list
-    println!("GoBGP peers: {:?}", peers);
-}
-
-/// Test: End-to-end reconciliation - manually delete from GoBGP, verify re-announcement
-///
-/// This simulates what happens when GoBGP loses state (restart, etc.) and the
-/// reconciliation loop detects drift and re-announces missing rules.
-#[tokio::test]
-#[ignore] // Requires running GoBGP
-async fn test_reconciliation_reannounces_after_manual_delete() {
-    let announcer = connect_gobgp().await;
-
-    // 1. Announce a rule (simulating what prefixd would do after event ingestion)
-    let rule = FlowSpecRule::new(
-        FlowSpecNlri {
-            dst_prefix: "198.51.100.99/32".to_string(),
-            protocol: Some(17),
-            dst_ports: vec![53, 123],
-        },
-        FlowSpecAction {
-            action_type: ActionType::Police,
-            rate_bps: Some(100_000_000), // 100 Mbps
-        },
-    );
-
-    announcer.announce(&rule).await.expect("Failed to announce");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // 2. Verify it's in the RIB
-    let active = announcer
-        .list_active()
-        .await
-        .expect("Failed to list active");
-    assert!(
-        active.iter().any(|r| r.nlri_hash() == rule.nlri_hash()),
-        "Rule should be in RIB after initial announce"
-    );
-
-    // 3. Manually withdraw (simulating GoBGP restart or external deletion)
-    announcer.withdraw(&rule).await.expect("Failed to withdraw");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // 4. Verify it's gone
-    let active = announcer
-        .list_active()
-        .await
-        .expect("Failed to list active");
-    assert!(
-        !active.iter().any(|r| r.nlri_hash() == rule.nlri_hash()),
-        "Rule should NOT be in RIB after manual delete"
-    );
-
-    // 5. Simulate reconciliation: detect missing and re-announce
-    // In real prefixd, this would be sync_announcements() comparing DB vs RIB
-    let desired_hashes: std::collections::HashSet<_> = vec![rule.nlri_hash()].into_iter().collect();
-    let active_hashes: std::collections::HashSet<_> =
-        active.iter().map(|r| r.nlri_hash()).collect();
-
-    let missing: Vec<_> = desired_hashes.difference(&active_hashes).collect();
-
-    assert_eq!(missing.len(), 1, "Should detect one missing rule");
-
-    // Re-announce the missing rule
-    announcer
-        .announce(&rule)
-        .await
-        .expect("Failed to re-announce");
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // 6. Verify it's back
-    let active = announcer
-        .list_active()
-        .await
-        .expect("Failed to list active");
-    assert!(
-        active.iter().any(|r| r.nlri_hash() == rule.nlri_hash()),
-        "Rule should be back in RIB after reconciliation re-announce"
-    );
-
-    // 7. Verify the parsed rule matches original
-    let parsed = active
-        .iter()
-        .find(|r| r.nlri_hash() == rule.nlri_hash())
-        .unwrap();
-    assert_eq!(parsed.nlri.dst_prefix, rule.nlri.dst_prefix);
-    assert_eq!(parsed.nlri.protocol, rule.nlri.protocol);
-    assert_eq!(parsed.nlri.dst_ports, rule.nlri.dst_ports);
-    assert_eq!(parsed.actions[0].action_type, ActionType::Police);
-    assert!(parsed.actions[0].rate_bps.is_some());
-
-    // Cleanup
-    announcer.withdraw(&rule).await.ok();
+    let fixture = fixture::Speaker::start().await;
+    // Readiness is repeatable even if the first StartBgp acknowledgement was lost.
+    fixture.configure().await;
+    let announcer = fixture.connect().await;
+    contract::run_readable_contract(&announcer).await.unwrap();
 }
 
 /// Use an isolated speaker: the unsupported local row deliberately blocks strict inventory.
 #[tokio::test]
-#[ignore] // Requires isolated GoBGP; run this file with --test-threads=1.
+#[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
 async fn test_local_provenance_and_unsupported_local_rule() {
-    use prefixd::bgp::apipb::{
-        self, flow_spec_rule, go_bgp_service_client::GoBgpServiceClient, nlri,
-    };
-    let announcer = connect_gobgp().await;
+    use prefixd::bgp::apipb::{self, flow_spec_rule, nlri};
+    let fixture = fixture::Speaker::start().await;
+    let announcer = fixture.connect().await;
     let rule = FlowSpecRule::new(
         FlowSpecNlri {
             dst_prefix: "198.51.100.211/32".into(),
@@ -514,37 +37,18 @@ async fn test_local_provenance_and_unsupported_local_rule() {
         FlowSpecAction::discard(),
     );
     announcer.announce(&rule).await.unwrap();
-    let endpoint =
-        std::env::var("PREFIXD_GOBGP_TEST_ENDPOINT").unwrap_or_else(|_| GOBGP_ENDPOINT.into());
-    let endpoint = if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-        endpoint
-    } else {
-        format!("http://{endpoint}")
-    };
-    let mut client = GoBgpServiceClient::connect(endpoint).await.unwrap();
+    let mut client = fixture.client().await;
     let family = apipb::Family { afi: 1, safi: 133 };
-    let mut stream = client
-        .list_path(apipb::ListPathRequest {
-            table_type: apipb::TableType::Global as i32,
-            family: Some(family),
-            ..Default::default()
-        })
+    let local_path = fixture
+        .paths(1, apipb::TableType::Global)
         .await
-        .unwrap()
-        .into_inner();
-    let mut local_path = None;
-    while let Some(response) = stream.message().await.unwrap() {
-        for path in response.destination.unwrap().paths {
-            if path
-                .nlri
+        .into_iter()
+        .find(|path| {
+            path.nlri
                 .as_ref()
                 .and_then(|nlri| announcer.decode_flowspec_nlri(nlri).ok())
                 .is_some_and(|nlri| nlri.compute_hash() == rule.nlri_hash())
-            {
-                local_path = Some(path);
-            }
-        }
-    }
+        });
     let mut local_path = local_path.expect("injected path must appear in GLOBAL RIB");
     assert!(
         local_path.neighbor_ip.is_empty(),
@@ -591,4 +95,319 @@ async fn test_local_provenance_and_unsupported_local_rule() {
         .list_active()
         .await
         .expect("observation recovers once unsupported local rule is removed");
+}
+
+/// A real daemon restart, preserving the original client and desired repository.
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
+async fn restart_recovers_through_the_same_client_and_reconciler() {
+    use prefixd::{
+        db::{MockRepository, RepositoryTrait},
+        domain::{ActionParams, AttackVector, MatchCriteria, Mitigation, MitigationIntent},
+        scheduler::ReconciliationLoop,
+    };
+    use std::sync::Arc;
+    let fixture = fixture::Speaker::start().await;
+    let speaker = Arc::new(fixture.connect().await);
+    let repo = Arc::new(MockRepository::new());
+    let settings = prefixd::config::BgpConfig {
+        mode: prefixd::config::BgpMode::Gobgp,
+        gobgp_grpc: fixture.endpoint.clone(),
+        local_asn: 65010,
+        router_id: "192.0.2.10".into(),
+        rustbgpd: None,
+        neighbors: vec![],
+    };
+    let binding = repo
+        .register_speaker_target(
+            "restart-contract",
+            &prefixd::domain::SpeakerTarget::from_config(&settings).unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+    let desired: Vec<_> = contract::contract_rules().into_iter().take(2).collect();
+    for rule in &desired {
+        let mut mitigation = Mitigation::from_intent(
+            MitigationIntent {
+                event_id: uuid::Uuid::new_v4(),
+                customer_id: None,
+                service_id: None,
+                pop: "restart-contract".into(),
+                match_criteria: MatchCriteria {
+                    dst_prefix: rule.nlri.dst_prefix.clone(),
+                    protocol: rule.nlri.protocol,
+                    dst_ports: rule.nlri.dst_ports.clone(),
+                },
+                action_type: rule.actions[0].action_type,
+                action_params: ActionParams {
+                    rate_bps: rule.actions[0].rate_bps,
+                },
+                ttl_seconds: 300,
+                reason: "speaker restart qualification".into(),
+            },
+            rule.nlri.dst_prefix.split('/').next().unwrap().into(),
+            AttackVector::UdpFlood,
+        );
+        mitigation.activate();
+        repo.insert_mitigation(&mitigation).await.unwrap();
+    }
+    let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+        .with_speaker_binding(binding);
+    reconciler.reconcile().await.unwrap();
+    contract::wait_inventory(speaker.as_ref(), &desired)
+        .await
+        .unwrap();
+    fixture.container.stop_with_timeout(Some(0)).await.unwrap();
+    assert!(!matches!(
+        tokio::time::timeout(Duration::from_secs(2), speaker.list_active()).await,
+        Ok(Ok(_))
+    ));
+    fixture.container.start().await.unwrap();
+    fixture.configure().await;
+    contract::wait_inventory(speaker.as_ref(), &[])
+        .await
+        .unwrap();
+    let mut foreign = desired[0].clone();
+    foreign.nlri.dst_prefix = "198.51.100.240/32".into();
+    speaker.announce(&foreign).await.unwrap();
+    let before = prefixd::observability::metrics::RECONCILIATION_REPAIRS
+        .with_label_values(&["success"])
+        .get();
+    reconciler.reconcile().await.unwrap();
+    let mut expected = desired;
+    expected.push(foreign);
+    contract::wait_inventory(speaker.as_ref(), &expected)
+        .await
+        .unwrap();
+    reconciler.reconcile().await.unwrap();
+    assert_eq!(
+        prefixd::observability::metrics::RECONCILIATION_REPAIRS
+            .with_label_values(&["success"])
+            .get(),
+        before + 2.0
+    );
+    contract::wait_inventory(speaker.as_ref(), &expected)
+        .await
+        .unwrap();
+}
+
+fn received_rule(
+    announcer: &GoBgpAnnouncer,
+    path: &prefixd::bgp::apipb::Path,
+    afi: i32,
+) -> FlowSpecRule {
+    use prefixd::bgp::apipb::{attribute, extended_community};
+    let family = path.family.as_ref().expect("received FlowSpec family");
+    assert_eq!((family.afi, family.safi), (afi, 133));
+    assert_eq!(path.neighbor_ip, "127.0.0.1", "received provenance");
+    let nlri = announcer
+        .decode_flowspec_nlri(path.nlri.as_ref().unwrap())
+        .unwrap();
+    let mut rates = Vec::new();
+    for attribute in &path.pattrs {
+        if let Some(attribute::Attr::ExtendedCommunities(communities)) = &attribute.attr {
+            for community in &communities.communities {
+                let Some(extended_community::Extcom::TrafficRate(rate)) = &community.extcom else {
+                    panic!("unexpected FlowSpec action community")
+                };
+                assert_eq!(rate.asn, 0);
+                assert!(rate.rate.is_finite() && rate.rate >= 0.0);
+                rates.push(rate.rate);
+            }
+        }
+    }
+    assert_eq!(rates.len(), 1, "exactly one received rate action");
+    let bits = f64::from(rates[0]) * 8.0;
+    assert!(bits.fract() == 0.0 && bits < 18_446_744_073_709_551_616.0);
+    let action = if bits == 0.0 {
+        FlowSpecAction::discard()
+    } else {
+        FlowSpecAction::police(bits as u64)
+    };
+    FlowSpecRule::new(nlri, action)
+}
+
+async fn set_local_preference(
+    fixture: &fixture::Speaker,
+    announcer: &GoBgpAnnouncer,
+    rule: &FlowSpecRule,
+    local_pref: u32,
+) {
+    use prefixd::bgp::apipb::{self as pb, attribute};
+    let afi = if rule.nlri.dst_prefix.contains(':') {
+        2
+    } else {
+        1
+    };
+    let mut path = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(path) = fixture
+                .paths(afi, pb::TableType::Global)
+                .await
+                .into_iter()
+                .find(|path| {
+                    path.neighbor_ip.is_empty()
+                        && announcer
+                            .decode_flowspec_nlri(path.nlri.as_ref().unwrap())
+                            .unwrap()
+                            .compute_hash()
+                            == rule.nlri_hash()
+                })
+            {
+                break path;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("injected local path before preference replacement");
+    path.pattrs
+        .retain(|attribute| !matches!(attribute.attr, Some(attribute::Attr::LocalPref(_))));
+    path.pattrs.push(pb::Attribute {
+        attr: Some(attribute::Attr::LocalPref(pb::LocalPrefAttribute {
+            local_pref,
+        })),
+    });
+    fixture
+        .client()
+        .await
+        .add_path(pb::AddPathRequest {
+            table_type: pb::TableType::Global as i32,
+            path: Some(path),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
+async fn real_peers_receive_exact_actions_and_do_not_hide_nonselected_local_paths() {
+    use prefixd::bgp::apipb as pb;
+    let receiver = fixture::Speaker::with_router_id("192.0.2.11").await;
+    let sender = fixture::Speaker::with_router_id("192.0.2.12").await;
+    receiver.add_peer(sender.bgp_port, true).await;
+    sender.add_peer(receiver.bgp_port, false).await;
+    let receiver_client = receiver.connect().await;
+    let sender_client = sender.connect().await;
+    contract::wait_peer_state(&receiver_client, "127.0.0.1", true)
+        .await
+        .unwrap();
+    contract::wait_peer_state(&sender_client, "127.0.0.1", true)
+        .await
+        .unwrap();
+    let uptime = receiver.peer_uptime().await;
+    let remote: Vec<_> = contract::contract_rules().into_iter().take(2).collect();
+    let mut local = remote.clone();
+    for (remote, local) in remote.iter().zip(&mut local) {
+        local.actions = vec![FlowSpecAction::police(32_000_000)];
+        receiver_client.announce(local).await.unwrap();
+        sender_client.announce(remote).await.unwrap();
+        set_local_preference(&receiver, &receiver_client, local, 50).await;
+        set_local_preference(&sender, &sender_client, remote, 200).await;
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let mut received = Vec::new();
+            let mut proven_nonselected = true;
+            for afi in [1, 2] {
+                let paths = receiver.paths(afi, pb::TableType::AdjIn).await;
+                received.extend(
+                    paths
+                        .iter()
+                        .map(|path| received_rule(&receiver_client, path, afi)),
+                );
+                let paths = receiver.paths(afi, pb::TableType::Global).await;
+                let wanted = &remote[if afi == 1 { 0 } else { 1 }];
+                proven_nonselected &= paths.len() == 2
+                    && paths.iter().all(|path| {
+                        path.family == Some(pb::Family { afi, safi: 133 })
+                            && receiver_client
+                                .decode_flowspec_nlri(path.nlri.as_ref().unwrap())
+                                .unwrap()
+                                .compute_hash()
+                                == wanted.nlri_hash()
+                    })
+                    && paths
+                        .iter()
+                        .any(|path| path.neighbor_ip.is_empty() && !path.best)
+                    && paths
+                        .iter()
+                        .any(|path| path.neighbor_ip == "127.0.0.1" && path.best);
+            }
+            if proven_nonselected && contract::exact_inventory(&received, &remote).is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("received/local coexistence and nonselected local paths");
+    contract::wait_inventory(&receiver_client, &local)
+        .await
+        .unwrap();
+    for rule in &remote {
+        sender_client.withdraw(rule).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if receiver.paths(1, pb::TableType::AdjIn).await.is_empty()
+                && receiver.paths(2, pb::TableType::AdjIn).await.is_empty()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("actual dual-family peer withdrawal");
+    contract::wait_inventory(&receiver_client, &local)
+        .await
+        .unwrap();
+    assert_eq!(
+        receiver.peer_uptime().await,
+        uptime,
+        "withdrawal must not reset the session"
+    );
+    sender.container.stop_with_timeout(Some(0)).await.unwrap();
+    contract::wait_peer_state(&receiver_client, "127.0.0.1", false)
+        .await
+        .unwrap();
+    sender.container.start().await.unwrap();
+    sender.configure().await;
+    sender.add_peer(receiver.bgp_port, false).await;
+    contract::wait_peer_state(&receiver_client, "127.0.0.1", true)
+        .await
+        .unwrap();
+    contract::wait_peer_state(&sender_client, "127.0.0.1", true)
+        .await
+        .unwrap();
+    contract::wait_inventory(&sender_client, &[]).await.unwrap();
+    for rule in &remote {
+        sender_client.announce(rule).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let mut received = Vec::new();
+            for afi in [1, 2] {
+                received.extend(
+                    receiver
+                        .paths(afi, pb::TableType::AdjIn)
+                        .await
+                        .iter()
+                        .map(|path| received_rule(&receiver_client, path, afi)),
+                );
+            }
+            if contract::exact_inventory(&received, &remote).is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("same-client replay reaches the peer after process restart");
+    contract::wait_inventory(&receiver_client, &local)
+        .await
+        .unwrap();
 }
