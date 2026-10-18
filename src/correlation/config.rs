@@ -754,10 +754,6 @@ timers:
   min_ttl_seconds: 30
   max_ttl_seconds: 1800
   reconciliation_interval_seconds: 30
-escalation:
-  enabled: true
-  min_persistence_seconds: 120
-  min_confidence: 0.7
 storage:
   connection_string: "postgres://user:pass@localhost/prefixd"
 observability:

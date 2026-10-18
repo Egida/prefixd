@@ -218,25 +218,6 @@ impl Playbooks {
     pub fn get_initial_step<'a>(&self, playbook: &'a Playbook) -> Option<&'a PlaybookStep> {
         playbook.steps.first()
     }
-
-    pub fn get_escalation_step<'a>(
-        &self,
-        playbook: &'a Playbook,
-        confidence: Option<f64>,
-        persistence_seconds: u32,
-    ) -> Option<&'a PlaybookStep> {
-        playbook.steps.iter().skip(1).find(move |step| {
-            let confidence_ok = step
-                .require_confidence_at_least
-                .map(|min| confidence.unwrap_or(0.0) >= min)
-                .unwrap_or(true);
-            let persistence_ok = step
-                .require_persistence_seconds
-                .map(|min| persistence_seconds >= min)
-                .unwrap_or(true);
-            confidence_ok && persistence_ok
-        })
-    }
 }
 
 #[cfg(test)]

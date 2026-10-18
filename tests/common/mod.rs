@@ -13,10 +13,10 @@ use prefixd::AppState;
 use prefixd::auth::create_auth_layer;
 use prefixd::bgp::{GoBgpAnnouncer, MockAnnouncer};
 use prefixd::config::{
-    AllowedPorts, Asset, AuthConfig, AuthMode, BgpConfig, BgpMode, Customer, EscalationConfig,
-    GuardrailsConfig, HttpConfig, Inventory, ObservabilityConfig, OperationMode, Playbook,
-    PlaybookAction, PlaybookMatch, PlaybookStep, Playbooks, QuotasConfig, RateLimitConfig,
-    SafelistConfig, Service, Settings, ShutdownConfig, StorageConfig, TimersConfig,
+    AllowedPorts, Asset, AuthConfig, AuthMode, BgpConfig, BgpMode, Customer, GuardrailsConfig,
+    HttpConfig, Inventory, ObservabilityConfig, OperationMode, Playbook, PlaybookAction,
+    PlaybookMatch, PlaybookStep, Playbooks, QuotasConfig, RateLimitConfig, SafelistConfig, Service,
+    Settings, ShutdownConfig, StorageConfig, TimersConfig,
 };
 use prefixd::correlation::{CorrelationConfig, SourceConfig};
 use prefixd::db::{Repository, RepositoryTrait, init_postgres_pool};
@@ -166,8 +166,6 @@ pub fn test_settings() -> Settings {
             auth: AuthConfig {
                 mode: AuthMode::None,
                 bearer_token_env: None,
-                ldap: None,
-                radius: None,
             },
             rate_limit: RateLimitConfig::default(),
             tls: None,
@@ -208,12 +206,6 @@ pub fn test_settings() -> Settings {
             max_ttl_seconds: 1800,
             reconciliation_interval_seconds: 30,
             quiet_period_after_withdraw_seconds: 120,
-        },
-        escalation: EscalationConfig {
-            enabled: true,
-            min_persistence_seconds: 120,
-            min_confidence: 0.7,
-            max_escalated_duration_seconds: 1800,
         },
         storage: StorageConfig {
             connection_string: String::new(), // Will be set by TestContext

@@ -267,7 +267,6 @@ async fn shutdown_signal(state: Arc<AppState>) {
     tracing::info!(
         drain_timeout_seconds = drain_timeout,
         active_mitigations = active,
-        preserve_announcements = state.settings.shutdown.preserve_announcements,
         "shutdown signal received, beginning graceful shutdown"
     );
 

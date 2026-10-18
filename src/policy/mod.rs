@@ -1,7 +1,3 @@
-mod escalation;
-
-pub use escalation::*;
-
 use std::net::IpAddr;
 
 use crate::config::{AllowedPorts, IpContext, Playbooks};
