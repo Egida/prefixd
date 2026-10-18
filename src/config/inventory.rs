@@ -89,7 +89,7 @@ impl Inventory {
 
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let mut inventory: Inventory = serde_yaml::from_str(&content)?;
+        let mut inventory: Inventory = crate::config::parse_yaml(&content)?;
         inventory.build_index();
         Ok(inventory)
     }

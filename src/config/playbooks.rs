@@ -53,7 +53,7 @@ pub enum PlaybookAction {
 impl Playbooks {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let playbooks: Playbooks = serde_yaml::from_str(&content)?;
+        let playbooks: Playbooks = crate::config::parse_yaml(&content)?;
         Ok(playbooks)
     }
 
@@ -167,7 +167,7 @@ impl Playbooks {
             std::fs::copy(path, &bak)?;
         }
 
-        let yaml = serde_yaml::to_string(self)?;
+        let yaml = serde_saphyr::to_string(self)?;
         let mut tmp_file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -385,7 +385,7 @@ playbooks:
         rate_bps: 5000000
         ttl_seconds: 120
 "#;
-        let playbooks: Playbooks = serde_yaml::from_str(yaml).unwrap();
+        let playbooks: Playbooks = crate::config::parse_yaml(yaml).unwrap();
         assert!(playbooks.playbooks[0].correlation.is_none());
     }
 
@@ -404,7 +404,7 @@ playbooks:
         rate_bps: 5000000
         ttl_seconds: 120
 "#;
-        let playbooks: Playbooks = serde_yaml::from_str(yaml).unwrap();
+        let playbooks: Playbooks = crate::config::parse_yaml(yaml).unwrap();
         let corr = playbooks.playbooks[0].correlation.as_ref().unwrap();
         assert_eq!(corr.min_sources, Some(2));
         assert_eq!(corr.confidence_threshold, Some(0.7));
@@ -423,7 +423,7 @@ playbooks:
       - action: discard
         ttl_seconds: 300
 "#;
-        let playbooks: Playbooks = serde_yaml::from_str(yaml).unwrap();
+        let playbooks: Playbooks = crate::config::parse_yaml(yaml).unwrap();
         let corr = playbooks.playbooks[0].correlation.as_ref().unwrap();
         assert_eq!(corr.min_sources, Some(3));
         assert_eq!(corr.confidence_threshold, None);

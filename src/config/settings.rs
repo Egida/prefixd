@@ -459,7 +459,7 @@ fn default_drain_timeout() -> u32 {
 impl Settings {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let settings: Settings = serde_yaml::from_str(&content)?;
+        let settings: Settings = crate::config::parse_yaml(&content)?;
         settings.http.validate_auth_transport()?;
         let correlation_errors = settings.correlation.validate();
         if !correlation_errors.is_empty() {
@@ -484,7 +484,8 @@ mod tests {
             ("backend: rustbgpd\n", BgpMode::Rustbgpd),
             ("backend: gobgp\n", BgpMode::Gobgp),
         ] {
-            let config: BgpConfig = serde_yaml::from_str(&format!("{base}{selector}")).unwrap();
+            let config: BgpConfig =
+                crate::config::parse_yaml(&format!("{base}{selector}")).unwrap();
             assert_eq!(config.mode, expected);
             assert_eq!(
                 serde_json::to_value(&config).unwrap()["mode"],
@@ -501,7 +502,7 @@ mod tests {
             "backend: rustbgpd\nmode: rustbgpd\n",
             "backend: exabgp\n",
         ] {
-            assert!(serde_yaml::from_str::<BgpConfig>(&format!("{base}{selector}")).is_err());
+            assert!(crate::config::parse_yaml::<BgpConfig>(&format!("{base}{selector}")).is_err());
         }
     }
 
@@ -521,7 +522,7 @@ mod tests {
                 BgpMode::Gobgp,
             ),
         ] {
-            let settings: Settings = serde_yaml::from_str(yaml).unwrap();
+            let settings: Settings = crate::config::parse_yaml(yaml).unwrap();
             assert_eq!(settings.bgp.mode, expected);
             assert_eq!(settings.http.auth.mode, AuthMode::Credentials);
         }
@@ -572,7 +573,7 @@ observability:
 
     #[test]
     fn test_settings_without_correlation_defaults_to_disabled() {
-        let settings: Settings = serde_yaml::from_str(MINIMAL_SETTINGS_YAML).unwrap();
+        let settings: Settings = crate::config::parse_yaml(MINIMAL_SETTINGS_YAML).unwrap();
         assert!(!settings.correlation.enabled);
         assert_eq!(settings.correlation.window_seconds, 300);
         assert_eq!(settings.correlation.min_sources, 1);
@@ -602,7 +603,7 @@ correlation:
       type: telemetry
 "#
         );
-        let settings: Settings = serde_yaml::from_str(&yaml).unwrap();
+        let settings: Settings = crate::config::parse_yaml(&yaml).unwrap();
         assert!(settings.correlation.enabled);
         assert_eq!(settings.correlation.window_seconds, 600);
         assert_eq!(settings.correlation.min_sources, 2);
@@ -625,7 +626,7 @@ correlation:
 correlation: {}
 "#
         );
-        let settings: Settings = serde_yaml::from_str(&yaml).unwrap();
+        let settings: Settings = crate::config::parse_yaml(&yaml).unwrap();
         // Empty section should still use defaults
         assert!(!settings.correlation.enabled);
         assert_eq!(settings.correlation.window_seconds, 300);

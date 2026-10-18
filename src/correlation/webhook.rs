@@ -1229,11 +1229,11 @@ mod tests {
                 scale: 2.0,
             },
         );
-        let yaml = serde_yaml::to_string(&adapter).unwrap();
+        let yaml = serde_saphyr::to_string(&adapter).unwrap();
         assert!(yaml.contains("unit_conversion"));
         assert!(yaml.contains("regex_extract"));
         assert!(yaml.contains("computed"));
-        let parsed: WebhookAdapter = serde_yaml::from_str(&yaml).unwrap();
+        let parsed: WebhookAdapter = crate::config::parse_yaml(&yaml).unwrap();
         assert_eq!(parsed.transforms.len(), 3);
         // Sanity-check one round-tripped value.
         match parsed.transforms.get("bps").unwrap() {

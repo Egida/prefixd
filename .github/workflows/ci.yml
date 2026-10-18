@@ -46,7 +46,7 @@ jobs:
         run: cargo test --locked --all-features
 
   msrv:
-    name: MSRV (1.88.0)
+    name: MSRV (1.89.0)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -55,27 +55,27 @@ jobs:
       - uses: actions/checkout@v7
       - name: Install protobuf compiler
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-      - name: Install Rust 1.88.0
-        uses: dtolnay/rust-toolchain@1.88.0
+      - name: Install Rust 1.89.0
+        uses: dtolnay/rust-toolchain@1.89.0
       - name: Record compiler versions
         run: |
-          rustc +1.88.0 --version --verbose
-          cargo +1.88.0 --version
+          rustc +1.89.0 --version --verbose
+          cargo +1.89.0 --version
       - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-msrv-1.88.0-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-msrv-1.89.0-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-msrv-1.88.0-
+            ${{ runner.os }}-cargo-msrv-1.89.0-
       - name: Check production binaries with rustbgpd
-        run: cargo +1.88.0 check --locked --bins --features bgp-rustbgpd
+        run: cargo +1.89.0 check --locked --bins --features bgp-rustbgpd
       - name: Check all targets and features
-        run: cargo +1.88.0 check --locked --all-targets --all-features
+        run: cargo +1.89.0 check --locked --all-targets --all-features
       - name: Check no-default-feature binaries
-        run: cargo +1.88.0 check --locked --no-default-features --bins
+        run: cargo +1.89.0 check --locked --no-default-features --bins
 
   gobgp:
     name: GoBGP (4.10.0)

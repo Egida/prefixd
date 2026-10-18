@@ -5716,6 +5716,144 @@ async fn test_update_correlation_config_validation_error() {
     assert!(errors.len() >= 3, "should have multiple validation errors");
 }
 
+async fn correlation_config_request(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> (StatusCode, serde_json::Value) {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_owned()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let json = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (status, json)
+}
+
+#[tokio::test]
+async fn test_correlation_non_finite_json_edit_preserves_config() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = setup_app_with_config_dir(directory.path().to_path_buf()).await;
+    let (status, _) = correlation_config_request(
+        &app,
+        "PUT",
+        "/v1/config/correlation",
+        r#"{"confidence_threshold":0.75,"default_weight":2.0}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, original) = correlation_config_request(&app, "GET", "/v1/config/correlation", "").await;
+    let path = directory.path().join("correlation.yaml");
+    let original_bytes = std::fs::read(&path).unwrap();
+    for payload in [
+        r#"{"confidence_threshold":1e100}"#,
+        r#"{"default_weight":1e100}"#,
+        r#"{"sources":{"detector":{"weight":1e100}}}"#,
+    ] {
+        let (status, rejection) =
+            correlation_config_request(&app, "PUT", "/v1/config/correlation", payload).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "accepted overflow payload: {payload}"
+        );
+        assert!(
+            rejection["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|error| error.as_str().unwrap().contains("finite"))
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        assert!(
+            !path.with_extension("yaml.bak").exists(),
+            "rejected edits must not reach save"
+        );
+        let (status, current) =
+            correlation_config_request(&app, "GET", "/v1/config/correlation", "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            current, original,
+            "rejected edit changed config or loaded_at"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_correlation_non_finite_yaml_reload_preserves_config() {
+    let directory = tempfile::tempdir().unwrap();
+    let app = setup_app_with_config_dir(directory.path().to_path_buf()).await;
+    let (status, _) = correlation_config_request(
+        &app,
+        "PUT",
+        "/v1/config/correlation",
+        r#"{"confidence_threshold":0.75,"default_weight":2.0}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, original) = correlation_config_request(&app, "GET", "/v1/config/correlation", "").await;
+    let standalone = directory.path().join("correlation.yaml");
+    for inline in [false, true] {
+        if inline {
+            std::fs::remove_file(&standalone).unwrap();
+        }
+        for value in [".nan", ".inf", "-.inf"] {
+            for yaml in [
+                format!("confidence_threshold: {value}\n"),
+                format!("default_weight: {value}\n"),
+                format!("sources:\n  detector:\n    weight: {value}\n"),
+            ] {
+                let (path, content) = if inline {
+                    let mut settings = test_settings();
+                    settings.correlation = serde_saphyr::from_str(&yaml).unwrap();
+                    (
+                        directory.path().join("prefixd.yaml"),
+                        serde_saphyr::to_string(&settings).unwrap(),
+                    )
+                } else {
+                    (standalone.clone(), yaml)
+                };
+                std::fs::write(&path, &content).unwrap();
+                let (status, _) =
+                    correlation_config_request(&app, "POST", "/v1/config/reload", "").await;
+                assert_eq!(
+                    status,
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "accepted invalid reload: inline={inline}, value={value}"
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&path).unwrap(),
+                    content,
+                    "reload must not rewrite the supplied file"
+                );
+                let (status, current) =
+                    correlation_config_request(&app, "GET", "/v1/config/correlation", "").await;
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(
+                    current, original,
+                    "invalid reload changed config or loaded_at"
+                );
+            }
+        }
+    }
+}
+
 /// VAL-ADAPT-016: POST /v1/config/reload refreshes correlation config from YAML
 #[tokio::test]
 async fn test_reload_picks_up_correlation_config() {
