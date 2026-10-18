@@ -422,6 +422,8 @@ pub struct CreateMitigationRequest {
     #[serde(default)]
     dst_ports: Vec<u16>,
     action: String,
+    /// Positive bit rate exactly representable as an f32 bytes/second traffic rate for police.
+    /// Must be omitted or null for discard.
     #[serde(default)]
     rate_bps: Option<u64>,
     ttl_seconds: u32,
@@ -754,12 +756,24 @@ async fn handle_ban(
         state.settings.timers.default_ttl_seconds,
     );
     let candidate_intent = match policy.evaluate(&event, context.as_ref()) {
-        Err(error @ PrefixdError::GuardrailViolation(GuardrailError::NoAllowedPorts)) => {
+        Err(
+            error @ PrefixdError::GuardrailViolation(
+                GuardrailError::NoAllowedPorts | GuardrailError::InvalidAction(_),
+            ),
+        ) => {
             crate::observability::metrics::EVENTS_REJECTED
                 .with_label_values(&[event.source.as_str(), "guardrail"])
                 .inc();
+            let reason = if matches!(
+                &error,
+                PrefixdError::GuardrailViolation(GuardrailError::NoAllowedPorts)
+            ) {
+                "NoAllowedPorts"
+            } else {
+                "InvalidAction"
+            };
             crate::observability::metrics::GUARDRAIL_REJECTIONS
-                .with_label_values(&["NoAllowedPorts"])
+                .with_label_values(&[reason])
                 .inc();
             tracing::warn!(error = %error, "policy rejected mitigation");
             return Err(AppError(error));
@@ -781,6 +795,15 @@ async fn handle_ban(
         )
         .await
         .map_err(AppError)?;
+        if let Some(owner) = &existing_owner {
+            FlowSpecAction::from((owner.action_type, &owner.action_params))
+                .traffic_rate_bytes_per_second()
+                .map_err(|error| {
+                    AppError(PrefixdError::GuardrailViolation(
+                        GuardrailError::InvalidAction(error),
+                    ))
+                })?;
+        }
     }
 
     // Store event
@@ -1566,7 +1589,7 @@ pub async fn get_mitigation(
     responses(
         (status = 201, description = "Mitigation intent created", body = MitigationResponse),
         (status = 202, description = "Intent created; announcement unconfirmed for this request", body = MitigationResponse),
-        (status = 400, description = "Invalid input, including a protocol/address-family mismatch"),
+        (status = 400, description = "Invalid input, including an unsupported action/rate or protocol/address-family mismatch"),
         (status = 409, description = "Conflicting owner or pending withdrawal"),
         (status = 422, description = "Guardrail rejection"),
     )
@@ -1624,16 +1647,7 @@ pub async fn create_mitigation(
 
     // Validate action type
     let action_type = match req.action.as_str() {
-        "police" => {
-            // Police action requires rate_bps
-            if req.rate_bps.is_none() {
-                return Ok(AppError(PrefixdError::InvalidRequest(
-                    "action 'police' requires rate_bps".to_string(),
-                ))
-                .into_response());
-            }
-            ActionType::Police
-        }
+        "police" => ActionType::Police,
         "discard" => ActionType::Discard,
         _ => {
             return Ok(AppError(PrefixdError::InvalidRequest(format!(
@@ -1643,6 +1657,15 @@ pub async fn create_mitigation(
             .into_response());
         }
     };
+
+    if let Err(error) = (FlowSpecAction {
+        action_type,
+        rate_bps: req.rate_bps,
+    })
+    .traffic_rate_bytes_per_second()
+    {
+        return Ok(AppError(PrefixdError::InvalidRequest(error.to_string())).into_response());
+    }
 
     let inventory = state.inventory.read().await;
     let customer_id = inventory.lookup_ip(&req.victim_ip).map(|c| c.customer_id);

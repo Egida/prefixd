@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Preserve exact policing rates through both speaker encoders, including 1–7 bps
+  instead of turning them into discard. Reject missing, zero or inexact police
+  rates and rates on discard before saving or extending intent, and when loading
+  or editing playbooks. Keep historical malformed actions withdrawable by their
+  exact local match.
+
 - Reject `http.auth.mode: mtls` without native TLS and nonempty server certificate,
   key and client-CA paths before database, speaker or listener startup. Programmatic
   application-state construction enforces the same validation. Configure all three

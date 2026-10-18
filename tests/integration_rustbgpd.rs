@@ -45,6 +45,14 @@ async fn live_rustbgpd_controller_roundtrip() {
 
 #[tokio::test]
 #[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
+async fn faithful_policing_and_historical_action_withdrawal() {
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    contract::run_action_contract(&speaker).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
 async fn live_rustbgpd_ttl_reconciliation() {
     use prefixd::{
         db::{MockRepository, RepositoryTrait},

@@ -80,6 +80,9 @@ pub enum PrefixdError {
 
 #[derive(Error, Debug, Clone)]
 pub enum GuardrailError {
+    #[error("invalid FlowSpec action: {0}")]
+    InvalidAction(#[source] crate::domain::FlowSpecActionError),
+
     #[error("TTL required but not provided")]
     TtlRequired,
 

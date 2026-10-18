@@ -17,7 +17,9 @@ use super::apipb::{attribute, extended_community, flow_spec_rule, nlri};
 use super::{
     FlowSpecAnnouncer, FlowSpecReader, FlowSpecWriter, PeerObserver, PeerStatus, SessionState,
 };
-use crate::domain::{ActionType, FlowSpecAction, FlowSpecNlri, FlowSpecRule, IpVersion};
+#[cfg(test)]
+use crate::domain::ActionType;
+use crate::domain::{FlowSpecAction, FlowSpecNlri, FlowSpecRule, IpVersion};
 use crate::error::{PrefixdError, Result};
 
 const AFI_IP: i32 = 1;
@@ -178,6 +180,27 @@ impl GoBgpAnnouncer {
         })
     }
 
+    fn build_flowspec_withdraw_path(&self, nlri: &FlowSpecNlri) -> Result<Path> {
+        let is_v6 = nlri.ip_version() == IpVersion::V6;
+        let flowspec = if is_v6 {
+            self.build_flowspec_nlri_v6(nlri)?
+        } else {
+            self.build_flowspec_nlri_v4(nlri)?
+        };
+        // Delete the specified local match even if its historical action is invalid.
+        Ok(Path {
+            nlri: Some(Nlri {
+                nlri: Some(nlri::Nlri::FlowSpec(flowspec)),
+            }),
+            family: Some(Family {
+                afi: if is_v6 { AFI_IP6 } else { AFI_IP },
+                safi: SAFI_FLOWSPEC,
+            }),
+            is_withdraw: true,
+            ..Default::default()
+        })
+    }
+
     fn build_flowspec_nlri_v4(&self, nlri: &FlowSpecNlri) -> Result<ProtoFlowSpecNlri> {
         let (prefix_u32, prefix_len) = self.parse_prefix_v4(&nlri.dst_prefix)?;
 
@@ -307,6 +330,14 @@ impl GoBgpAnnouncer {
     }
 
     fn build_path_attributes(&self, actions: &[FlowSpecAction]) -> Result<Vec<Attribute>> {
+        let [action] = actions else {
+            return Err(PrefixdError::BgpAnnouncementFailed(
+                "exactly one traffic rate action is required".into(),
+            ));
+        };
+        let rate = action
+            .traffic_rate_bytes_per_second()
+            .map_err(|error| PrefixdError::BgpAnnouncementFailed(error.to_string()))?;
         let mut pattrs = Vec::new();
 
         // Origin attribute (IGP)
@@ -315,40 +346,16 @@ impl GoBgpAnnouncer {
             attr: Some(attribute::Attr::Origin(origin)),
         });
 
-        // Extended communities for FlowSpec actions
-        let mut communities: Vec<ExtendedCommunity> = Vec::new();
-
-        for action in actions {
-            match action.action_type {
-                ActionType::Discard => {
-                    // Traffic-rate 0 = discard
-                    let traffic_rate = TrafficRateExtended { asn: 0, rate: 0.0 };
-                    communities.push(ExtendedCommunity {
-                        extcom: Some(extended_community::Extcom::TrafficRate(traffic_rate)),
-                    });
-                }
-                ActionType::Police => {
-                    if let Some(rate_bps) = action.rate_bps {
-                        // Convert bps to bytes/sec for traffic-rate
-                        let rate_bytes = (rate_bps / 8) as f32;
-                        let traffic_rate = TrafficRateExtended {
-                            asn: 0,
-                            rate: rate_bytes,
-                        };
-                        communities.push(ExtendedCommunity {
-                            extcom: Some(extended_community::Extcom::TrafficRate(traffic_rate)),
-                        });
-                    }
-                }
-            }
-        }
-
-        if !communities.is_empty() {
-            let ext_comm = ExtendedCommunitiesAttribute { communities };
-            pattrs.push(Attribute {
-                attr: Some(attribute::Attr::ExtendedCommunities(ext_comm)),
-            });
-        }
+        let communities = vec![ExtendedCommunity {
+            extcom: Some(extended_community::Extcom::TrafficRate(
+                TrafficRateExtended { asn: 0, rate },
+            )),
+        }];
+        pattrs.push(Attribute {
+            attr: Some(attribute::Attr::ExtendedCommunities(
+                ExtendedCommunitiesAttribute { communities },
+            )),
+        });
 
         Ok(pattrs)
     }
@@ -425,7 +432,7 @@ impl FlowSpecWriter for GoBgpAnnouncer {
         Ok(())
     }
     async fn withdraw(&self, rule: &FlowSpecRule) -> Result<()> {
-        let path = self.build_flowspec_path(rule)?;
+        let path = self.build_flowspec_withdraw_path(&rule.nlri)?;
         let is_v6 = rule.nlri.ip_version() == IpVersion::V6;
         let afi = if is_v6 { AFI_IP6 } else { AFI_IP };
         let nlri_hash = rule.nlri_hash();
@@ -1033,11 +1040,49 @@ mod tests {
 
         let actions: Vec<FlowSpecAction> = vec![];
         let result = announcer.build_path_attributes(&actions);
-        assert!(result.is_ok());
+        assert!(result.is_err());
+    }
 
-        // Should still have origin attribute
-        let pattrs = result.unwrap();
-        assert!(!pattrs.is_empty());
+    #[test]
+    fn action_boundaries_preserve_exact_rates_in_both_families() {
+        let announcer = make_announcer();
+        for prefix in ["192.0.2.1/32", "2001:db8::1/128"] {
+            let mut rule = FlowSpecRule::new(
+                FlowSpecNlri {
+                    dst_prefix: prefix.into(),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                },
+                FlowSpecAction::discard(),
+            );
+            for action in std::iter::once(FlowSpecAction::discard()).chain(
+                [1, 7, 8, 9, 16_777_216, 16_777_218, 1_000_000_000].map(FlowSpecAction::police),
+            ) {
+                rule.actions = vec![action.clone()];
+                let path = announcer.build_flowspec_path(&rule).unwrap();
+                let parsed = announcer.parse_flowspec_path(&path).unwrap();
+                assert_eq!(parsed.actions[0].action_type, action.action_type);
+                assert_eq!(parsed.actions[0].rate_bps, action.rate_bps);
+            }
+            for actions in [
+                vec![],
+                vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
+                vec![FlowSpecAction {
+                    action_type: ActionType::Police,
+                    rate_bps: None,
+                }],
+                vec![FlowSpecAction::police(0)],
+                vec![FlowSpecAction::police(16_777_217)],
+                vec![FlowSpecAction::police(u64::MAX)],
+                vec![FlowSpecAction {
+                    action_type: ActionType::Discard,
+                    rate_bps: Some(8),
+                }],
+            ] {
+                rule.actions = actions;
+                assert!(announcer.build_flowspec_path(&rule).is_err());
+            }
+        }
     }
 
     // ==========================================================================
@@ -1333,9 +1378,9 @@ mod proptests {
                 action_type: ActionType::Discard,
                 rate_bps: None,
             }),
-            (1u64..=100_000_000_000).prop_map(|rate| FlowSpecAction {
+            (1u64..=0xff_ffff, 0u32..=40).prop_map(|(significand, shift)| FlowSpecAction {
                 action_type: ActionType::Police,
-                rate_bps: Some(rate),
+                rate_bps: Some(significand << shift),
             }),
         ]
     }
@@ -1424,15 +1469,26 @@ mod proptests {
         // ---- Action roundtrip ----
 
         #[test]
-        fn action_roundtrip_preserves_type(action in flowspec_action()) {
+        fn action_roundtrip_preserves_exact_rate(action in flowspec_action()) {
             let announcer = make_announcer();
             let pattrs = announcer.build_path_attributes(std::slice::from_ref(&action)).unwrap();
             let parsed = announcer.parse_flowspec_action(&pattrs).unwrap();
 
             prop_assert_eq!(parsed.action_type, action.action_type);
-            match action.action_type {
-                ActionType::Discard => prop_assert_eq!(parsed.rate_bps, None),
-                ActionType::Police => prop_assert!(parsed.rate_bps.is_some()),
+            prop_assert_eq!(parsed.rate_bps, action.rate_bps);
+        }
+
+        #[test]
+        fn arbitrary_police_rates_roundtrip_exactly_or_are_rejected(bps in any::<u64>()) {
+            let announcer = make_announcer();
+            let attributes = announcer.build_path_attributes(&[FlowSpecAction::police(bps)]);
+            // An IEEE f32 has 24 significant binary digits; scaling by eight is exact.
+            let representable = bps != 0 && u64::BITS - bps.leading_zeros() - bps.trailing_zeros() <= 24;
+            prop_assert_eq!(attributes.is_ok(), representable);
+            if let Ok(attributes) = attributes {
+                let action = announcer.parse_flowspec_action(&attributes).unwrap();
+                prop_assert_eq!(action.action_type, ActionType::Police);
+                prop_assert_eq!(action.rate_bps, Some(bps));
             }
         }
     }
