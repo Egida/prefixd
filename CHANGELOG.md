@@ -144,6 +144,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject malformed or empty supplied date filters on event, audit, mitigation and
+  signal-group listings, and every invalid mitigation/signal-group status token.
+  Return structured `400` errors before listing instead of silently dropping filters.
+
 - Avoid overflow when classifying FastNetMon SYN percentages from large valid
   integer counters, preserving the existing integer threshold and protocol rules.
 
