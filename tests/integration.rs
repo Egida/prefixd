@@ -13416,6 +13416,273 @@ mod query_router_validator_boundaries {
     }
 
     #[tokio::test]
+    async fn playbook_name_and_ttl_edit_boundaries_preserve_rejected_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = setup_app_with_config_dir(directory.path().to_path_buf()).await;
+        let uri = "/v1/config/playbooks";
+        let path = directory.path().join("playbooks.yaml");
+        let initial = serde_json::to_string(&test_playbooks()).unwrap();
+        let (status, _) = correlation_config_request(&app, "PUT", uri, &initial).await;
+        assert_eq!(status, StatusCode::OK);
+
+        for (name, ttl, error_field) in [
+            ("a".repeat(128), 120, None),
+            ("é".repeat(64), 120, None),
+            ("a".repeat(129), 120, Some("name exceeds 128 bytes")),
+            (
+                format!("{}a", "é".repeat(64)),
+                120,
+                Some("name exceeds 128 bytes"),
+            ),
+            ("ttl-boundary".into(), 1, None),
+            ("ttl-boundary".into(), 86_400, None),
+            ("ttl-boundary".into(), 0, Some("ttl_seconds")),
+            ("ttl-boundary".into(), 86_401, Some("ttl_seconds")),
+        ] {
+            let before = get_json(&app, uri).await;
+            let before_bytes = std::fs::read(&path).unwrap();
+            let before_backup = std::fs::read(path.with_extension("yaml.bak")).ok();
+            let mut playbooks = test_playbooks();
+            playbooks.playbooks[0].name = name.clone();
+            playbooks.playbooks[0].steps[0].ttl_seconds = ttl;
+            let payload = serde_json::to_string(&playbooks).unwrap();
+            let (status, response) = correlation_config_request(&app, "PUT", uri, &payload).await;
+            let current = get_json(&app, uri).await;
+
+            if let Some(field) = error_field {
+                assert_eq!(status, StatusCode::BAD_REQUEST, "name={name:?}, ttl={ttl}");
+                assert!(
+                    response["errors"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|error| { error.as_str().unwrap().contains(field) }),
+                    "{response}"
+                );
+                assert_eq!(
+                    current, before,
+                    "rejection changed running config or loaded_at"
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+                assert_eq!(
+                    std::fs::read(path.with_extension("yaml.bak")).ok(),
+                    before_backup
+                );
+            } else {
+                assert_eq!(status, StatusCode::OK, "name={name:?}, ttl={ttl}");
+                assert_eq!(current, response);
+                assert_eq!(current["total_playbooks"], 1);
+                assert_eq!(current["playbooks"][0]["name"], name);
+                assert_eq!(current["playbooks"][0]["steps"][0]["ttl_seconds"], ttl);
+                let saved = Playbooks::load(&path).unwrap();
+                assert_eq!(
+                    serde_json::to_value(saved).unwrap(),
+                    serde_json::to_value(&playbooks).unwrap()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn correlation_adapter_name_edits_preserve_rejected_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let app = setup_app_with_config_dir(directory.path().to_path_buf()).await;
+        let uri = "/v1/config/correlation";
+        let path = directory.path().join("correlation.yaml");
+        let initial = prefixd::correlation::CorrelationConfig {
+            enabled: true,
+            webhook_adapters: vec![basic_webhook_adapter("original")],
+            ..Default::default()
+        };
+        let (status, _) =
+            correlation_config_request(&app, "PUT", uri, &serde_json::to_string(&initial).unwrap())
+                .await;
+        assert_eq!(status, StatusCode::OK);
+
+        for (names, error_fragment) in [
+            (vec!["a".to_owned(), "b".repeat(64)], None),
+            (
+                vec!["duplicate".into(), "duplicate".into()],
+                Some("duplicate name"),
+            ),
+            (vec![String::new()], Some("name must match")),
+            (vec!["Upper".into()], Some("name must match")),
+            (vec!["a".repeat(65)], Some("name must match")),
+        ] {
+            let before = get_json(&app, uri).await;
+            let before_bytes = std::fs::read(&path).unwrap();
+            let before_backup = std::fs::read(path.with_extension("yaml.bak")).ok();
+            let config = prefixd::correlation::CorrelationConfig {
+                webhook_adapters: names
+                    .iter()
+                    .map(|name| basic_webhook_adapter(name))
+                    .collect(),
+                ..initial.clone()
+            };
+            let (status, response) = correlation_config_request(
+                &app,
+                "PUT",
+                uri,
+                &serde_json::to_string(&config).unwrap(),
+            )
+            .await;
+            let current = get_json(&app, uri).await;
+
+            if let Some(fragment) = error_fragment {
+                assert_eq!(status, StatusCode::BAD_REQUEST, "names={names:?}");
+                assert!(
+                    response["errors"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|error| { error.as_str().unwrap().contains(fragment) }),
+                    "{response}"
+                );
+                assert_eq!(
+                    current, before,
+                    "rejection changed running config or loaded_at"
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+                assert_eq!(
+                    std::fs::read(path.with_extension("yaml.bak")).ok(),
+                    before_backup
+                );
+            } else {
+                assert_eq!(status, StatusCode::OK, "names={names:?}");
+                let running_names: Vec<_> = current["config"]["webhook_adapters"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|adapter| adapter["name"].as_str().unwrap().to_owned())
+                    .collect();
+                assert_eq!(running_names, names);
+                let saved = prefixd::correlation::CorrelationConfig::load(&path).unwrap();
+                assert_eq!(
+                    serde_json::to_value(saved).unwrap(),
+                    serde_json::to_value(&config).unwrap()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn alert_destination_byte_boundaries_preserve_rejected_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let repo: Arc<dyn RepositoryTrait> = Arc::new(MockRepository::new());
+        let state = AppState::new(
+            test_settings(),
+            test_inventory(),
+            test_playbooks(),
+            repo,
+            Arc::new(MockAnnouncer::new()),
+            directory.path().to_path_buf(),
+        )
+        .unwrap();
+        let app = create_test_router(state.clone());
+        let uri = "/v1/config/alerting";
+        let path = directory.path().join("alerting.yaml");
+        let initial = serde_json::json!({
+            "destinations": [{"type": "generic", "url": "https://example.com/initial"}],
+            "events": [],
+        });
+        let (status, _) = correlation_config_request(&app, "PUT", uri, &initial.to_string()).await;
+        assert_eq!(status, StatusCode::OK);
+
+        for (kind, field, maximum) in [
+            ("slack", "webhook_url", 1_024),
+            ("discord", "webhook_url", 1_024),
+            ("teams", "webhook_url", 1_024),
+            ("pagerduty", "events_url", 1_024),
+            ("generic", "url", 1_024),
+            ("telegram", "chat_id", 64),
+        ] {
+            for multibyte in [false, true] {
+                for extra in [0, 1] {
+                    let prefix = if kind == "telegram" {
+                        ""
+                    } else {
+                        "https://example.com/"
+                    };
+                    let padding_len = maximum - prefix.len();
+                    let padding = if multibyte {
+                        format!(
+                            "{}{}",
+                            "é".repeat(padding_len / 2),
+                            "a".repeat(padding_len % 2)
+                        )
+                    } else {
+                        "a".repeat(padding_len)
+                    };
+                    let value = format!("{prefix}{padding}{}", "a".repeat(extra));
+                    assert_eq!(value.len(), maximum + extra);
+                    let mut destination = serde_json::json!({"type": kind});
+                    destination[field] = serde_json::json!(value);
+                    match kind {
+                        "telegram" => {
+                            destination["bot_token"] = serde_json::json!("boundary-test-token")
+                        }
+                        "pagerduty" => {
+                            destination["routing_key"] = serde_json::json!("boundary-test-key")
+                        }
+                        _ => {}
+                    }
+                    let config: prefixd::alerting::AlertingConfig = serde_json::from_value(
+                        serde_json::json!({"destinations": [destination], "events": []}),
+                    )
+                    .unwrap();
+                    let expected = serde_json::to_value(&config).unwrap();
+                    let before = get_json(&app, uri).await;
+                    let before_running =
+                        serde_json::to_value(state.alerting.read().await.config()).unwrap();
+                    let before_loaded_at = *state.alerting_loaded_at.read().await;
+                    let before_bytes = std::fs::read(&path).unwrap();
+                    let before_backup = std::fs::read(path.with_extension("yaml.bak")).ok();
+                    let (status, response) =
+                        correlation_config_request(&app, "PUT", uri, &expected.to_string()).await;
+                    let current = get_json(&app, uri).await;
+                    let current_running =
+                        serde_json::to_value(state.alerting.read().await.config()).unwrap();
+
+                    if extra == 0 {
+                        assert_eq!(
+                            status,
+                            StatusCode::OK,
+                            "{kind}, multibyte={multibyte}: {response}"
+                        );
+                        assert_eq!(current, response);
+                        assert_eq!(current_running, expected);
+                        let saved = prefixd::alerting::AlertingConfig::load(&path).unwrap();
+                        assert_eq!(serde_json::to_value(saved).unwrap(), expected);
+                    } else {
+                        assert_eq!(
+                            status,
+                            StatusCode::BAD_REQUEST,
+                            "{kind}, multibyte={multibyte}"
+                        );
+                        let error_unit = format!("{field} exceeds {maximum} bytes");
+                        assert!(
+                            response["errors"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .any(|error| { error.as_str().unwrap().contains(&error_unit) }),
+                            "{response}"
+                        );
+                        assert_eq!(current, before);
+                        assert_eq!(current_running, before_running);
+                        assert_eq!(*state.alerting_loaded_at.read().await, before_loaded_at);
+                        assert_eq!(std::fs::read(&path).unwrap(), before_bytes);
+                        assert_eq!(
+                            std::fs::read(path.with_extension("yaml.bak")).ok(),
+                            before_backup
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn shared_router_body_limit_accepts_exact_mib_and_rejects_one_more() {
         let (app, repo) = setup_app_correlation_with_repo(1, 0.5).await;
         const LIMIT: usize = 1024 * 1024;

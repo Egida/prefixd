@@ -75,8 +75,8 @@ function validatePlaybooks(playbooks: ConfigPlaybook[]): string[] {
 
     if (!pb.name.trim()) {
       errors.push(`${ctx}: name is required`)
-    } else if (pb.name.length > 128) {
-      errors.push(`${ctx}: name exceeds 128 characters`)
+    } else if (new TextEncoder().encode(pb.name).length > 128) {
+      errors.push(`${ctx}: name exceeds 128 bytes`)
     } else if (names.has(pb.name)) {
       errors.push(`${ctx}: duplicate name`)
     }

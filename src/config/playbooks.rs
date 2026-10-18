@@ -99,7 +99,7 @@ impl Playbooks {
             if pb.name.is_empty() {
                 errors.push(format!("{}: name is required", ctx));
             } else if pb.name.len() > 128 {
-                errors.push(format!("{}: name exceeds 128 characters", ctx));
+                errors.push(format!("{}: name exceeds 128 bytes", ctx));
             } else if !names.insert(&pb.name) {
                 errors.push(format!("{}: duplicate name", ctx));
             }
