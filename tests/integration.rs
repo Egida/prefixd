@@ -5820,11 +5820,11 @@ async fn test_correlation_non_finite_yaml_reload_preserves_config() {
                 format!("sources:\n  detector:\n    weight: {value}\n"),
             ] {
                 let (path, content) = if inline {
-                    let mut settings = serde_yaml::to_value(test_settings()).unwrap();
-                    settings["correlation"] = serde_yaml::from_str(&yaml).unwrap();
+                    let mut settings = test_settings();
+                    settings.correlation = serde_saphyr::from_str(&yaml).unwrap();
                     (
                         directory.path().join("prefixd.yaml"),
-                        serde_yaml::to_string(&settings).unwrap(),
+                        serde_saphyr::to_string(&settings).unwrap(),
                     )
                 } else {
                     (standalone.clone(), yaml)

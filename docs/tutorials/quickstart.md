@@ -39,7 +39,7 @@ docker compose --profile rustbgpd up -d --pull missing --no-build
 ```
 
 The controller Dockerfile pins Rust 1.99.1 on Debian trixie by image digest.
-This records the container build toolchain. Native builds require Rust 1.88 or
+This records the container build toolchain. Native builds require Rust 1.89 or
 later; see [contributing](../../CONTRIBUTING.md) for the locked compiler checks.
 Cargo builds use three jobs by default.
 

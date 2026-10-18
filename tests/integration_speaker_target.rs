@@ -585,7 +585,7 @@ async fn bound_lifecycle_is_scoped_to_each_pop_and_reload_does_not_retarget() {
     common::write_yaml(
         config_dir.path(),
         "prefixd.yaml",
-        &serde_yaml::to_string(&edited).unwrap(),
+        &serde_saphyr::to_string(&edited).unwrap(),
     );
     a_state.reload_config().await.unwrap();
     assert_eq!(a_state.settings.pop, "pop-a");
@@ -1048,17 +1048,17 @@ async fn adoption_process_exits_before_factory_connection_and_mismatch_never_con
     common::write_yaml(
         directory.path(),
         "prefixd.yaml",
-        &serde_yaml::to_string(&config).unwrap(),
+        &serde_saphyr::to_string(&config).unwrap(),
     );
     common::write_yaml(
         directory.path(),
         "inventory.yaml",
-        &serde_yaml::to_string(&common::test_inventory()).unwrap(),
+        &serde_saphyr::to_string(&common::test_inventory()).unwrap(),
     );
     common::write_yaml(
         directory.path(),
         "playbooks.yaml",
-        &serde_yaml::to_string(&common::test_playbooks()).unwrap(),
+        &serde_saphyr::to_string(&common::test_playbooks()).unwrap(),
     );
     let command = || {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixd"));
@@ -1141,7 +1141,7 @@ async fn adoption_process_exits_before_factory_connection_and_mismatch_never_con
     common::write_yaml(
         directory.path(),
         "prefixd.yaml",
-        &serde_yaml::to_string(&config).unwrap(),
+        &serde_saphyr::to_string(&config).unwrap(),
     );
     for adopt in [false, true] {
         let mut cmd = command();

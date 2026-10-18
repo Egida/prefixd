@@ -58,7 +58,8 @@ mod tests {
     #[tokio::test]
     async fn factory_selects_mock_and_rejects_unavailable_backends() {
         let mut config: crate::config::BgpConfig =
-            serde_yaml::from_str("mode: mock\nlocal_asn: 65010\nrouter_id: 192.0.2.1").unwrap();
+            crate::config::parse_yaml("mode: mock\nlocal_asn: 65010\nrouter_id: 192.0.2.1")
+                .unwrap();
         assert!(
             speaker_factory(&config)
                 .await

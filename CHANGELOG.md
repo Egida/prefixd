@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Hide interactive operator-password entry in `prefixdctl` and restore terminal
   echo after input. Fail explicitly when a controlling terminal is unavailable.
-- Refresh the October audit baseline: `rustls` 0.23.46, `quinn-proto` 0.11.18, `h2` 0.4.19 and non-yanked `chacha20` 0.10.2 address current lockfile findings. Patch both `rand` branches to 0.8.6/0.9.3 and remove the now-obsolete RUSTSEC-2026-0097 exception. The only remaining vulnerability exception is `rsa` (RUSTSEC-2023-0071), present through sqlx's optional, uncompiled MySQL driver with no patched release. The unmaintained YAML dependency warning remains visible and tracked separately.
+- Refresh the October audit baseline: `rustls` 0.23.46, `quinn-proto` 0.11.18, `h2` 0.4.19 and non-yanked `chacha20` 0.10.2 address current lockfile findings. Patch both `rand` branches to 0.8.6/0.9.3 and remove the now-obsolete RUSTSEC-2026-0097 exception. The only remaining vulnerability exception is `rsa` (RUSTSEC-2023-0071), present through sqlx's optional, uncompiled MySQL driver with no patched release. The maintained YAML replacement below removes the former YAML maintenance warning.
 - Replace unmaintained `rustls-pemfile` with `rustls-pki-types` for certificate, CA and private-key loading; remove its audit exception while preserving mandatory mTLS client verification.
 - Set the Next.js manifest floor to 16.3.8 (lock resolves 16.4.2), the Undici floor to 7.29.1 (lock resolves 7.30.1), and affected frontend transitive dependencies including sharp, source-map-js, js-yaml, Vitest and nanoid. `bun audit` reports no vulnerabilities.
 
@@ -80,10 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type check.
 - Update the playbook YAML editor to js-yaml 5 with bundled TypeScript declarations
   while preserving YAML merge keys.
+- Replace unmaintained backend YAML parsing with `serde-saphyr` 2.0.0 and require Rust 1.89. Keep strict booleans, unexpanded merge keys and snippet-free parse errors; reject duplicate map entries that the previous parser could silently replace.
 
 - Remove unused dashboard UI scaffolding and its 23 exclusive direct dependencies.
 
-- Declare Rust 1.88 as the minimum compiler and add locked Linux CI checks for
+- Declare Rust 1.89 as the minimum compiler and add locked Linux CI checks for
   production binaries with rustbgpd, all targets/features and no-default-feature
   binaries. Current stable tests and lints remain required.
 

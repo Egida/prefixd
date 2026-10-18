@@ -4,6 +4,13 @@ prefixd uses three YAML configuration files in the config directory.
 
 ---
 
+Configuration uses YAML 1.2 booleans (`true` and `false`); values such as `off`
+are not booleans. Duplicate mapping keys and multiple documents are rejected. This also rejects
+duplicate map entries that the previous parser could silently replace.
+Anchors and aliases are accepted, but `<<` merge keys remain ordinary keys and
+never override typed configuration. File includes and variable interpolation are
+not enabled. Parse errors omit source snippets to protect nearby credentials.
+
 ## prefixd.yaml
 
 Main daemon configuration.
