@@ -1,5 +1,5 @@
 # Build stage
-FROM oven/bun:1.3.14 AS builder
+FROM oven/bun:1.4.3@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS builder
 
 WORKDIR /app
 
@@ -14,10 +14,12 @@ COPY . .
 
 # Build
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN bun run build
+# Next subtracts one from CIRCLE_NODE_TOTAL; keep build workers at three.
+RUN CIRCLE_NODE_TOTAL=4 RAYON_NUM_THREADS=3 TOKIO_WORKER_THREADS=3 \
+    UV_THREADPOOL_SIZE=3 bun run build
 
 # Production stage
-FROM oven/bun:1.3.14-slim AS runner
+FROM oven/bun:1.4.3-slim@sha256:14a223fa35747ec728bce300ef85888bc5f7958164d15bbba6a54b22b52a3288 AS runner
 
 WORKDIR /app
 

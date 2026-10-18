@@ -1,13 +1,16 @@
 "use client"
 
 import { useCallback, useMemo, useState } from "react"
-import yaml from "js-yaml"
+import * as yaml from "js-yaml"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { AlertCircle, Save, Undo2 } from "lucide-react"
 import type { ConfigPlaybook } from "@/lib/api"
 import { validatePlaybooks } from "@/components/dashboard/playbook-editor"
+
+// Preserve merge keys accepted by the editor while keeping YAML 1.2 core types.
+const PLAYBOOK_YAML_SCHEMA = yaml.CORE_SCHEMA.withTags(yaml.mergeTag)
 
 interface PlaybookYamlEditorProps {
   playbooks: ConfigPlaybook[]
@@ -38,7 +41,7 @@ function playbooksToYaml(playbooks: ConfigPlaybook[]): string {
 
 function parseYaml(text: string): { playbooks?: ConfigPlaybook[]; error?: string } {
   try {
-    const parsed = yaml.load(text) as { playbooks?: unknown[] }
+    const parsed = yaml.load(text, { schema: PLAYBOOK_YAML_SCHEMA }) as { playbooks?: unknown[] }
     if (!parsed || !Array.isArray(parsed.playbooks)) {
       return { error: "YAML must contain a top-level 'playbooks' array" }
     }
