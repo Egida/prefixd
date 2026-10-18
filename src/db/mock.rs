@@ -423,12 +423,20 @@ impl RepositoryTrait for MockRepository {
                         m.acknowledged_at.is_none()
                     }
                 });
+                let pop_ok = params.pop.as_deref().is_none_or(|pop| m.pop == pop);
                 let cursor_ok = params.cursor.is_none_or(|cursor| {
                     (m.created_at, m.mitigation_id) < (cursor.created_at, cursor.mitigation_id)
                 });
                 let start_ok = params.start.is_none_or(|s| m.created_at >= s);
                 let end_ok = params.end.is_none_or(|e| m.created_at < e);
-                status_ok && customer_ok && ip_ok && ack_ok && cursor_ok && start_ok && end_ok
+                status_ok
+                    && customer_ok
+                    && ip_ok
+                    && ack_ok
+                    && pop_ok
+                    && cursor_ok
+                    && start_ok
+                    && end_ok
             })
             .collect();
         matching.sort_unstable_by_key(|m| std::cmp::Reverse((m.created_at, m.mitigation_id)));
@@ -639,18 +647,6 @@ impl RepositoryTrait for MockRepository {
             total_events: events.len() as u32,
             pops,
         })
-    }
-
-    async fn list_mitigations_all_pops(
-        &self,
-        status_filter: Option<&[MitigationStatus]>,
-        customer_id: Option<&str>,
-        victim_ip: Option<&str>,
-        acknowledged: Option<bool>,
-        params: &MitigationListParams,
-    ) -> Result<Vec<Mitigation>> {
-        self.list_mitigations(status_filter, customer_id, victim_ip, acknowledged, params)
-            .await
     }
 
     // Timeseries (mock returns empty)

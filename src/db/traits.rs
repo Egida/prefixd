@@ -72,6 +72,8 @@ pub struct MitigationCursor {
 /// Mitigation pagination uses a unique tiebreaker; other list endpoints retain their parameters.
 #[derive(Debug, Clone, Default)]
 pub struct MitigationListParams {
+    /// None lists every POP; Some matches the stored identifier exactly.
+    pub pop: Option<String>,
     pub limit: u32,
     pub cursor: Option<MitigationCursor>,
     pub start: Option<DateTime<Utc>>,
@@ -173,14 +175,6 @@ pub trait RepositoryTrait: Send + Sync {
     // Multi-POP coordination
     async fn list_pops(&self) -> Result<Vec<PopInfo>>;
     async fn get_stats(&self) -> Result<GlobalStats>;
-    async fn list_mitigations_all_pops(
-        &self,
-        status_filter: Option<&[MitigationStatus]>,
-        customer_id: Option<&str>,
-        victim_ip: Option<&str>,
-        acknowledged: Option<bool>,
-        params: &MitigationListParams,
-    ) -> Result<Vec<Mitigation>>;
 
     // Timeseries
     async fn timeseries_mitigations(

@@ -2540,11 +2540,13 @@ async fn test_public_mitigation_cursor_is_complete_filtered_and_strict() {
     assert!(empty["next_cursor"].is_null());
 
     let timestamp: DateTime<Utc> = "2026-10-18T12:00:00.123456Z".parse().unwrap();
+    let pop_a = "Edge / β +1";
+    let pop_b = "iad1";
     // Seven eligible ties, six independently excluded rows, and shuffled insertion order.
     for id in [7_u128, 1, 5, 2, 6, 3, 4, 8, 9, 10, 11, 12, 13] {
         let mut mitigation = inventory_mitigation(
             "203.0.113.10/32",
-            "test1",
+            if id % 2 == 0 { pop_b } else { pop_a },
             timestamp,
             if id % 2 == 0 {
                 MitigationStatus::Escalated
@@ -2586,11 +2588,29 @@ async fn test_public_mitigation_cursor_is_complete_filtered_and_strict() {
     let filters = format!(
         "status=active,escalated&customer_id=cursor_customer&victim_ip=203.0.113.10&acknowledged=true&start={start}&end={end}"
     );
-    for suffix in ["", "&pop=all"] {
+    let every_id: Vec<u128> = (1..=7).rev().collect();
+    let mut scoped_sets = Vec::new();
+    for (selected_pop, expected_ids) in [
+        (None, every_id.clone()),
+        (Some("all"), every_id),
+        (Some(pop_a), vec![7, 5, 3, 1]),
+        (Some(pop_b), vec![6, 4, 2]),
+        (Some("unknown"), vec![]),
+        (Some("IAD1"), vec![]),
+        (Some(" "), vec![]),
+    ] {
+        let suffix = selected_pop
+            .map(|pop| format!("&pop={}", urlencoding::encode(pop)))
+            .unwrap_or_default();
+        let expected_counts: Vec<_> = if expected_ids.is_empty() {
+            vec![0]
+        } else {
+            expected_ids.chunks(2).map(|page| page.len()).collect()
+        };
         let mut cursor = None;
         let mut ordered = Vec::new();
         let mut unique = BTreeSet::new();
-        for (page_index, expected_count) in [2, 2, 2, 1].into_iter().enumerate() {
+        for (page_index, expected_count) in expected_counts.into_iter().enumerate() {
             let mut uri = format!("/v1/mitigations?limit=2&{filters}{suffix}");
             if let Some(value) = &cursor {
                 uri.push_str(&format!("&cursor={value}"));
@@ -2599,10 +2619,9 @@ async fn test_public_mitigation_cursor_is_complete_filtered_and_strict() {
             assert_eq!(
                 json["count"],
                 expected_count,
-                "page {} cursor_present={} all_pops={}",
+                "page {} cursor_present={} selected_pop={selected_pop:?}",
                 page_index + 1,
-                cursor.is_some(),
-                !suffix.is_empty()
+                cursor.is_some()
             );
             for row in json["mitigations"].as_array().unwrap() {
                 let id = Uuid::parse_str(row["mitigation_id"].as_str().unwrap()).unwrap();
@@ -2610,6 +2629,9 @@ async fn test_public_mitigation_cursor_is_complete_filtered_and_strict() {
                 assert_eq!(row["customer_id"], "cursor_customer");
                 assert_eq!(row["victim_ip"], "203.0.113.10");
                 assert!(row["acknowledged_at"].is_string());
+                if let Some(pop) = selected_pop.filter(|pop| *pop != "all") {
+                    assert_eq!(row["pop"], pop);
+                }
                 ordered.push(id);
             }
             cursor = json["next_cursor"].as_str().map(str::to_owned);
@@ -2619,9 +2641,12 @@ async fn test_public_mitigation_cursor_is_complete_filtered_and_strict() {
                 assert!(value.len() <= 128);
             }
         }
-        let expected: Vec<_> = (1..=7).rev().map(Uuid::from_u128).collect();
+        let expected: Vec<_> = expected_ids.into_iter().map(Uuid::from_u128).collect();
         assert_eq!(ordered, expected, "descending UUID breaks equal timestamps");
         assert_eq!(unique, expected.into_iter().collect());
+        if selected_pop == Some(pop_a) || selected_pop == Some(pop_b) {
+            scoped_sets.push(unique);
+        }
         assert!(
             cursor.is_none(),
             "terminal page must not offer a continuation"
@@ -2642,13 +2667,20 @@ async fn test_public_mitigation_cursor_is_complete_filtered_and_strict() {
         assert!(json["next_cursor"].is_null());
     }
 
-    // The third eligible row is the lookahead: skipping it would silently truncate has_more.
+    assert!(scoped_sets[0].is_disjoint(&scoped_sets[1]));
+    assert_eq!(scoped_sets[0].len() + scoped_sets[1].len(), 7);
+
+    // In the global listing, the third eligible row is lookahead; POP-a includes it as row two.
     sqlx::query("UPDATE mitigations SET match_json = '{' WHERE mitigation_id = $1")
         .bind(Uuid::from_u128(5))
         .execute(&ctx.pool)
         .await
         .unwrap();
-    for suffix in ["", "&pop=all"] {
+    for suffix in [
+        String::new(),
+        "&pop=all".into(),
+        format!("&pop={}", urlencoding::encode(pop_a)),
+    ] {
         let response = app
             .clone()
             .oneshot(
@@ -2665,6 +2697,21 @@ async fn test_public_mitigation_cursor_is_complete_filtered_and_strict() {
             "corrupt lookahead must fail the entire page, not masquerade as end of history"
         );
     }
+    // SQL excludes another POP's corrupt row before strict domain decoding.
+    let other_pop = page(
+        &app,
+        &format!("/v1/mitigations?limit=2&{filters}&pop={pop_b}"),
+    )
+    .await;
+    assert_eq!(other_pop["count"], 2);
+    assert_eq!(other_pop["has_more"], true);
+    assert!(
+        other_pop["mitigations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["pop"] == pop_b)
+    );
 }
 
 #[tokio::test]

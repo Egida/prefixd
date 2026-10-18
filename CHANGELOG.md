@@ -123,6 +123,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Apply concrete POP filters before mitigation pagination. Match identifiers
+  exactly, preserve omitted/`all` global listings, and reject empty or NUL filters
+  with `400` instead of ignoring them.
+
 - **Breaking:** Use versioned opaque cursors for mitigation listings, ordered by
   creation time and mitigation ID so timestamp ties do not omit rows. Reject
   malformed, oversized and superseded timestamp-only mitigation cursors with
