@@ -764,6 +764,144 @@ async fn test_foreign_pop_cannot_delete_local_rule_or_receive_local_repair() {
 }
 
 #[tokio::test]
+async fn test_disjoint_detector_ports_reject_without_mutating_mitigations_or_speaker() {
+    use prefixd::domain::{ActionParams, ActionType, MatchCriteria, Mitigation, MitigationIntent};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    #[derive(Default)]
+    struct MutationCounter {
+        announces: AtomicUsize,
+        withdraws: AtomicUsize,
+    }
+
+    impl prefixd::bgp::FlowSpecAnnouncer for MutationCounter {
+        fn backend(&self) -> &'static str {
+            "mock"
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for MutationCounter {
+        async fn announce(&self, _: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+            self.announces.fetch_add(1, SeqCst);
+            Ok(())
+        }
+
+        async fn withdraw(&self, _: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+            self.withdraws.fetch_add(1, SeqCst);
+            Ok(())
+        }
+    }
+
+    for vector in [
+        AttackVector::UdpFlood,
+        AttackVector::SynFlood,
+        AttackVector::AckFlood,
+    ] {
+        for correlation in [false, true] {
+            for seed_ports in [None, Some(vec![53]), Some(vec![])] {
+                let repo = Arc::new(MockRepository::new());
+                let speaker = Arc::new(MutationCounter::default());
+                if let Some(ports) = seed_ports {
+                    let mut existing = Mitigation::from_intent(
+                        MitigationIntent {
+                            event_id: uuid::Uuid::new_v4(),
+                            customer_id: Some("cust_test".into()),
+                            service_id: Some("svc_dns".into()),
+                            pop: "test1".into(),
+                            match_criteria: MatchCriteria {
+                                dst_prefix: "203.0.113.10/32".into(),
+                                protocol: Some(if vector == AttackVector::UdpFlood {
+                                    17
+                                } else {
+                                    6
+                                }),
+                                dst_ports: ports,
+                            },
+                            action_type: ActionType::Discard,
+                            action_params: ActionParams { rate_bps: None },
+                            ttl_seconds: 30,
+                            reason: "existing owner".into(),
+                        },
+                        "203.0.113.10".into(),
+                        vector,
+                    );
+                    existing.activate();
+                    repo.insert_mitigation(&existing).await.unwrap();
+                }
+                let params = prefixd::db::ListParams {
+                    limit: 10,
+                    ..Default::default()
+                };
+                let before = serde_json::to_value(
+                    repo.list_mitigations(None, None, None, None, &params)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                let mut settings = test_settings_with_correlation(correlation, 2, 0.5);
+                settings.mode = prefixd::config::OperationMode::Enforced;
+                let mut playbooks = test_playbooks();
+                playbooks.playbooks[0].match_criteria.vector = vector;
+                let state = AppState::new(
+                    settings,
+                    test_inventory(),
+                    playbooks,
+                    repo.clone(),
+                    speaker.clone(),
+                    ".".into(),
+                )
+                .unwrap();
+                let app = create_test_router(state);
+                let payload = serde_json::json!({
+                    "event_id": "disjoint-ports", "source": "detector_a", "timestamp": chrono::Utc::now(),
+                    "victim_ip": "203.0.113.10", "vector": vector, "pps": 50000,
+                    "top_dst_ports": [80, 443], "confidence": 0.9
+                });
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/v1/events")
+                            .header("content-type", "application/json")
+                            .body(Body::from(payload.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                let after = serde_json::to_value(
+                    repo.list_mitigations(None, None, None, None, &params)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    status,
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "disjoint detector ports must be rejected: vector={vector:?}, correlation={correlation}, response={json}, rows={after}, announcements={}",
+                    speaker.announces.load(SeqCst)
+                );
+                assert_eq!(
+                    json["error"],
+                    "guardrail violation: no allowed ports for service"
+                );
+                assert_eq!(
+                    after, before,
+                    "must neither insert an owner nor update an existing owner"
+                );
+                assert_eq!(speaker.announces.load(SeqCst), 0);
+                assert_eq!(speaker.withdraws.load(SeqCst), 0);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_canonical_owner_preflight_preserves_existing_rule_and_reuses_detector_owner() {
     use prefixd::domain::{
         ActionParams, ActionType, MatchCriteria, Mitigation, MitigationIntent, mitigation_rule,

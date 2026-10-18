@@ -76,6 +76,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes survive restart. Reject invalid or unreadable files instead of silently
   reverting to inline settings.
 
+- Reject disjoint detector/service destination-port selections before they become
+  protocol-wide FlowSpec rules or extend an existing wildcard owner. Intentional
+  unconstrained port matches remain supported.
+
 - Persist new detector and manual mitigation intent before speaker announcement,
   preventing a failed insert or interrupted request from leaving an unowned rule.
   Retain committed intent after speaker errors so readable reconciliation and

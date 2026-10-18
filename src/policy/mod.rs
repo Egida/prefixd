@@ -11,7 +11,7 @@ use crate::config::{AllowedPorts, IpContext, PlaybookAction, Playbooks};
 use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackVector, MatchCriteria, MitigationIntent,
 };
-use crate::error::{PrefixdError, Result};
+use crate::error::{GuardrailError, PrefixdError, Result};
 
 pub struct PolicyEngine {
     playbooks: Playbooks,
@@ -56,6 +56,12 @@ impl PolicyEngine {
 
         // Compute allowed ports intersection
         let dst_ports = self.compute_port_intersection(&ports, context, vector);
+        // An empty intersection must not turn explicit detector ports into a wildcard.
+        if !ports.is_empty() && dst_ports.is_empty() {
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::NoAllowedPorts,
+            ));
+        }
 
         // Build match criteria
         let match_criteria = MatchCriteria {
@@ -393,6 +399,71 @@ mod tests {
 
         let result = engine.compute_port_intersection(&event_ports, None, AttackVector::UdpFlood);
         assert_eq!(result, event_ports);
+    }
+
+    #[test]
+    fn policy_port_scope_preserves_constraints_and_intentional_wildcards() {
+        for vector in [
+            AttackVector::UdpFlood,
+            AttackVector::SynFlood,
+            AttackVector::AckFlood,
+        ] {
+            let mut playbooks = test_playbooks();
+            playbooks.playbooks[0].match_criteria.vector = vector;
+            let engine = PolicyEngine::new(playbooks, "test".into(), 120);
+            for ip in ["203.0.113.10", "2001:db8::10"] {
+                for (event_ports, service_ports, expected) in [
+                    (vec![80, 443], vec![53, 123], None),
+                    (vec![53, 80], vec![53, 123], Some(vec![53])),
+                    (vec![53, 123], vec![], Some(vec![53, 123])),
+                    (vec![], vec![53, 123], Some(vec![53, 123])),
+                    (vec![], vec![], Some(vec![])),
+                ] {
+                    let context = make_context("customer", service_ports.clone(), service_ports);
+                    let event = make_event(ip, vector.as_str(), &event_ports);
+                    let result = engine.evaluate(&event, Some(&context));
+                    match expected {
+                        Some(ports) => assert_eq!(result.unwrap().match_criteria.dst_ports, ports),
+                        None => assert!(matches!(
+                            result,
+                            Err(PrefixdError::GuardrailViolation(
+                                GuardrailError::NoAllowedPorts
+                            ))
+                        )),
+                    }
+                }
+                for ports in [vec![53, 123], vec![]] {
+                    let event = make_event(ip, vector.as_str(), &ports);
+                    assert_eq!(
+                        engine
+                            .evaluate(&event, None)
+                            .unwrap()
+                            .match_criteria
+                            .dst_ports,
+                        ports
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn policy_preserves_other_vectors_port_selection() {
+        for vector in [AttackVector::IcmpFlood, AttackVector::Unknown] {
+            let mut playbooks = test_playbooks();
+            playbooks.playbooks[0].match_criteria.vector = vector;
+            let engine = PolicyEngine::new(playbooks, "test".into(), 120);
+            let context = make_context("customer", vec![53], vec![53]);
+            let event = make_event("203.0.113.10", vector.as_str(), &[80, 443]);
+            assert_eq!(
+                engine
+                    .evaluate(&event, Some(&context))
+                    .unwrap()
+                    .match_criteria
+                    .dst_ports,
+                [80, 443]
+            );
+        }
     }
 
     // ==========================================================================

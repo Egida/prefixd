@@ -652,7 +652,20 @@ services:
 
 ### Allowed Ports
 
-Ports listed in `allowed_ports` are **excluded** from mitigation. For a DNS server under UDP flood, the FlowSpec rule will match "UDP except port 53".
+For automatic UDP/TCP mitigation, `allowed_ports` limits which destination ports
+may be selected for mitigation. The policy intersects detector-reported ports
+with the service's list for that protocol. Two nonempty lists with no common
+port are rejected with a guardrail error, rather than creating an all-ports rule.
+
+If the detector reports no ports, the service's list is used. An omitted or empty
+service list leaves the detector's ports unchanged. When both lists are empty,
+the rule intentionally has no destination-port restriction. UDP floods use
+`udp`; SYN/ACK floods use `tcp`. ICMP policy and explicit manual mitigations do
+not use this intersection.
+
+These are equality matches: the listed ports are mitigation candidates, not
+protected ports. For a DNS service with `udp: [53]`, a detector reporting port 53
+can produce a rule matching UDP port 53; this does not mean "UDP except port 53".
 
 ```yaml
 allowed_ports:
