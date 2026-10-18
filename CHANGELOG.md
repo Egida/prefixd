@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Check backend dependency licenses, sources and advisories with cargo-deny in
+  the existing security job. Reject unapproved licenses, sources and wildcard
+  requirements while retaining duplicate warnings and the separate full-lock
+  audit's explicit RSA exception.
+
 - Preserve exact policing rates through both speaker encoders, including 1–7 bps
   instead of turning them into discard. Reject missing, zero or inexact police
   rates and rates on discard before saving or extending intent, and when loading

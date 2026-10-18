@@ -1,0 +1,41 @@
+# Check the locked backend graph, including development dependencies:
+# cargo deny --workspace --all-features --locked check advisories bans licenses sources
+
+[advisories]
+# No exceptions for cargo-deny's selected graph. The separate full-lock
+# cargo-audit gate retains the explicit RSA/optional SQLx MySQL exception.
+
+[licenses]
+# prefixd is MIT. SPDX OR expressions may select an allowed alternative;
+# this does not approve other alternatives in those expressions.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+]
+include-dev = true
+include-build = true
+confidence-threshold = 0.8
+exceptions = [
+    # These exact releases package Mozilla/CCADB root certificate data under
+    # CDLA-Permissive-2.0; their Cargo manifests and LICENSE state this license.
+    # Reassess the data license when either package version changes.
+    { crate = "webpki-root-certs@1.0.5", allow = ["CDLA-Permissive-2.0"] },
+    { crate = "webpki-roots@1.0.5", allow = ["CDLA-Permissive-2.0"] },
+]
+
+[bans]
+# Existing dependency majors coexist; retain visible duplicate warnings.
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
