@@ -1,4 +1,7 @@
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "Shared fixture helpers are used by different integration test crates"
+)]
 
 use std::path::Path;
 use std::sync::Arc;
@@ -203,7 +206,6 @@ pub fn test_settings() -> Settings {
             default_ttl_seconds: 120,
             min_ttl_seconds: 30,
             max_ttl_seconds: 1800,
-            correlation_window_seconds: 300,
             reconciliation_interval_seconds: 30,
             quiet_period_after_withdraw_seconds: 120,
         },

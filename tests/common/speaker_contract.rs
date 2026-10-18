@@ -120,6 +120,99 @@ pub async fn wait_inventory(
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "Only real speaker targets qualify traffic-rate encoding."
+)]
+pub async fn run_action_contract(speaker: &dyn FlowSpecAnnouncer) -> Result<()> {
+    use prefixd::domain::ActionType;
+    let mut wanted: Vec<_> = ["192.0.2.245/32", "2001:0DB8:0:0:0:0:0:245/128"]
+        .into_iter()
+        .map(|prefix| {
+            FlowSpecRule::new(
+                FlowSpecNlri {
+                    dst_prefix: prefix.into(),
+                    protocol: Some(17),
+                    dst_ports: vec![53],
+                },
+                FlowSpecAction::police(1_000_000),
+            )
+        })
+        .collect();
+    // Same destinations but different matches protect against prefix/family-wide deletion.
+    let foreign: Vec<_> = wanted
+        .iter()
+        .cloned()
+        .map(|mut rule| {
+            rule.nlri.dst_ports = vec![54];
+            rule
+        })
+        .collect();
+    for rule in &foreign {
+        speaker.announce(rule).await?;
+    }
+    for rate in [1, 7, 8, 9, 1_000_000] {
+        for rule in &mut wanted {
+            rule.actions = vec![FlowSpecAction::police(rate)];
+            speaker.announce(rule).await?;
+        }
+        let mut expected = foreign.clone();
+        expected.extend(wanted.clone());
+        wait_inventory(speaker, &expected)
+            .await
+            .context("exact fractional-byte police rate")?;
+    }
+    for actions in [
+        vec![],
+        vec![FlowSpecAction::discard(), FlowSpecAction::police(8)],
+        vec![FlowSpecAction {
+            action_type: ActionType::Police,
+            rate_bps: None,
+        }],
+        vec![FlowSpecAction::police(0)],
+        vec![FlowSpecAction::police(16_777_217)],
+        vec![FlowSpecAction::police(u64::MAX)],
+        vec![FlowSpecAction {
+            action_type: ActionType::Discard,
+            rate_bps: Some(8),
+        }],
+    ] {
+        for rule in &wanted {
+            speaker.announce(rule).await?;
+        }
+        let mut expected = foreign.clone();
+        expected.extend(wanted.clone());
+        wait_inventory(speaker, &expected).await?;
+        for rule in &wanted {
+            let mut historical = rule.clone();
+            historical.actions = actions.clone();
+            ensure!(
+                speaker.announce(&historical).await.is_err(),
+                "invalid action must not announce"
+            );
+        }
+        wait_inventory(speaker, &expected)
+            .await
+            .context("invalid action preserves all installed rules")?;
+        for rule in &wanted {
+            let mut historical = rule.clone();
+            historical.actions = actions.clone();
+            speaker
+                .withdraw(&historical)
+                .await
+                .context("withdraw historical invalid action")?;
+            expected.retain(|expected| expected.nlri_hash() != rule.nlri_hash());
+            wait_inventory(speaker, &expected)
+                .await
+                .context("withdraw only the exact local match")?;
+        }
+    }
+    for rule in &foreign {
+        speaker.withdraw(rule).await?;
+    }
+    wait_inventory(speaker, &[]).await
+}
+
 pub async fn run_readable_contract(speaker: &dyn FlowSpecAnnouncer) -> Result<()> {
     wait_inventory(speaker, &[])
         .await

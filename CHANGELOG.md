@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Preserve exact policing rates through both speaker encoders, including 1–7 bps
+  instead of turning them into discard. Reject missing, zero or inexact police
+  rates and rates on discard before saving or extending intent, and when loading
+  or editing playbooks. Keep historical malformed actions withdrawable by their
+  exact local match.
+
 - Reject `http.auth.mode: mtls` without native TLS and nonempty server certificate,
   key and client-CA paths before database, speaker or listener startup. Programmatic
   application-state construction enforces the same validation. Configure all three
@@ -78,6 +84,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bearer-token fixtures and forbid unsafe code in the integration-test crate.
   Cover real bearer startup loading and missing/empty-token rejection in child tests.
 
+- Remove the unused policy correlation prototype and ineffective
+  `timers.correlation_window_seconds` configuration/API-settings field. The active
+  multi-signal engine continues to use `correlation.window_seconds`.
+
+- Forbid unsafe code in the library and both binaries, and require explained
+  handwritten lint exemptions in those crates. Narrow ignored request-actor
+  suppressions to their fields.
+
 - Put active mitigation intent, signal evidence, expiry and honest router-observation
   limits first in the operator workspace. Refresh the light/dark theme, Geist
   typography and navigation; preserve user zoom and remove decorative pulses,
@@ -101,6 +115,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binaries. Current stable tests and lints remain required.
 
 ### Fixed
+
+- Display confidence fractions consistently as percentages across event, mitigation
+  and correlation views. Preserve zero, distinguish missing and invalid values, and
+  avoid implying that confidence confirms mitigation or router installation.
 
 - Restore immediate dashboard retries after failed GET requests while continuing
   to share requests that are still pending.

@@ -80,6 +80,19 @@ error so existing repository implementations remain source-compatible. They must
 implement this contract before real-speaker startup can succeed; the default
 never issues a binding or silently disables ownership checks.
 
+## Traffic-rate actions
+
+Both writers accept one action: discard without a rate, or police with a positive
+integer bit rate that round-trips exactly through the `f32` bytes/second wire
+representation. Fractional bytes are preserved, so 1–7 bits/second remain police
+actions. Invalid actions are rejected before manual or detector intent is saved
+or extended; startup, reload and playbook edits apply the same rate policy.
+
+Withdrawals use the exact local match and do not depend on its saved action.
+This allows cleanup of historical zero, missing or imprecise policing rates.
+It does not change the exclusive speaker ownership requirement or add action-drift
+reconciliation.
+
 ## GoBGP read-back
 
 GoBGP inventory reads both IPv4 and IPv6 FlowSpec GLOBAL tables, including

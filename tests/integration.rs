@@ -1077,7 +1077,6 @@ fn test_settings() -> Settings {
             default_ttl_seconds: 120,
             min_ttl_seconds: 30,
             max_ttl_seconds: 1800,
-            correlation_window_seconds: 300,
             reconciliation_interval_seconds: 30,
             quiet_period_after_withdraw_seconds: 120,
         },
@@ -8556,6 +8555,194 @@ mod manual_protocol {
             .is_empty()
         );
         assert_eq!(speaker.mutations.load(SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn invalid_actions_create_no_intent_or_speaker_mutation() {
+        for ip in ["203.0.113.10", "2001:db8::10"] {
+            for (action, rate, error) in [
+                ("police", None, "requires rate_bps"),
+                ("police", Some(0), "rate_bps > 0"),
+                ("police", Some(16_777_217), "represented exactly"),
+                ("police", Some(u64::MAX), "represented exactly"),
+                ("discard", Some(0), "must not include rate_bps"),
+                ("discard", Some(8), "must not include rate_bps"),
+            ] {
+                let (state, repo, speaker) = state(AuthMode::None);
+                let mut request = payload(ip, "udp");
+                request["action"] = action.into();
+                request["rate_bps"] = serde_json::json!(rate);
+                let response = post(state, request).await;
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{ip} {action} {rate:?}"
+                );
+                let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap();
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert!(body["error"].as_str().unwrap().contains(error), "{body}");
+                assert_no_mutation(repo.as_ref(), speaker.as_ref()).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn fractional_byte_rates_preserve_manual_intent() {
+        for ip in ["203.0.113.10", "2001:db8::10"] {
+            for rate in [1, 7, 8, 9, 16_777_216, 16_777_218] {
+                let (state, repo, speaker) = state(AuthMode::None);
+                let mut request = payload(ip, "udp");
+                request["action"] = "police".into();
+                request["rate_bps"] = rate.into();
+                assert_eq!(post(state, request).await.status(), StatusCode::CREATED);
+                let saved = repo
+                    .list_mitigations(
+                        None,
+                        None,
+                        None,
+                        None,
+                        &prefixd::db::ListParams {
+                            limit: 10,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(saved.len(), 1);
+                assert_eq!(saved[0].action_type, ActionType::Police);
+                assert_eq!(saved[0].action_params.rate_bps, Some(rate));
+                let announced = speaker.inner.list_active().await.unwrap();
+                assert_eq!(announced.len(), 1);
+                assert_eq!(announced[0].actions[0].rate_bps, Some(rate));
+                assert_eq!(speaker.mutations.load(SeqCst), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_playbook_action_cannot_create_or_extend_an_owner() {
+        for existing in [false, true] {
+            for (action, rate) in [
+                (PlaybookAction::Police, None),
+                (PlaybookAction::Police, Some(0)),
+                (PlaybookAction::Police, Some(16_777_217)),
+                (PlaybookAction::Police, Some(u64::MAX)),
+                (PlaybookAction::Discard, Some(8)),
+            ] {
+                let (state, repo, speaker) = state(AuthMode::None);
+                if existing {
+                    let mut request = payload("203.0.113.10", "udp");
+                    request["dst_ports"] = serde_json::json!([53]);
+                    request["ttl_seconds"] = 30.into();
+                    assert_eq!(
+                        post(state.clone(), request).await.status(),
+                        StatusCode::CREATED
+                    );
+                }
+                let params = prefixd::db::ListParams {
+                    limit: 10,
+                    ..Default::default()
+                };
+                let before = serde_json::to_value(
+                    repo.list_mitigations(None, None, None, None, &params)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                let mut playbooks = state.playbooks.write().await;
+                playbooks.playbooks[0].steps[0].action = action;
+                playbooks.playbooks[0].steps[0].rate_bps = rate;
+                drop(playbooks);
+                let request = serde_json::json!({
+                    "event_id": "invalid-action", "timestamp": chrono::Utc::now(),
+                    "source": "action-test", "victim_ip": "203.0.113.10", "vector": "udp_flood",
+                    "pps": 50000, "top_dst_ports": [53], "confidence": 0.9
+                });
+                let response = create_test_router(state)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/v1/events")
+                            .header("content-type", "application/json")
+                            .body(Body::from(request.to_string()))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+                assert!(
+                    repo.find_ban_event_by_external_id("action-test", "invalid-action")
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+                let after = serde_json::to_value(
+                    repo.list_mitigations(None, None, None, None, &params)
+                        .await
+                        .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(
+                    after, before,
+                    "invalid action must not extend the existing owner"
+                );
+                assert_eq!(speaker.mutations.load(SeqCst), usize::from(existing));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn valid_playbook_cannot_extend_a_historical_invalid_owner() {
+        let (state, repo, speaker) = state(AuthMode::None);
+        let mut request = payload("203.0.113.10", "udp");
+        request["dst_ports"] = serde_json::json!([53]);
+        assert_eq!(
+            post(state.clone(), request).await.status(),
+            StatusCode::CREATED
+        );
+        let params = prefixd::db::ListParams {
+            limit: 10,
+            ..Default::default()
+        };
+        let mut owner = repo
+            .list_mitigations(None, None, None, None, &params)
+            .await
+            .unwrap()
+            .remove(0);
+        owner.action_type = ActionType::Police;
+        owner.action_params.rate_bps = Some(0);
+        repo.update_mitigation(&owner).await.unwrap();
+        let before =
+            serde_json::to_value(repo.get_mitigation(owner.mitigation_id).await.unwrap()).unwrap();
+        let event = serde_json::json!({
+            "event_id":"historical-action", "timestamp":chrono::Utc::now(), "source":"action-test",
+            "victim_ip":"203.0.113.10", "vector":"udp_flood", "pps":50000, "top_dst_ports":[53], "confidence":0.9
+        });
+        let response = create_test_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(event.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            serde_json::to_value(repo.get_mitigation(owner.mitigation_id).await.unwrap()).unwrap(),
+            before
+        );
+        assert!(
+            repo.find_ban_event_by_external_id("action-test", "historical-action")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(speaker.mutations.load(SeqCst), 1);
     }
 
     #[tokio::test]

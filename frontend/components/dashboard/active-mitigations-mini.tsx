@@ -7,6 +7,7 @@ import { ActionBadge } from "./action-badge"
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
 import type { Mitigation } from "@/lib/api"
+import { formatConfidence } from "@/lib/confidence"
 
 interface ActiveMitigationsMiniProps {
   mitigations: Mitigation[]
@@ -27,12 +28,6 @@ export function formatTimeRemaining(expiresAt: string, now: number): string {
   const hours = Math.floor(minutes / 60)
   if (hours < 24) return `${hours}h ${minutes % 60}m`
   return `${Math.floor(hours / 24)}d ${hours % 24}h`
-}
-
-export function formatConfidence(value?: number): string {
-  return value !== undefined && Number.isFinite(value) && value >= 0 && value <= 1
-    ? `${Math.round(value * 100)}% confidence`
-    : "Confidence unavailable"
 }
 
 export function formatSourceCount(value?: number): string {
@@ -108,7 +103,7 @@ export function ActiveMitigationsMini({ mitigations, limit = 8, loading, error, 
                   <td className="col-span-2 row-start-2 px-4 align-top xl:w-1/3 xl:py-4">
                     <div className="font-medium">{m.vector === "unknown" ? "Unclassified signal" : m.vector.replace(/_/g, " ")}</div>
                     <p className="mt-1 line-clamp-2 text-muted-foreground text-pretty">{m.reason.trim() || "Reason unavailable"}</p>
-                    <div className="mt-1 text-xs text-muted-foreground tabular-nums">{formatSourceCount(m.correlation?.source_count)} · {formatConfidence(m.correlation?.derived_confidence)}</div>
+                    <div className="mt-1 text-xs text-muted-foreground tabular-nums">{formatSourceCount(m.correlation?.source_count)} · Confidence: {formatConfidence(m.correlation?.derived_confidence)}</div>
                   </td>
                   <td className="px-4 align-top xl:py-4"><span className="mb-1 block text-xs text-muted-foreground xl:hidden">Router installation</span><span className="text-muted-foreground">Unobserved</span></td>
                   <td className="col-span-2 px-4 align-top xl:py-4">

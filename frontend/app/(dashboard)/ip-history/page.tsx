@@ -1,5 +1,6 @@
 "use client"
 
+import { formatConfidence } from "@/lib/confidence"
 import { useState } from "react"
 import { useSearchParams, useRouter } from "next/navigation"
 import Link from "next/link"
@@ -229,9 +230,7 @@ export default function IpHistoryPage() {
                             <>
                               <span>src: {entry.data.source}</span>
                               {entry.data.bps && <span>{formatBps(entry.data.bps)}</span>}
-                              {entry.data.confidence != null && (
-                                <span>{(entry.data.confidence * 100).toFixed(0)}% confidence</span>
-                              )}
+                              <span className="tabular-nums">Confidence: {formatConfidence(entry.data.confidence)}</span>
                             </>
                           ) : (
                             <>

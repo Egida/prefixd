@@ -350,8 +350,6 @@ pub struct TimersConfig {
     pub min_ttl_seconds: u32,
     #[serde(default = "default_max_ttl")]
     pub max_ttl_seconds: u32,
-    #[serde(default = "default_correlation_window")]
-    pub correlation_window_seconds: u32,
     #[serde(default = "default_reconciliation_interval")]
     pub reconciliation_interval_seconds: u32,
     #[serde(default = "default_quiet_period")]
@@ -366,9 +364,6 @@ fn default_min_ttl() -> u32 {
 }
 fn default_max_ttl() -> u32 {
     1800
-}
-fn default_correlation_window() -> u32 {
-    300
 }
 fn default_reconciliation_interval() -> u32 {
     30
@@ -556,7 +551,6 @@ timers:
   default_ttl_seconds: 120
   min_ttl_seconds: 30
   max_ttl_seconds: 1800
-  correlation_window_seconds: 300
   reconciliation_interval_seconds: 30
 escalation:
   enabled: true

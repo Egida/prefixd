@@ -1,3 +1,6 @@
+#![forbid(unsafe_code)]
+#![deny(clippy::allow_attributes_without_reason)]
+
 use argon2::{
     Argon2, PasswordHasher,
     password_hash::{SaltString, rand_core::OsRng},
@@ -684,7 +687,10 @@ struct CorroboratorResponse {
     attached_group_ids: Vec<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Pass the corroborator subcommand's independent flags directly to its request builder"
+)]
 async fn cmd_send_corroborator(
     client: &Client,
     source: String,

@@ -270,9 +270,6 @@ timers:
   # Reconciliation loop interval
   reconciliation_interval_seconds: 30
   
-  # Correlation window for duplicate events
-  correlation_window_seconds: 300
-  
   # Quiet period after withdraw before re-announcing the same destination
   quiet_period_after_withdraw_seconds: 120
 ```
@@ -734,9 +731,16 @@ match:
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `rate_bps` | integer | Rate limit in bits/second (police only) |
+| `rate_bps` | integer | Positive bit rate exactly representable as an `f32` bytes/second traffic rate (police only) |
 | `ttl_seconds` | integer | Mitigation duration |
 | `require_confidence_at_least` | float | Min confidence for this step |
+
+Policing rates are preserved exactly by both speaker backends. Fractional
+bytes/second are supported: 1, 7, 8 and 9 bits/second are valid. Missing or zero
+police rates, rates that lose wire precision (for example 16,777,217 bits/second),
+and a non-null rate on `discard` are rejected on startup, reload and playbook
+edits. Correct the step before reloading; a failed playbook reload keeps the
+previous running playbooks.
 
 ### Escalation
 
