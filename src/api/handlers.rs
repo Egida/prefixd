@@ -3131,10 +3131,88 @@ pub async fn change_password(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_list_cursor, encode_list_cursor};
+    use super::{
+        FastNetMonAttackDetails, classify_fastnetmon_vector, decode_list_cursor, encode_list_cursor,
+    };
     use crate::db::{ListCursor, PopInfo};
+    use crate::domain::AttackVector;
     use chrono::{DateTime, Utc};
     use uuid::Uuid;
+
+    #[test]
+    fn test_fastnetmon_syn_percentage_boundaries() {
+        use AttackVector::{AckFlood, IcmpFlood, SynFlood, UdpFlood, Unknown};
+
+        let max = i64::MAX;
+        let scale = max / 100;
+        for (name, tcp_pps, syn_pps, udp_pps, icmp_pps, expected) in [
+            ("maximum", max, max, 0, 0, SynFlood),
+            ("near maximum", max, max - 1, 0, 0, SynFlood),
+            (
+                "large below threshold",
+                scale * 100,
+                scale * 59,
+                0,
+                0,
+                AckFlood,
+            ),
+            (
+                "large exact threshold",
+                scale * 100,
+                scale * 60,
+                0,
+                0,
+                AckFlood,
+            ),
+            (
+                "large above threshold",
+                scale * 100,
+                scale * 61,
+                0,
+                0,
+                SynFlood,
+            ),
+            ("below threshold", 100, 59, 0, 0, AckFlood),
+            ("exact threshold", 100, 60, 0, 0, AckFlood),
+            ("above threshold", 100, 61, 0, 0, SynFlood),
+            ("fractional percent truncates", 1000, 609, 0, 0, AckFlood),
+            (
+                "integer percent exceeds threshold",
+                1000,
+                610,
+                0,
+                0,
+                SynFlood,
+            ),
+            ("zero TCP", 0, 1, 0, 0, SynFlood),
+            ("zero TCP with maximum SYN", 0, max, 0, 0, SynFlood),
+            ("all zero", 0, 0, 0, 0, Unknown),
+            ("negative TCP clamps denominator", -1, 1, 0, 0, SynFlood),
+            ("negative SYN", 100, -1, 0, 0, AckFlood),
+            ("minimum SYN", max, i64::MIN, 0, 0, AckFlood),
+            (
+                "negative counters retain protocol tie",
+                -1,
+                -1,
+                -1,
+                -2,
+                UdpFlood,
+            ),
+            ("ordinary SYN", 1000, 700, 100, 0, SynFlood),
+            ("UDP dominates SYN", 100, 90, 1000, 0, UdpFlood),
+            ("ordinary TCP", 1000, 200, 100, 0, AckFlood),
+            ("ordinary ICMP", 100, 0, 0, 1000, IcmpFlood),
+        ] {
+            let details: FastNetMonAttackDetails = serde_json::from_value(serde_json::json!({
+                "incoming_tcp_pps": tcp_pps,
+                "incoming_syn_tcp_pps": syn_pps,
+                "incoming_udp_pps": udp_pps,
+                "incoming_icmp_pps": icmp_pps,
+            }))
+            .unwrap();
+            assert_eq!(classify_fastnetmon_vector(&details), expected, "{name}");
+        }
+    }
 
     #[test]
     fn test_cursor_encoding_known_value() {
@@ -5151,7 +5229,10 @@ fn classify_fastnetmon_vector(details: &FastNetMonAttackDetails) -> AttackVector
     let icmp_pps = details.incoming_icmp_pps.unwrap_or(0);
 
     // Check for SYN flood: SYN PPS is dominant fraction of TCP
-    if syn_pps > 0 && (tcp_pps == 0 || syn_pps * 100 / tcp_pps.max(1) > 60) && syn_pps > udp_pps {
+    if syn_pps > 0
+        && (tcp_pps == 0 || i128::from(syn_pps) * 100 / i128::from(tcp_pps.max(1)) > 60)
+        && syn_pps > udp_pps
+    {
         return AttackVector::SynFlood;
     }
 
