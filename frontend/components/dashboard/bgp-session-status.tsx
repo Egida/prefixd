@@ -34,7 +34,7 @@ export function BgpSessionStatus() {
         <span aria-hidden="true" className={cn("size-2 rounded-full", isUp ? "bg-primary" : isError ? "bg-destructive" : "bg-muted-foreground")} />
         <span className="text-muted-foreground">Backend</span>
         <span className="font-medium">{observed ? observed.speaker?.backend ?? "Unknown backend" : "Unavailable"}</span>
-        <span className={cn("font-mono text-xs", isUp ? "text-primary" : isError ? "text-destructive" : "text-muted-foreground")}>{status}</span>
+        <span className="text-muted-foreground">Peers <span className={cn("font-mono text-xs", isUp ? "text-primary" : isError ? "text-destructive" : "text-muted-foreground")}>{status}</span></span>
       </div>
       {error ? (
         <span role="status" className="text-destructive">Health unavailable. Retrying automatically.</span>
