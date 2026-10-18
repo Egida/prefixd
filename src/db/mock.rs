@@ -338,6 +338,47 @@ impl RepositoryTrait for MockRepository {
         Ok(())
     }
 
+    async fn admit_mitigation(
+        &self,
+        m: &Mitigation,
+        quotas: &crate::config::QuotasConfig,
+    ) -> Result<()> {
+        let mut mitigations = self.mitigations.lock().unwrap();
+        if let Some(customer_id) = &m.customer_id {
+            let count = mitigations
+                .iter()
+                .filter(|existing| {
+                    existing.is_active() && existing.customer_id.as_ref() == Some(customer_id)
+                })
+                .count();
+            super::repository::check_active_quota(
+                "customer",
+                u32::try_from(count).unwrap_or(u32::MAX),
+                quotas.max_active_per_customer,
+            )?;
+        }
+        let count = mitigations
+            .iter()
+            .filter(|existing| existing.is_active() && existing.pop == m.pop)
+            .count();
+        super::repository::check_active_quota(
+            "pop",
+            u32::try_from(count).unwrap_or(u32::MAX),
+            quotas.max_active_per_pop,
+        )?;
+        let count = mitigations
+            .iter()
+            .filter(|existing| existing.is_active())
+            .count();
+        super::repository::check_active_quota(
+            "global",
+            u32::try_from(count).unwrap_or(u32::MAX),
+            quotas.max_active_global,
+        )?;
+        mitigations.push(m.clone());
+        Ok(())
+    }
+
     async fn update_mitigation(&self, m: &Mitigation) -> Result<()> {
         let mut mitigations = self.mitigations.lock().unwrap();
         if let Some(existing) = mitigations

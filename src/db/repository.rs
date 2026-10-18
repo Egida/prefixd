@@ -1,10 +1,12 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use sqlx::{FromRow, PgPool};
+use sqlx::{FromRow, PgConnection, PgPool};
+use std::time::Duration;
 use uuid::Uuid;
 
 use super::{ListParams, MitigationListParams, NotificationPreferences, RepositoryTrait};
+use crate::config::QuotasConfig;
 use crate::correlation::engine::{
     CorroboratingSignal, EventDimensions, SignalGroup, SignalGroupEvent, SignalGroupFilter,
 };
@@ -12,8 +14,21 @@ use crate::domain::{
     AttackEvent, Mitigation, MitigationRow, MitigationStatus, Operator, OperatorRole,
     WithdrawalRequest,
 };
-use crate::error::{PrefixdError, Result};
+use crate::error::{GuardrailError, PrefixdError, Result};
 use crate::observability::{ActorType, AuditEntry, metrics::ROW_PARSE_ERRORS};
+
+pub(super) fn check_active_quota(quota_type: &str, current: u32, max: u32) -> Result<()> {
+    if current >= max {
+        return Err(PrefixdError::GuardrailViolation(
+            GuardrailError::QuotaExceeded {
+                quota_type: quota_type.into(),
+                current,
+                max,
+            },
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, FromRow)]
 struct AuditRow {
@@ -64,6 +79,47 @@ pub struct Repository {
 impl Repository {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    async fn insert_mitigation_on(connection: &mut PgConnection, m: &Mitigation) -> Result<()> {
+        let match_json = serde_json::to_string(&m.match_criteria)?;
+        let action_params_json = serde_json::to_string(&m.action_params)?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO mitigations (
+                mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
+                match_json, action_type, action_params_json, status,
+                created_at, updated_at, expires_at, withdrawn_at,
+                triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
+                signal_group_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+            "#,
+        )
+        .bind(m.mitigation_id)
+        .bind(&m.scope_hash)
+        .bind(&m.pop)
+        .bind(&m.customer_id)
+        .bind(&m.service_id)
+        .bind(&m.victim_ip)
+        .bind(m.vector.as_str())
+        .bind(&match_json)
+        .bind(m.action_type.as_str())
+        .bind(&action_params_json)
+        .bind(m.status.as_str())
+        .bind(m.created_at)
+        .bind(m.updated_at)
+        .bind(m.expires_at)
+        .bind(m.withdrawn_at)
+        .bind(m.triggering_event_id)
+        .bind(m.last_event_id)
+        .bind(m.escalated_from_id)
+        .bind(&m.reason)
+        .bind(&m.rejection_reason)
+        .bind(m.signal_group_id)
+        .execute(connection)
+        .await?;
+        Ok(())
     }
 }
 
@@ -394,44 +450,37 @@ impl RepositoryTrait for Repository {
     }
 
     async fn insert_mitigation(&self, m: &Mitigation) -> Result<()> {
-        let match_json = serde_json::to_string(&m.match_criteria)?;
-        let action_params_json = serde_json::to_string(&m.action_params)?;
+        Self::insert_mitigation_on(&mut *self.pool.acquire().await?, m).await
+    }
 
-        sqlx::query(
-            r#"
-            INSERT INTO mitigations (
-                mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
-                match_json, action_type, action_params_json, status,
-                created_at, updated_at, expires_at, withdrawn_at,
-                triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
-                signal_group_id
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
-            "#,
-        )
-        .bind(m.mitigation_id)
-        .bind(&m.scope_hash)
-        .bind(&m.pop)
-        .bind(&m.customer_id)
-        .bind(&m.service_id)
-        .bind(&m.victim_ip)
-        .bind(m.vector.as_str())
-        .bind(&match_json)
-        .bind(m.action_type.as_str())
-        .bind(&action_params_json)
-        .bind(m.status.as_str())
-        .bind(m.created_at)
-        .bind(m.updated_at)
-        .bind(m.expires_at)
-        .bind(m.withdrawn_at)
-        .bind(m.triggering_event_id)
-        .bind(m.last_event_id)
-        .bind(m.escalated_from_id)
-        .bind(&m.reason)
-        .bind(&m.rejection_reason)
-        .bind(m.signal_group_id)
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+    async fn admit_mitigation(&self, m: &Mitigation, quotas: &QuotasConfig) -> Result<()> {
+        // Bound the complete admission, including pool acquisition. The server bounds also
+        // limit residual work while SQLx drives rollback after cancellation.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            // Explicit isolation is required: a session default of REPEATABLE READ could
+            // otherwise keep the snapshot taken before waiting for the admission lock.
+            let mut tx = self.pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED").await?;
+            sqlx::query("SET LOCAL lock_timeout = '5s'").execute(&mut *tx).await?;
+            sqlx::query("SET LOCAL statement_timeout = '5s'").execute(&mut *tx).await?;
+            // Fixed two-key namespace: prefixd / quota admission. This serializes only
+            // new admissions; lifecycle updates and withdrawals do not take this lock.
+            sqlx::query("SELECT pg_advisory_xact_lock(1886545528, 1903522164)")
+                .execute(&mut *tx).await?;
+            if let Some(customer_id) = &m.customer_id {
+                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE customer_id = $1 AND status IN ('pending', 'active', 'escalated')")
+                    .bind(customer_id).fetch_one(&mut *tx).await?;
+                check_active_quota("customer", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_per_customer)?;
+            }
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE pop = $1 AND status IN ('pending', 'active', 'escalated')")
+                .bind(&m.pop).fetch_one(&mut *tx).await?;
+            check_active_quota("pop", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_per_pop)?;
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM mitigations WHERE status IN ('pending', 'active', 'escalated')")
+                .fetch_one(&mut *tx).await?;
+            check_active_quota("global", u32::try_from(count).unwrap_or(u32::MAX), quotas.max_active_global)?;
+            Self::insert_mitigation_on(&mut tx, m).await?;
+            tx.commit().await?;
+            Ok(())
+        }).await.map_err(|_| PrefixdError::Internal("mitigation admission timed out".into()))?
     }
 
     async fn update_mitigation(&self, m: &Mitigation) -> Result<()> {

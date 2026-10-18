@@ -256,6 +256,19 @@ quotas:
   max_announcements_per_peer: 100
 ```
 
+New mitigation admission checks customer, POP, then global quotas atomically in
+PostgreSQL across controllers sharing the database. Pending, active and escalated
+rows count, including active rows whose TTL has passed but whose lifecycle has not
+yet completed. A mitigation without a customer skips the customer quota. Existing
+owner extensions do not consume a new slot. Admission has a fixed five-second
+admission deadline covering connection acquisition through commit, after preflight
+checks. Failure returns an error before this request sends an announcement. A timeout
+while awaiting COMMIT can leave committed intent for later reconciliation to announce.
+A controller holds its local lifecycle mutex during this
+wait, so local lifecycle operations can wait behind admission. Other controllers'
+withdrawals do not acquire the admission lock. The rate and per-peer settings above
+are separate from these active-mitigation limits.
+
 ### Timers
 
 ```yaml
