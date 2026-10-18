@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Reject local and documentation IPv6 literals in alert destination URL edits,
+  including IPv4-mapped forms of blocked IPv4 addresses, and reject absolute
+  `localhost.` names and their subdomains. Rejected saves preserve
+  the running configuration and saved secrets; DNS and redirect targets are not
+  checked by this literal-address validation.
+
 - Return controlled database decode errors for PostgreSQL timestamps outside
   Chrono's supported finite range, including infinity, instead of unwinding
   application-owned reads. Preserve ordinary timestamp precision and nullability.

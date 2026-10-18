@@ -824,14 +824,18 @@ fn validate_destination_url(value: &str, field: &str, ctx: &str, errors: &mut Ve
         return;
     };
 
-    let host_lower = host.to_ascii_lowercase();
+    let host_lower = host.trim_end_matches('.').to_ascii_lowercase();
     if host_lower == "localhost" || host_lower.ends_with(".localhost") {
         errors.push(format!("{}: {} host is not allowed", ctx, field));
         return;
     }
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_private_or_local_ip(ip) {
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = literal.parse::<IpAddr>() {
+        if is_private_or_local_ip(ip.to_canonical()) {
             errors.push(format!("{}: {} host IP is not allowed", ctx, field));
         }
     }
@@ -1210,6 +1214,114 @@ mod tests {
         };
         let errors = config.validate();
         assert!(errors.iter().any(|e| e.contains("host IP is not allowed")));
+    }
+
+    #[test]
+    fn destination_url_validation_covers_literal_address_classes() {
+        let destinations = [
+            ("slack", "webhook_url"),
+            ("discord", "webhook_url"),
+            ("teams", "webhook_url"),
+            ("pagerduty", "events_url"),
+            ("generic", "url"),
+        ];
+        let mut cases = vec![
+            (
+                "not a URL with request-secret".to_string(),
+                Some("must be a valid URL"),
+            ),
+            (
+                "https://[::1/request-secret".to_string(),
+                Some("must be a valid URL"),
+            ),
+            (
+                "http://example.com/request-secret".to_string(),
+                Some("must use https"),
+            ),
+            (
+                "ftp://example.com/request-secret".to_string(),
+                Some("must use https"),
+            ),
+            (
+                "https://localhost/request-secret".to_string(),
+                Some("host is not allowed"),
+            ),
+            (
+                "https://sub.LOCALHOST/request-secret".to_string(),
+                Some("host is not allowed"),
+            ),
+            (
+                "https://localhost./request-secret".to_string(),
+                Some("host is not allowed"),
+            ),
+            (
+                "https://sub.LOCALHOST./request-secret".to_string(),
+                Some("host is not allowed"),
+            ),
+        ];
+        for host in [
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "224.0.0.1",
+            "255.255.255.255",
+            "192.0.2.1",
+            "0.0.0.0",
+            "2130706433",
+            "[::1]",
+            "[0:0:0:0:0:0:0:1]",
+            "[fe80::1]",
+            "[fc00::1]",
+            "[fdff::1]",
+            "[::]",
+            "[ff02::1]",
+            "[2001:db8::1]",
+            "[::ffff:10.0.0.1]",
+            "[::ffff:172.16.0.1]",
+            "[::ffff:192.168.0.1]",
+            "[::ffff:127.0.0.1]",
+            "[::ffff:7f00:1]",
+            "[::ffff:169.254.169.254]",
+            "[::ffff:224.0.0.1]",
+            "[::ffff:255.255.255.255]",
+            "[::ffff:192.0.2.1]",
+            "[::ffff:0.0.0.0]",
+        ] {
+            cases.push((
+                format!("https://user:request-secret@{host}/hook?token=request-secret"),
+                Some("host IP is not allowed"),
+            ));
+        }
+        for host in [
+            "example.com",
+            "alerts.example.com",
+            "8.8.8.8",
+            "[2606:4700:4700::1111]",
+            "[::ffff:8.8.8.8]",
+        ] {
+            cases.push((format!("https://{host}/hook?token=request-secret"), None));
+        }
+
+        for (kind, field) in destinations {
+            for (url, rejection) in &cases {
+                let mut destination = serde_json::json!({ "type": kind });
+                destination[field] = url.clone().into();
+                if kind == "pagerduty" {
+                    destination["routing_key"] = "routing-secret".into();
+                }
+                let config: AlertingConfig = serde_json::from_value(serde_json::json!({
+                    "destinations": [destination],
+                }))
+                .unwrap();
+                let expected = rejection
+                    .map(|message| format!("destination[0] ({kind}): {field} {message}"))
+                    .into_iter()
+                    .collect::<Vec<_>>();
+                assert_eq!(config.validate(), expected, "{kind}: {url}");
+            }
+        }
     }
 
     #[test]
