@@ -88,7 +88,7 @@ Content-Type: application/json
 |-------|------|----------|-------------|
 | `timestamp` | datetime | yes | Event timestamp (ISO 8601) |
 | `source` | string | yes | Detector identifier (e.g. "fastnetmon", "dashboard") |
-| `victim_ip` | string | yes | IPv4 address under attack |
+| `victim_ip` | string | yes | IPv4 or IPv6 address under attack |
 | `vector` | string | yes | Attack type: `udp_flood`, `syn_flood`, `ack_flood`, `icmp_flood`, `unknown` |
 | `bps` | integer | no | Bits per second |
 | `pps` | integer | no | Packets per second |
@@ -97,6 +97,11 @@ Content-Type: application/json
 | `action` | string | no | `"ban"` (default) or `"unban"` |
 | `event_id` | string | no | External event ID (for dedup / unban correlation) |
 | `raw_details` | object | no | Raw detector payload for forensics |
+
+Automatic detector mitigation uses a canonical host destination: `/32` for IPv4
+and `/128` for IPv6. `icmp_flood` selects protocol 1 for IPv4 and 58 for IPv6 in
+both event metadata and mitigation intent. TCP and UDP remain 6 and 17. Normal
+prefix, port, TTL, quota and safelist checks still apply.
 
 **Response (202 Accepted):**
 
@@ -367,7 +372,7 @@ Directly create a mitigation (e.g. from the dashboard "Mitigate Now" form). Unli
 | `operator_id` | string | no | Legacy field, ignored; authenticated operator identity is authoritative |
 | `reason` | string | yes | Reason for the mitigation |
 | `victim_ip` | string | yes | IPv4 address to protect |
-| `protocol` | string | yes | `"udp"`, `"tcp"`, `"icmp"`, or `"any"` |
+| `protocol` | string | yes | `"udp"`, `"tcp"`, `"icmp"` (protocol 1), or `"any"`; manual ICMPv6 protocol 58 is not supported |
 | `dst_ports` | array | no | Destination ports (default `[]`) |
 | `action` | string | yes | `"discard"` or `"police"` |
 | `rate_bps` | integer | conditional | Required when action is `"police"` |
