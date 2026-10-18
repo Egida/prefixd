@@ -84,6 +84,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `timers.correlation_window_seconds` configuration/API-settings field. The active
   multi-signal engine continues to use `correlation.window_seconds`.
 
+- Forbid unsafe code in the library and both binaries, and require explained
+  handwritten lint exemptions in those crates. Narrow ignored request-actor
+  suppressions to their fields.
+
 - Put active mitigation intent, signal evidence, expiry and honest router-observation
   limits first in the operator workspace. Refresh the light/dark theme, Geist
   typography and navigation; preserve user zoom and remove decorative pulses,

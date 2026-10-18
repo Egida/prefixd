@@ -5,10 +5,14 @@
 //! the GoBGP and rustbgpd backends can coexist while the swap is validated.
 #[cfg(feature = "bgp-rustbgpd")]
 pub mod rustbgpd_pb {
-    // We only need the client stubs plus the controller message types.
-    #![allow(dead_code)]
-    #![allow(clippy::enum_variant_names)]
-    #![allow(clippy::large_enum_variant)]
+    #![allow(
+        clippy::allow_attributes_without_reason,
+        reason = "Tonic-generated bindings emit lint attributes without reasons"
+    )]
+    #![allow(
+        clippy::large_enum_variant,
+        reason = "Preserve prost-generated oneof value types from the vendored speaker API"
+    )]
     tonic::include_proto!("rustbgpd.v1");
 }
 

@@ -1,9 +1,12 @@
 pub mod apipb {
+    #![allow(
+        clippy::allow_attributes_without_reason,
+        reason = "Tonic-generated bindings emit lint attributes without reasons"
+    )]
+    #![allow(
+        clippy::large_enum_variant,
+        reason = "Preserve prost-generated oneof value types from the vendored speaker API"
+    )]
     // GoBGP v4.x uses "api" package name
-    // Allow dead code - we only use a subset of the generated GoBGP API
-    // Allow enum variant naming from proto definitions
-    #![allow(dead_code)]
-    #![allow(clippy::enum_variant_names)]
-    #![allow(clippy::large_enum_variant)]
     tonic::include_proto!("api");
 }

@@ -410,7 +410,7 @@ pub struct CreateMitigationRequest {
     #[serde(default)]
     #[allow(
         dead_code,
-        reason = "Legacy input accepted for compatibility; authorization uses the session"
+        reason = "Caller-supplied actor is ignored; request authentication determines the actor"
     )]
     operator_id: String,
     reason: String,
@@ -432,16 +432,22 @@ pub struct CreateMitigationRequest {
     expires_at_cap: Option<DateTime<Utc>>,
 }
 #[derive(Deserialize)]
-#[allow(dead_code)]
 pub struct WithdrawRequest {
     #[serde(default)]
+    #[allow(
+        dead_code,
+        reason = "Caller-supplied actor is ignored; request authentication determines the actor"
+    )]
     operator_id: String,
     reason: String,
 }
 #[derive(Deserialize, ToSchema)]
-#[allow(dead_code)]
 pub struct AddSafelistRequest {
     #[serde(default)]
+    #[allow(
+        dead_code,
+        reason = "Caller-supplied actor is ignored; request authentication determines the actor"
+    )]
     operator_id: String,
     prefix: String,
     #[serde(default)]
@@ -1830,10 +1836,13 @@ pub async fn withdraw_mitigation(
 const MAX_BULK_WITHDRAW: usize = 100;
 
 #[derive(Deserialize, ToSchema)]
-#[allow(dead_code)]
 pub struct BulkWithdrawRequest {
     mitigation_ids: Vec<Uuid>,
     #[serde(default)]
+    #[allow(
+        dead_code,
+        reason = "Caller-supplied actor is ignored; request authentication determines the actor"
+    )]
     operator_id: String,
     reason: String,
 }
@@ -1974,10 +1983,13 @@ pub async fn bulk_withdraw_mitigations(
 const MAX_BULK_ACKNOWLEDGE: usize = 100;
 
 #[derive(Deserialize, ToSchema)]
-#[allow(dead_code)]
 pub struct BulkAcknowledgeRequest {
     mitigation_ids: Vec<Uuid>,
     #[serde(default)]
+    #[allow(
+        dead_code,
+        reason = "Caller-supplied actor is ignored; request authentication determines the actor"
+    )]
     operator_id: String,
 }
 

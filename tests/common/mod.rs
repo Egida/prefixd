@@ -1,4 +1,7 @@
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "Shared fixture helpers are used by different integration test crates"
+)]
 
 use std::path::Path;
 use std::sync::Arc;
