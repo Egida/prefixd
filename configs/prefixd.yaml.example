@@ -55,11 +55,6 @@ timers:
   max_ttl_seconds: 1800
   reconciliation_interval_seconds: 30
 
-escalation:
-  enabled: true
-  min_persistence_seconds: 120
-  min_confidence: 0.7
-
 storage:
   # DATABASE_URL env var takes precedence over this value
   connection_string: "postgres://prefixd:changeme@localhost:5432/prefixd"
@@ -76,4 +71,3 @@ safelist:
 
 shutdown:
   drain_timeout_seconds: 30
-  preserve_announcements: true

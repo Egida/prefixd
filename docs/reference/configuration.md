@@ -61,66 +61,8 @@ connections use the anonymous identity. The dashboard hides named preferences an
 sign-out controls. `/v1/auth/logout` still deletes a retained session and clears
 its cookie. Credential sessions and bearer-mode hybrid sessions are unchanged.
 
-### LDAP/Active Directory (Placeholder)
-
-> **Note:** LDAP authentication is not yet implemented. This schema is reserved for future use.
-
-```yaml
-http:
-  auth:
-    mode: credentials
-    ldap:
-      # LDAP server URL
-      url: "ldaps://ldap.example.com:636"
-      
-      # Service account for LDAP queries
-      bind_dn: "cn=prefixd,ou=services,dc=example,dc=com"
-      bind_password_env: "LDAP_BIND_PASSWORD"
-      
-      # Where to search for users
-      user_base_dn: "ou=users,dc=example,dc=com"
-      
-      # Filter to find user (use {username} placeholder)
-      user_filter: "(&(objectClass=user)(sAMAccountName={username}))"
-      
-      # Map LDAP groups to prefixd roles
-      role_mapping:
-        "cn=prefixd-admins,ou=groups,dc=example,dc=com": "admin"
-        "cn=noc-operators,ou=groups,dc=example,dc=com": "operator"
-        "cn=noc-viewers,ou=groups,dc=example,dc=com": "viewer"
-```
-
-### RADIUS/ISE (Placeholder)
-
-> **Note:** RADIUS authentication is not yet implemented. This schema is reserved for future use.
-
-```yaml
-http:
-  auth:
-    mode: credentials
-    radius:
-      # Primary RADIUS server
-      server: "radius.example.com:1812"
-      
-      # Backup server for failover
-      secondary_server: "radius-backup.example.com:1812"
-      
-      # Shared secret (from environment variable)
-      secret_env: "RADIUS_SECRET"
-      
-      # Timeout and retries
-      timeout_seconds: 5
-      retries: 3
-      
-      # NAS identifier for audit logs
-      nas_identifier: "prefixd-iad1"
-      
-      # Map RADIUS VSA or groups to prefixd roles
-      role_mapping:
-        "Prefixd-Admin": "admin"
-        "NOC-Operator": "operator"
-        "NOC-Viewer": "viewer"
-```
+Credentials authentication uses PostgreSQL operator accounts, Argon2 password
+verification and PostgreSQL-backed browser sessions.
 
 ### TLS
 
@@ -285,23 +227,6 @@ timers:
   
   # Quiet period after withdraw before re-announcing the same destination
   quiet_period_after_withdraw_seconds: 120
-```
-
-### Escalation
-
-```yaml
-escalation:
-  # Enable automatic escalation (police → discard)
-  enabled: true
-
-  # Minimum time before escalation eligible
-  min_persistence_seconds: 120
-
-  # Minimum confidence for escalation
-  min_confidence: 0.7
-
-  # Maximum total duration for escalated mitigations (seconds, default: 1800)
-  max_escalated_duration_seconds: 1800
 ```
 
 ### Observability
@@ -603,17 +528,18 @@ Adapters not listed fall back to `default_weight`.
 
 ```yaml
 shutdown:
-  # Seconds to wait for in-flight requests to complete during graceful shutdown
+  # Seconds to wait after signalling reconciliation to stop
   drain_timeout_seconds: 30
-  
-  # Retention preference (currently logged only; false does not withdraw rules)
-  preserve_announcements: true
 ```
 
-Graceful shutdown currently stops reconciliation and waits for the configured
-drain period. It does not withdraw announcements, including when
-`preserve_announcements` is false. Withdrawal behavior is tracked in the speaker
-compatibility work; do not use this setting as a cleanup guarantee.
+Shutdown signals reconciliation to stop and waits for the configured drain
+period before continuing server shutdown. This wait does not prove that in-flight
+requests or reconciliation have completed. Shutdown does not withdraw rules from
+the independent speaker. Controller-driven TTL cleanup requires the controller
+to run; rules can remain while prefixd is stopped.
+
+Only `drain_timeout_seconds` is accepted in `shutdown`; unknown fields cause a
+configuration error.
 
 ---
 
@@ -708,11 +634,10 @@ assets:
 
 ### Policy Profiles
 
-| Profile | Thresholds | Escalation | TTLs |
-|---------|------------|------------|------|
-| `strict` | Lower | Faster | Longer |
-| `normal` | Default | Default | Default |
-| `relaxed` | Higher | Slower | Shorter |
+`policy_profile` accepts `strict`, `normal` or `relaxed` and defaults to `normal`.
+The controller carries this metadata through inventory lookup and returns it in
+API customer context. Profiles have no implemented effect on thresholds,
+automatic escalation or TTLs.
 
 ---
 
@@ -769,16 +694,19 @@ and a non-null rate on `discard` are rejected on startup, reload and playbook
 edits. Correct the step before reloading; a failed playbook reload keeps the
 previous running playbooks.
 
-### Escalation
+### Step selection
 
-Steps are tried in order. If attack persists after step 1, step 2 is used:
+The controller uses the first step of the matching playbook. Later steps and
+`require_confidence_at_least` / `require_persistence_seconds` remain accepted in
+the playbook schema, but automatic progression to later steps is unavailable.
+The second step below is retained configuration, not an automatic fallback:
 
 ```yaml
 steps:
   - action: police        # Step 1: Rate limit
     rate_bps: 10000000
     ttl_seconds: 120
-  - action: discard       # Step 2: Drop (if attack continues)
+  - action: discard       # Later step: not selected automatically
     ttl_seconds: 300
     require_confidence_at_least: 0.7
 ```
@@ -801,7 +729,7 @@ default_playbook:
 
 ```yaml
 playbooks:
-  # UDP flood: police first, escalate to discard
+  # UDP flood: police; the later discard step is not selected automatically
   - name: udp_flood
     match:
       vector: udp_flood

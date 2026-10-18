@@ -3431,7 +3431,6 @@ pub async fn get_config_settings(
         "guardrails": s.guardrails,
         "quotas": s.quotas,
         "timers": s.timers,
-        "escalation": s.escalation,
         "storage": { "connection_string": "[redacted]" },
         "observability": {
             "log_format": s.observability.log_format,

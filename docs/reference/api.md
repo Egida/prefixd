@@ -1682,17 +1682,16 @@ Returns the running daemon configuration with sensitive fields redacted (allowli
     "guardrails": { "require_ttl": true, "dst_prefix_minlen": 32, "dst_prefix_maxlen": 32, "max_ports": 8 },
     "quotas": { "max_active_per_customer": 5, "max_active_global": 500 },
     "timers": { "default_ttl_seconds": 120, "reconciliation_interval_seconds": 30 },
-    "escalation": { "enabled": true },
     "storage": { "connection_string": "[redacted]" },
     "observability": { "log_format": "json", "log_level": "info" },
     "safelist": { "count": 3 },
-    "shutdown": { "drain_timeout_seconds": 30, "preserve_announcements": true }
+    "shutdown": { "drain_timeout_seconds": 30 }
   },
   "loaded_at": "2026-02-18T12:00:00Z"
 }
 ```
 
-> **Note:** TLS paths, LDAP/RADIUS configs, bearer token env vars, BGP passwords, gRPC endpoints, router ID, and safelist prefixes are omitted. New config fields are hidden by default.
+> **Note:** TLS paths, bearer token env vars, BGP passwords, gRPC endpoints, router ID, and safelist prefixes are omitted. New config fields are hidden by default.
 
 ### Config Inventory
 

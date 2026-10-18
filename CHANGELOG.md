@@ -97,6 +97,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discard/policing support.
 
 ### Changed
+- **Breaking:** Remove unused `escalation`, `http.auth.ldap` and `http.auth.radius`
+  configuration sections; remove them from controller configurations. Settings
+  JSON drops `escalation`; authentication still exposes only its mode. Remove the
+  public Rust fields `Settings.escalation`, `AuthConfig.ldap` and
+  `AuthConfig.radius`, types `EscalationConfig`, `EscalationEvaluator`,
+  `EscalationDecision`, `LdapConfig` and `RadiusConfig`, and
+  `Playbooks::get_escalation_step`. Credentials authentication uses PostgreSQL
+  operators. Playbooks select their first step; historical escalated state and
+  the playbook step schema are retained.
+
 
 - **Breaking:** Remove ineffective `observability.metrics_listen` and
   `observability.audit_log_path` settings. Remove these keys from existing
@@ -151,6 +161,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binaries. Current stable tests and lints remain required.
 
 ### Fixed
+
+- **Breaking:** Remove the ineffective `shutdown.preserve_announcements` config
+  key, settings JSON field and shutdown log attribute. Remove the key from existing
+  configs; unknown shutdown fields now fail parsing. Shutdown still signals
+  reconciliation to stop, waits the configured period and leaves speaker rules
+  in place.
 
 - Fail IP history and incident reports when a selected mitigation cannot be decoded,
   instead of returning successful partial history. Preserve existing IP filters

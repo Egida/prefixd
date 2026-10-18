@@ -14,10 +14,10 @@ use prefixd::AppState;
 use prefixd::api::create_test_router;
 use prefixd::bgp::MockAnnouncer;
 use prefixd::config::{
-    AllowedPorts, Asset, AuthConfig, AuthMode, BgpConfig, BgpMode, Customer, EscalationConfig,
-    GuardrailsConfig, HttpConfig, Inventory, ObservabilityConfig, Playbook, PlaybookAction,
-    PlaybookMatch, PlaybookStep, Playbooks, QuotasConfig, RateLimitConfig, SafelistConfig, Service,
-    Settings, ShutdownConfig, StorageConfig, TimersConfig,
+    AllowedPorts, Asset, AuthConfig, AuthMode, BgpConfig, BgpMode, Customer, GuardrailsConfig,
+    HttpConfig, Inventory, ObservabilityConfig, Playbook, PlaybookAction, PlaybookMatch,
+    PlaybookStep, Playbooks, QuotasConfig, RateLimitConfig, SafelistConfig, Service, Settings,
+    ShutdownConfig, StorageConfig, TimersConfig,
 };
 use prefixd::db::{MockRepository, RepositoryTrait};
 use prefixd::domain::AttackVector;
@@ -1037,8 +1037,6 @@ fn test_settings() -> Settings {
             auth: AuthConfig {
                 mode: AuthMode::None,
                 bearer_token_env: None,
-                ldap: None,
-                radius: None,
             },
             rate_limit: RateLimitConfig::default(),
             tls: None,
@@ -1079,12 +1077,6 @@ fn test_settings() -> Settings {
             max_ttl_seconds: 1800,
             reconciliation_interval_seconds: 30,
             quiet_period_after_withdraw_seconds: 120,
-        },
-        escalation: EscalationConfig {
-            enabled: true,
-            min_persistence_seconds: 120,
-            min_confidence: 0.7,
-            max_escalated_duration_seconds: 1800,
         },
         storage: StorageConfig {
             connection_string: "postgres://unused:unused@localhost/unused".to_string(),
@@ -4612,8 +4604,6 @@ async fn test_signal_groups_auth_required() {
     settings.http.auth = prefixd::config::AuthConfig {
         mode: prefixd::config::AuthMode::Bearer,
         bearer_token_env: Some("TEST_PREFIXD_TOKEN".to_string()),
-        ldap: None,
-        radius: None,
     };
     settings.http.auth.mode = AuthMode::Credentials;
 
@@ -5385,8 +5375,6 @@ async fn test_alertmanager_auth_required() {
     settings.http.auth = prefixd::config::AuthConfig {
         mode: prefixd::config::AuthMode::Bearer,
         bearer_token_env: Some("TEST_PREFIXD_TOKEN".to_string()),
-        ldap: None,
-        radius: None,
     };
     settings.http.auth.mode = AuthMode::Credentials;
 
@@ -5821,8 +5809,6 @@ async fn test_fastnetmon_auth_required() {
     settings.http.auth = prefixd::config::AuthConfig {
         mode: prefixd::config::AuthMode::Bearer,
         bearer_token_env: Some("TEST_PREFIXD_FNM_TOKEN".to_string()),
-        ldap: None,
-        radius: None,
     };
     settings.http.auth.mode = AuthMode::Credentials;
 

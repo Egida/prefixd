@@ -12,7 +12,6 @@ pub struct Settings {
     pub guardrails: GuardrailsConfig,
     pub quotas: QuotasConfig,
     pub timers: TimersConfig,
-    pub escalation: EscalationConfig,
     pub storage: StorageConfig,
     pub observability: ObservabilityConfig,
     #[serde(default)]
@@ -86,12 +85,6 @@ pub struct AuthConfig {
     pub mode: AuthMode,
     #[serde(default)]
     pub bearer_token_env: Option<String>,
-    /// LDAP configuration (placeholder, not yet implemented)
-    #[serde(default)]
-    pub ldap: Option<LdapConfig>,
-    /// RADIUS configuration (placeholder, not yet implemented)
-    #[serde(default)]
-    pub radius: Option<RadiusConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,56 +98,6 @@ pub enum AuthMode {
     Credentials,
     /// No authentication (development only)
     None,
-}
-
-/// LDAP configuration (placeholder for future implementation)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LdapConfig {
-    /// LDAP server URL (e.g., "ldaps://ldap.example.com:636")
-    pub url: String,
-    /// Bind DN for LDAP queries
-    pub bind_dn: String,
-    /// Environment variable containing bind password
-    pub bind_password_env: String,
-    /// Base DN for user searches
-    pub user_base_dn: String,
-    /// LDAP filter for user lookup (use {username} as placeholder)
-    pub user_filter: String,
-    /// Map LDAP groups to operator roles
-    #[serde(default)]
-    pub role_mapping: std::collections::HashMap<String, String>,
-}
-
-/// RADIUS configuration (placeholder for future implementation)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RadiusConfig {
-    /// Primary RADIUS server (host:port)
-    pub server: String,
-    /// Secondary RADIUS server for failover
-    #[serde(default)]
-    pub secondary_server: Option<String>,
-    /// Environment variable containing shared secret
-    pub secret_env: String,
-    /// Authentication timeout in seconds
-    #[serde(default = "default_radius_timeout")]
-    pub timeout_seconds: u32,
-    /// Number of retries before failover
-    #[serde(default = "default_radius_retries")]
-    pub retries: u32,
-    /// NAS identifier sent in Access-Request
-    #[serde(default)]
-    pub nas_identifier: Option<String>,
-    /// Map RADIUS VSA or groups to operator roles
-    #[serde(default)]
-    pub role_mapping: std::collections::HashMap<String, String>,
-}
-
-fn default_radius_timeout() -> u32 {
-    5
-}
-
-fn default_radius_retries() -> u32 {
-    3
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -373,28 +316,6 @@ fn default_quiet_period() -> u32 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EscalationConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default = "default_min_persistence")]
-    pub min_persistence_seconds: u32,
-    #[serde(default = "default_min_confidence")]
-    pub min_confidence: f64,
-    #[serde(default = "default_max_escalated_duration")]
-    pub max_escalated_duration_seconds: u32,
-}
-
-fn default_min_persistence() -> u32 {
-    120
-}
-fn default_min_confidence() -> f64 {
-    0.7
-}
-fn default_max_escalated_duration() -> u32 {
-    1800
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StorageConfig {
     /// PostgreSQL connection string (e.g., "postgres://user:pass@localhost/prefixd")
     pub connection_string: String,
@@ -430,18 +351,16 @@ pub struct SafelistConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShutdownConfig {
     #[serde(default = "default_drain_timeout")]
     pub drain_timeout_seconds: u32,
-    #[serde(default = "default_true")]
-    pub preserve_announcements: bool,
 }
 
 impl Default for ShutdownConfig {
     fn default() -> Self {
         Self {
             drain_timeout_seconds: default_drain_timeout(),
-            preserve_announcements: true,
         }
     }
 }
@@ -519,6 +438,10 @@ mod tests {
             let settings: Settings = crate::config::parse_yaml(yaml).unwrap();
             assert_eq!(settings.bgp.mode, expected);
             assert_eq!(settings.http.auth.mode, AuthMode::Credentials);
+            assert_eq!(
+                serde_json::to_value(settings.shutdown).unwrap(),
+                serde_json::json!({ "drain_timeout_seconds": 30 })
+            );
         }
     }
 
@@ -551,10 +474,6 @@ timers:
   min_ttl_seconds: 30
   max_ttl_seconds: 1800
   reconciliation_interval_seconds: 30
-escalation:
-  enabled: true
-  min_persistence_seconds: 120
-  min_confidence: 0.7
 storage:
   connection_string: "postgres://user:pass@localhost/prefixd"
 observability:
@@ -590,6 +509,50 @@ observability:
             assert!(error.contains("unknown field"), "{key}: {error}");
             assert!(error.contains(key), "{key}: {error}");
             assert!(!error.contains(secret), "{key}: configuration value leaked");
+        }
+    }
+
+    #[test]
+    fn shutdown_settings_preserve_drain_periods_and_exact_json() {
+        assert_eq!(
+            serde_json::to_value(ShutdownConfig::default()).unwrap(),
+            serde_json::json!({ "drain_timeout_seconds": 30 })
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("prefixd.yaml");
+        for (shutdown, expected) in [
+            ("", 30),
+            ("shutdown: {}\n", 30),
+            ("shutdown:\n  drain_timeout_seconds: 7\n", 7),
+            ("shutdown:\n  drain_timeout_seconds: 0\n", 0),
+        ] {
+            std::fs::write(&path, format!("{MINIMAL_SETTINGS_YAML}{shutdown}")).unwrap();
+            let settings = Settings::load(&path).unwrap();
+            assert_eq!(settings.shutdown.drain_timeout_seconds, expected);
+            assert_eq!(
+                serde_json::to_value(settings.shutdown).unwrap(),
+                serde_json::json!({ "drain_timeout_seconds": expected })
+            );
+        }
+    }
+
+    #[test]
+    fn settings_reject_removed_and_unknown_shutdown_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("prefixd.yaml");
+        for (key, value) in [
+            ("preserve_announcements", "false"),
+            ("preserve_announcements", "true"),
+            ("drain_timeot_seconds", "17"),
+        ] {
+            std::fs::write(
+                &path,
+                format!("{MINIMAL_SETTINGS_YAML}shutdown:\n  {key}: {value}\n"),
+            )
+            .unwrap();
+            let error = Settings::load(&path).unwrap_err().to_string();
+            assert!(error.contains("unknown field"), "{key}: {error}");
+            assert!(error.contains(key), "{key}: {error}");
         }
     }
 
