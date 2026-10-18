@@ -1,6 +1,10 @@
 # Features
 
-Comprehensive list of prefixd capabilities.
+Implemented capabilities and operational limits. rustbgpd is the preferred
+speaker integration and GoBGP remains selectable. For current build requirements,
+backend selection and deployment defaults, use the
+[speaker reference](docs/reference/speaker-backends.md) and
+[quickstart](docs/tutorials/quickstart.md).
 
 ---
 
@@ -11,14 +15,16 @@ Comprehensive list of prefixd capabilities.
 - `POST /v1/events` accepts attack signals from any detector
 - `POST /v1/events/batch` accepts up to 100 events per request with partial success semantics (202/207)
 - Unified ban/unban: `action` field supports `"ban"` (default) or `"unban"`
-- Schema: victim IP, attack vector, confidence score, optional ports/protocol
-- Idempotent: duplicate events extend TTL instead of creating new mitigations
-- Rate-limited: configurable token bucket (default 100 req/s burst, 10 req/s sustained)
+- Schema: required timestamp, source, victim IP and vector; optional traffic,
+  confidence and destination ports; automatic policy derives protocol from vector
+- Deduplication: repeated source/external ban IDs return a conflict; a distinct
+  event for an existing canonical owner can extend that mitigation's TTL
+- Rate-limited: one configured token bucket shared by HTTP routes
 - `raw_details`: JSONB field for storing forensic data from detectors
 
 ### Supported Detectors
 
-Any system that can POST JSON works. Tested with:
+Available ingestion paths (payloads must satisfy the selected adapter and authentication):
 
 - **FastNetMon Community** - Notify script integration ([setup guide](docs/how-to/detectors/fastnetmon.md))
 - **FastNetMon** (native webhook) - `POST /v1/signals/fastnetmon` accepts FastNetMon's JSON payload directly, classifies vector from traffic breakdown, configurable confidence mapping
@@ -32,6 +38,7 @@ Any system that can POST JSON works. Tested with:
 ```json
 {
   "event_id": "stable-hash-for-idempotency",
+  "timestamp": "2026-10-18T00:00:00Z",
   "source": "fastnetmon",
   "victim_ip": "203.0.113.10",
   "vector": "udp_flood",
@@ -46,11 +53,9 @@ Any system that can POST JSON works. Tested with:
 
 ### Unban Flow
 
-When detector sends `action: "unban"` with the same `event_id`:
-1. prefixd finds the original ban event by `source` + `event_id`
-2. Looks up the active mitigation created from that event
-3. Withdraws the FlowSpec rule from GoBGP
-4. Updates mitigation status to "withdrawn"
+An unban matches the original source and external event ID. prefixd records
+cleanup intent and retries deletion on the original speaker after uncertainty or
+failure. See [withdrawal recovery](docs/reference/speaker-backends.md#withdrawal-recovery).
 
 ---
 
@@ -67,40 +72,39 @@ playbooks:
       vector: udp_flood
     steps:
       - action: police
-        rate_bps: 10000000  # 10 Mbps rate limit
+        rate_bps: 10000000  # 10 Mbps policy rate
         ttl_seconds: 120
-      - action: discard     # Escalate if attack persists
-        ttl_seconds: 300
-        require_confidence_at_least: 0.8
 ```
 
-### Escalation Logic
+### Current Policy Execution
 
-- **Police first** - Rate-limit before dropping (less collateral damage)
-- **Confidence thresholds** - Require higher confidence for discard actions
-- **Persistence tracking** - Escalate only if attack continues after initial mitigation
-- **Policy profiles** - Strict/normal/relaxed modes per customer
+- The first matching playbook supplies its initial action and TTL.
+- Optional multi-signal correlation applies source-count and confidence gates.
+- A distinct event for the same canonical rule extends its existing owner.
+- Later-step escalation fields and policy helpers exist, but the production
+  ingestion/scheduler path does not currently execute automatic escalation.
 
 ### Port Handling
 
-- **Allowed ports exclusion** - DNS server under UDP flood? Block UDP except port 53
-- **Port intersection** - Multiple events for same victim merge intelligently
-- **Disjoint ports** - Parallel mitigations when port sets don't overlap
+Policy uses equality matches, not port exclusions. For UDP/TCP floods, explicit
+nonempty event ports and service `allowed_ports` are intersected. Disjoint
+nonempty lists are rejected with `422` / `NoAllowedPorts` before mitigation
+creation or owner TTL extension. With no event ports, configured service ports
+are used; with no service restriction, event ports are used. Deliberately
+unconstrained inputs retain no destination-port restriction. The adapters do not
+encode a rule such as "UDP except port 53".
 
 ### Supported Attack Vectors
 
-| Vector | Protocol | Default Response |
-|--------|----------|------------------|
-| `udp_flood` | UDP | Police → Discard |
-| `syn_flood` | TCP | Discard |
-| `ack_flood` | TCP | Discard |
-| `icmp_flood` | ICMP | Discard |
-| `dns_amplification` | UDP/53 | Police |
-| `ntp_amplification` | UDP/123 | Police |
-| `memcached_amplification` | UDP/11211 | Police |
-| `chargen_amplification` | UDP/19 | Police |
-| `ssdp_amplification` | UDP/1900 | Police |
-| `generic` | Any | Configurable |
+| Vector | Automatic protocol |
+| --- | --- |
+| `udp_flood` | UDP (17) |
+| `syn_flood`, `ack_flood` | TCP (6) |
+| `icmp_flood` | ICMP (1) for IPv4, ICMPv6 (58) for IPv6 |
+| `unknown` | No protocol constraint |
+
+The selected playbook determines the action; a vector name does not imply a
+built-in response. Detector-specific vector names need adapter normalization.
 
 ---
 
@@ -118,7 +122,8 @@ Safety limits that prevent accidental broad impact.
 
 - **Mandatory TTL** - Every mitigation must have an expiration
 - **Min/max bounds** - Configurable `min_ttl_seconds` and `max_ttl_seconds`
-- **Auto-expiry** - Reconciliation loop withdraws expired rules
+- **Auto-expiry** - The running reconciliation loop requests withdrawal and
+  retries failed cleanup; the speaker has no controller TTL lease
 
 ### Quotas
 
@@ -129,7 +134,7 @@ Safety limits that prevent accidental broad impact.
 ### Port Limits
 
 - **Max ports per rule** - Default 8 (router memory protection)
-- **Port validation** - Must be valid TCP/UDP port range
+- **Port matching** - Lists of discrete destination-port equalities, not ranges
 
 ### Example Configuration
 
@@ -152,65 +157,28 @@ quotas:
 
 ## BGP FlowSpec
 
-### GoBGP Integration
+### Selectable Speakers
 
-- **gRPC client** - Native GoBGP v4.x API integration
-- **IPv4 FlowSpec** - AFI=1, SAFI=133
-- **IPv6 FlowSpec** - AFI=2, SAFI=133
-- **Retry logic** - Exponential backoff on transient failures
-- **Connection management** - Automatic reconnection with state sync
+rustbgpd is preferred; GoBGP remains supported and selectable through
+configuration. Both use the same policy and lifecycle logic and support IPv4 and
+IPv6 FlowSpec with discard or policing. Exact build, selection, transport and
+observation details are in the [backend reference](docs/reference/speaker-backends.md).
 
-### Tested Routers
+The current rule scope is destination prefix, optional protocol and discrete
+destination-port equalities. Policy rates use bits/sec; adapters convert wire
+units. Automatic ICMP maps to protocol 1 for IPv4 and 58 for IPv6; the manual
+API's `icmp` selector currently means protocol 1.
 
-End-to-end verified with real router implementations:
-
-| Router | Platform | Status | Notes |
-|--------|----------|--------|-------|
-| **Juniper cJunosEvolved** | PTX10002-36QDD (25.4R1.13-EVO) | Verified | Announce, rate-limit, withdraw, TTL expiry |
-| **FRR** | 10.3.1 | Verified | Native container, works everywhere |
-| Juniper vJunos-router | vMX | Untested | Bare metal only (no VM support) |
-| Arista cEOS | 7xxx series | Planned | |
-| Cisco XRd | IOS-XR | Planned | |
-
-#### Juniper-Specific Notes
-
-- GoBGP must advertise **only** `ipv4-flowspec` AFI-SAFI to Juniper - advertising `inet-unicast` alongside causes Open Message Error (subcode 7)
-- `no-validate` with import policy required for FlowSpec route acceptance
-- `routing-options flow validation` and `term-order standard` must be configured
-- BGP license warning is cosmetic - FlowSpec works without a license on cJunosEvolved
-- Nokia SR Linux does **not** support FlowSpec (only SR OS 7750 does)
-
-### FlowSpec NLRI Construction
-
-Supported match criteria (RFC 5575):
-
-| Component | Description |
-|-----------|-------------|
-| Destination prefix | /32 or /128 victim IP |
-| Protocol | TCP, UDP, ICMP |
-| Destination port | Single ports or ranges |
-
-### FlowSpec Actions
-
-| Action | Extended Community | Effect |
-|--------|-------------------|--------|
-| `discard` | traffic-rate 0 | Drop all matching traffic |
-| `police` | traffic-rate N | Rate-limit to N bps |
-
-### Example Announcement
-
-```
-Route Distinguisher: 0:0
-Destination: 203.0.113.10/32
-Protocol: UDP
-Destination Port: !=53
-Extended Community: traffic-rate: 10000000 (10 Mbps)
-```
+Saved intent, successful speaker acceptance and local read-back do not prove
+router forwarding. The [backend checks](docs/reference/speaker-backends.md#readable-backend-qualification)
+cover their stated RPC, restart and peer-receipt scope. Historical GoBGP-backed
+router reports retain their original scope in the [vendor matrix](docs/reference/vendors.md).
+ExaBGP and other production adapters remain planned.
 
 ### FlowSpec NLRI Fuzz Testing
 
-- **proptest** — 8 property-based tests covering prefix parsing with arbitrary strings, NLRI v4/v6 build+decode roundtrip, full path roundtrip preserving nlri_hash, and action type roundtrip. Runs in CI with `cargo test`.
-- **cargo-fuzz** — 2 libFuzzer targets (`fuzz_prefix_parse`, `fuzz_nlri_decode`) for continuous offline fuzzing. Run with `cargo +nightly fuzz run <target>`.
+- **proptest** — Property-based tests covering prefix parsing with arbitrary strings, NLRI v4/v6 build+decode roundtrip, full path roundtrip preserving nlri_hash, and action type roundtrip. Runs in CI with `cargo test`.
+- **cargo-fuzz** — libFuzzer targets (`fuzz_prefix_parse`, `fuzz_nlri_decode`) for continuous offline fuzzing. Run with `cargo +nightly fuzz run <target>`.
 
 ---
 
@@ -218,31 +186,30 @@ Extended Community: traffic-rate: 10000000 (10 Mbps)
 
 ### Automatic State Management
 
-The reconciliation loop runs every 30 seconds:
+Reconciliation runs at startup and at the configured interval. It retries pending
+withdrawals and TTL cleanup, repairs missing eligible rules after a complete
+successful local read, and reports unknown rules without deleting them. A failed
+read is not an empty RIB. Action-only drift is not currently repaired.
 
-1. **Expire mitigations** - Withdraw FlowSpec rules past TTL
-2. **Detect drift** - Compare desired state (DB) vs actual state (GoBGP RIB)
-3. **Repair missing** - Re-announce rules that should exist but don't
-4. **Report unknown rules** - Warn about speaker rules absent from desired state;
-   automatic orphan withdrawal is not implemented
+### TTL and Recovery Limits
 
-### TTL Enforcement
-
-- The running controller withdraws expired mitigations and retries failed TTL withdrawals
-- If prefixd crashes while the speaker stays up, rules can persist until
-  reconciliation resumes or an operator withdraws them; there is no router TTL lease
-- GoBGP can restart independently; prefixd re-syncs on reconnect
+- The running controller enforces expiry; a separate speaker can retain rules
+  past their deadline while prefixd is down. There is no router TTL lease.
+- Lost local intent can be repaired after speaker restart; no fixed recovery
+  time is promised.
+- Dry-run cannot acknowledge deletion of previously enforced rules.
 
 ### WebSocket Notifications
 
-Real-time events pushed to dashboard:
+Messages use snake_case `type` values:
 
-- `MitigationCreated` - New mitigation announced
-- `MitigationUpdated` - TTL extended or action changed
-- `MitigationExpired` - TTL reached, rule withdrawn
-- `MitigationWithdrawn` - Manual withdrawal via API
-- `EventIngested` - New attack event received
-- `ResyncRequired` - Client should refresh (lag detected)
+- `mitigation_created` / `mitigation_updated`: desired mitigation state changed
+- `mitigation_expired` / `mitigation_withdrawn`: terminal cleanup completed locally
+- `event_ingested`: defined event-result shape; ingestion does not currently broadcast it
+- `resync_required`: the client fell behind and must refresh
+
+The feed is a notification channel, not a durable delivery log or enforcement
+acknowledgement. See [WebSocket API](docs/reference/api.md#websocket).
 
 ---
 
@@ -324,13 +291,13 @@ customers:
     name: "ACME Corporation"
     prefixes:
       - "203.0.113.0/24"
-      - "2001:db8:acme::/48"
+      - "2001:db8:100::/48"
     services:
       - service_id: dns
         name: "DNS Servers"
         assets:
           - ip: "203.0.113.10"
-          - ip: "2001:db8:acme::53"
+          - ip: "2001:db8:100::53"
         allowed_ports:
           udp: [53]
           tcp: [53]
@@ -344,15 +311,16 @@ customers:
 
 ### Context-Aware Mitigation
 
-- **Allowed ports** - Excluded from FlowSpec rules (don't block legitimate traffic)
-- **Service classification** - Different policies per service type
+- **Service ports** - Participate in the equality-port selection described above
+- **Service context** - Customer/service identifiers, names and port selection
 - **Customer quotas** - Per-customer mitigation limits
 
 ### Hot Reload
 
 - `prefixdctl reload` or `POST /v1/config/reload`
-- Inventory and playbooks reload without restart
-- Active mitigations preserved
+- Inventory, playbooks, correlation and alerting can reload without restart
+- Reload preserves existing mitigation intent; it does not change the running
+  POP, speaker target, main settings or controller mode
 
 ---
 
@@ -372,41 +340,31 @@ Push notifications to external systems on mitigation lifecycle events.
 | **OpsGenie** | Alert API v2 | US and EU region support |
 | **Generic Webhook** | Raw JSON payload | Optional HMAC-SHA256 signing (`X-Prefixd-Signature`) |
 
-### Alert Events
+### Alert Event Formats
 
 | Event Type | Severity | Trigger |
 |---|---|---|
-| `mitigation.created` | Warning | New mitigation announced |
-| `mitigation.escalated` | Critical | Mitigation escalated (police → discard) |
-| `mitigation.withdrawn` | Info | Manual or detector-driven withdrawal |
-| `mitigation.expired` | Info | TTL reached, rule removed |
+| `mitigation.created` | Warning | New desired mitigation persisted |
+| `mitigation.escalated` | Critical | Escalation format; automatic escalation is not wired into the current event path |
+| `mitigation.withdrawn` | Info | Manual or detector-driven cleanup completed locally |
+| `mitigation.expired` | Info | TTL cleanup completed locally |
+
+Creation alerts do not confirm enforcement. In dry-run, lifecycle notifications
+describe local simulation, not a speaker mutation.
 
 ### Configuration
 
-```yaml
-alerting:
-  destinations:
-    - type: slack
-      webhook_url: "https://hooks.slack.com/services/..."
-      channel: "#ddos-alerts"
-    - type: pagerduty
-      routing_key: "${PAGERDUTY_ROUTING_KEY}"
-    - type: generic
-      url: "https://example.com/webhook"
-      secret: "${WEBHOOK_SECRET}"
-  events:
-    - mitigation.created
-    - mitigation.escalated
-```
+Use the [notification configuration reference](docs/reference/api.md#update-alerting-config) and the
+administrator config API for destination settings, secrets and event filters.
 
 ### Design
 
-- **Fire-and-forget** — Alerts spawned as background tasks, never block event processing
-- **Retry with backoff** — 3 retries per destination (1s, 2s, 4s exponential)
+- **Best-effort delivery** — Background tasks with bounded concurrency; no durable outbox
+- **Retry with backoff** — Bounded retries per destination
 - **Multiple destinations** — Multiple instances of same type supported (e.g., two Slack channels)
 - **Event filtering** — Only send alerts for configured event types (default: all)
 - **Secret redaction** — `GET /v1/config/alerting` never exposes webhook URLs or tokens
-- **Test endpoint** — `POST /v1/config/alerting/test` sends a test alert to all destinations
+- **Test endpoint** — Administrator-only `POST /v1/config/alerting/test`
 
 ---
 
@@ -421,7 +379,7 @@ Real-time visibility into mitigation state:
 - **Mitigate Now** - Operator modal (`n` shortcut, command palette action) posts policy-validated ban events
 - **Events** - Attack event history with CSV export
 - **IP History** - Unified timeline per IP (events + mitigations + customer context), with incident report generation
-- **Audit Log** - All actions with operator attribution, CSV export
+- **Audit Log** - Recorded operation history with actor attribution, CSV export
 - **Incident Reports** - Generate markdown reports from mitigation detail or IP history pages (`GET /v1/reports/incident`). Summary, timeline, peak traffic, audit trail. Copy to clipboard or download .md
 - **Config** - Settings viewer, playbook editor (form + YAML), alerting editor, hot-reload controls
 - **Inventory** - Searchable customer/service/IP browser
@@ -436,14 +394,14 @@ Real-time visibility into mitigation state:
 
 - **Session-based** - Login with username/password
 - **Secure cookies** - HttpOnly, SameSite=Lax, optional Secure flag
-- **Auto-logout** - 7-day session expiry
+- **Session expiry** - PostgreSQL-backed inactivity expiry
 
 ### Real-Time Updates
 
 - **WebSocket connection** - `/v1/ws/feed`
-- **Live refresh** - Mitigations update without polling
+- **Live refresh** - WebSocket messages invalidate cached API state; periodic refresh remains
 - **Connection status** - Visual indicator in UI
-- **Automatic reconnection** - Exponential backoff on disconnect
+- **Automatic reconnection** - Bounded linear backoff with jitter on disconnect
 
 ---
 
@@ -451,44 +409,10 @@ Real-time visibility into mitigation state:
 
 ### prefixdctl
 
-```bash
-# Authentication
-prefixdctl operators create --username admin --role admin
-prefixdctl operators list
-
-# Status
-prefixdctl status              # Overview
-prefixdctl peers               # BGP session status
-prefixdctl status              # Detailed health check
-
-# Mitigations
-prefixdctl mitigations list
-prefixdctl mitigations list --status active --customer acme
-prefixdctl mitigations get <id>
-prefixdctl mitigations withdraw <id> --reason "false positive"
-
-# Safelist
-prefixdctl safelist list
-prefixdctl safelist add 10.0.0.1/32 --reason "router loopback"
-prefixdctl safelist remove 10.0.0.1/32
-
-# Operations
-prefixdctl reload              # Hot-reload config
-```
-
-### Output Formats
-
-```bash
-prefixdctl -f json mitigations list  # JSON output
-prefixdctl -f table mitigations list # Table output (default)
-```
-
-### Configuration
-
-```bash
-export PREFIXD_API=http://localhost
-export PREFIXD_API_TOKEN=your-token-here
-```
+The CLI reads status/peers, lists and withdraws mitigations, manages the safelist
+and reloads configuration. JSON and table output are available. Initial operator
+setup uses direct database access. See the [CLI reference](docs/reference/cli.md)
+for commands and mode-specific authentication.
 
 ---
 
@@ -498,8 +422,8 @@ export PREFIXD_API_TOKEN=your-token-here
 
 | Mode | Use Case | Configuration |
 |------|----------|---------------|
-| `none` | Development/testing | `auth.mode: none` |
-| `bearer` | API/CLI access | `auth.mode: bearer` + `auth.bearer_token_env` |
+| `none` | Development/testing | `http.auth.mode: none` |
+| `bearer` | API/CLI access | `auth.mode: bearer` + `http.auth.bearer_token_env` |
 | `credentials` | Dashboard login | `auth.mode: credentials` with operators table |
 | `mtls` | Machine-to-machine | `auth.mode: mtls` + TLS client certs |
 
@@ -507,14 +431,10 @@ export PREFIXD_API_TOKEN=your-token-here
 
 - **Credentials mode** - Session cookies only
 - **Bearer mode** - Bearer token accepted; existing dashboard session cookies also work
-- **mTLS mode** - Auth at transport layer (no bearer/session required for API auth)
-
-### Operators
-
-```sql
--- Created via CLI or Admin UI
-prefixdctl operators create --username admin --password --role admin
-```
+- **mTLS mode** - Native TLS client verification is required; accepted clients
+  currently receive administrative API privileges, not per-certificate roles
+- **WebSocket feed** - Requires a browser session unless auth is disabled;
+  bearer authentication alone is not a WebSocket login
 
 ### Role-Based Access Control
 
@@ -526,31 +446,16 @@ prefixdctl operators create --username admin --password --role admin
 
 **Permission hierarchy:** `admin > operator > viewer`
 
-### User Management API (Admin Only)
-
-```bash
-# List all operators
-GET /v1/operators
-
-# Create operator
-POST /v1/operators
-{"username": "jsmith", "password": "...", "role": "operator"}
-
-# Delete operator (cannot delete self)
-DELETE /v1/operators/{id}
-
-# Change password (self or admin)
-PUT /v1/operators/{id}/password
-{"new_password": "..."}
-```
+Account administration and self-service password changes are described in the
+[operator API](docs/reference/api.md#operators-admin-only).
 
 ### Security Features
 
 - **Argon2 password hashing** - Memory-hard, resistant to GPU attacks
-- **Secure session storage** - PostgreSQL-backed, 7-day expiry
+- **Session storage** - PostgreSQL-backed, seven-day inactivity expiry
 - **CORS configuration** - Whitelist dashboard origins
 - **Request size limits** - 1MB body limit
-- **Rate limiting** - Token bucket per endpoint
+- **Rate limiting** - Shared HTTP token bucket, plus login-attempt throttling
 
 ---
 
@@ -558,49 +463,21 @@ PUT /v1/operators/{id}/password
 
 ### Prometheus Metrics
 
-Exposed at `/metrics`:
+Exposed at `/metrics`: mitigation lifecycle/status, events, speaker RPC outcomes,
+peer observation, guardrails, HTTP requests, reconciliation, database and alerting
+metrics. Exact metric names and labels live in
+[the definitions](src/observability/metrics.rs) and
+[metrics reference](docs/reference/api.md#metrics).
 
-```
-# Mitigations
-prefixd_mitigations_active{action_type,pop}
-prefixd_mitigations_created_total{action_type,pop}
-prefixd_mitigations_expired_total{action_type,pop}
-prefixd_mitigations_withdrawn_total{action_type,pop,reason}
-
-# Events
-prefixd_events_ingested_total{source,vector}
-prefixd_events_rejected_total{source,reason}
-
-# BGP
-prefixd_announcements_total{peer,status}
-prefixd_announcements_latency_seconds{peer}
-prefixd_bgp_session_up{peer}
-
-# Guardrails
-prefixd_guardrail_rejections_total{reason}
-
-# HTTP
-prefixd_http_requests_total{method,route,status_class}
-prefixd_http_request_duration_seconds{method,route,status_class}
-prefixd_http_in_flight_requests{method,route}
-
-# Operations
-prefixd_config_reload_total{status}
-prefixd_escalations_total{from_action,to_action,pop}
-prefixd_reconciliation_runs_total{status}
-prefixd_reconciliation_active_count{pop}
-
-# Database
-prefixd_db_row_parse_errors_total{table}
-prefixd_db_pool_connections{state=active|idle|total}
-
-# Alerting
-prefixd_alerts_sent_total{destination,status}
-```
+Active gauges count database status and can include expired intent or pending
+cleanup until terminal transition. Successful announcement counters acknowledge
+local RPCs, not router enforcement. Unsupported or failed peer observations must
+not be interpreted as confirmed absence.
 
 ### Request Correlation IDs
 
-Every request gets an `x-request-id` header (UUID). If the client provides one, it's preserved; otherwise a new one is generated. The ID is:
+Requests use an `x-request-id` header. Client-provided IDs are preserved;
+otherwise a UUID is generated. The ID is:
 - Echoed in the response header
 - Added to the tracing span for log correlation
 - Forwarded through nginx
@@ -625,45 +502,20 @@ JSON format for log aggregation:
 
 ### Audit Log
 
-All state-changing operations logged:
-
-```json
-{
-  "timestamp": "2026-01-18T10:30:00Z",
-  "action": "mitigation_withdrawn",
-  "operator_id": "jsmith",
-  "mitigation_id": "abc123",
-  "reason": "false positive",
-  "ip": "10.0.0.50"
-}
-```
+The audit API exposes actor, action, target and details. Completed withdrawals
+retain their original actor, reason and operation ID; uncertain cleanup stays
+pending. See the [audit API](docs/reference/api.md#audit-log).
 
 ### Health Endpoints
 
-`GET /v1/health` (public, lightweight liveness check):
+| Endpoint | Access | Meaning |
+| --- | --- | --- |
+| `GET /v1/health` | Public | Lightweight liveness, package version and auth mode |
+| `GET /v1/health/detail` | Mode-aware authentication | Controller uptime, database/status counts, selected backend/capabilities and peer observation |
 
-```json
-{
-  "status": "ok",
-  "version": "0.18.1",
-  "auth_mode": "none"
-}
-```
-
-`GET /v1/health/detail` (authenticated, full operational status):
-
-```json
-{
-  "status": "ok",
-  "version": "0.18.1",
-  "pop": "iad1",
-  "uptime_seconds": 86400,
-  "active_mitigations": 3,
-  "database": "ok",
-  "gobgp": { "status": "ok" },
-  "bgp_sessions": [{ "name": "edge1", "state": "established" }]
-}
-```
+Detailed health reports the selected backend and peer observation. Its uptime
+is controller uptime, not speaker uptime; health does not confirm forwarding.
+See the [health reference](docs/reference/api.md#operational-endpoints).
 
 ---
 
@@ -694,50 +546,22 @@ Multiple prefixd instances share PostgreSQL:
                     └─────────────┘
 ```
 
-Each POP:
-- Has its own GoBGP sidecar
-- Announces to local routers
-- Sees global state for visibility
-- Operates independently if DB is partitioned
+Each POP binds to one registered backend/endpoint/namespace target, with a
+separate speaker and one controller. Global visibility does not authorize
+cross-POP mutations. Database loss prevents state-dependent operations; the
+independent speaker may retain existing routes, but the controller does not
+continue safely without PostgreSQL.
+
+Bindings are startup consistency checks, not interprocess fencing or DNS-alias
+detection. Pending withdrawals retain their original speaker target.
 
 ---
 
 ## Performance
 
-Benchmarked on Docker Compose stack (see [benchmarks.md](docs/perf/benchmarks.md)):
-
-### HTTP Load Tests (end-to-end through nginx)
-
-| Endpoint | Req/sec | Avg Latency | P99 Latency |
-|----------|---------|-------------|-------------|
-| `GET /v1/health` | ~8,000 | 1.3 ms | 2.6 ms |
-| `GET /v1/mitigations` | ~4,800 | 2.1 ms | 3.1 ms |
-| `POST /v1/events` (ingestion) | ~4,700 | 1.1 ms | 1.6 ms |
-| Burst (50 concurrent) | ~4,930 | 8.1 ms | 53 ms |
-
-### Micro-Benchmarks (criterion)
-
-| Operation | Time | Throughput |
-|-----------|------|------------|
-| Inventory IP lookup | 156 ns | ~6.4M ops/sec |
-| Scope hash (SHA-256) | 119 ns | ~8.4M ops/sec |
-| JSON serialize mitigation | 880 ns | ~1.1M ops/sec |
-| Mock DB insert | 1.36 µs | ~735K ops/sec |
-
-### Resilience
-
-- **Chaos tests:** 17/17 passing (Postgres kill, GoBGP kill, prefixd restart, nginx outage)
-- **Load tests:** 7/7 passing across 5 profiles
-- **Headroom:** ~100x over realistic DDoS detector event volume
-
-### Resource Usage
-
-Typical production deployment:
-
-- **CPU:** <5% idle, <20% during event bursts
-- **Memory:** ~50MB base, scales with active mitigations
-- **Disk:** PostgreSQL storage only (no local state)
-- **Network:** Minimal (gRPC to GoBGP, HTTP API)
+[Historical benchmarks](docs/perf/benchmarks.md) retain their original test
+scope. They do not establish current production capacity or recovery deadlines.
+New performance claims need dated inputs and retained results.
 
 ---
 

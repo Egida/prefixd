@@ -1,554 +1,256 @@
 # Architecture
 
-This document describes prefixd's design decisions and data flow.
+prefixd sits between attack detectors and a separate BGP speaker. It receives
+signals, applies mitigation policy and guardrails, persists desired intent in
+PostgreSQL, and asks the speaker to originate or withdraw FlowSpec rules. Routers
+perform the filtering; prefixd does not inspect or scrub packets.
+
+rustbgpd is the preferred integration target and GoBGP remains selectable.
+Consult the [speaker reference](../reference/speaker-backends.md) for current
+build requirements, configuration and deployment defaults, and the
+[quickstart](../tutorials/quickstart.md) for the supplied stack.
 
 ## Overview
 
-prefixd is a **policy daemon** that sits between attack detectors and BGP routers. It doesn't detect attacks or filter packets—it makes policy decisions about when and how to announce FlowSpec rules.
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              prefixd                                        │
-│                                                                             │
-│  ┌──────────┐    ┌──────────────┐    ┌────────────┐    ┌──────────────┐   │
-│  │  HTTP    │───▶│   Policy     │───▶│ Guardrails │───▶│  FlowSpec    │   │
-│  │  API     │    │   Engine     │    │            │    │  Manager     │   │
-│  └──────────┘    └──────────────┘    └────────────┘    └──────┬───────┘   │
-│       │                │                   │                   │           │
-│       │                │                   │                   │           │
-│       ▼                ▼                   ▼                   ▼           │
-│  ┌──────────┐    ┌──────────────┐    ┌────────────┐    ┌──────────────┐   │
-│  │ Events   │    │  Playbooks   │    │  Safelist  │    │   GoBGP      │   │
-│  │   DB     │    │   (YAML)     │    │    DB      │    │   gRPC       │   │
-│  └──────────┘    └──────────────┘    └────────────┘    └──────────────┘   │
-│                                                                             │
-│                        ┌──────────────────┐                                │
-│                        │  Reconciliation  │                                │
-│                        │      Loop        │                                │
-│                        └──────────────────┘                                │
-└─────────────────────────────────────────────────────────────────────────────┘
-         │                                                        │
-         │                                                        │
-         ▼                                                        ▼
-┌─────────────────┐                                    ┌─────────────────┐
-│    Detectors    │                                    │     Routers     │
-│   (FastNetMon,  │                                    │   (Juniper,     │
-│    Prometheus)  │                                    │    Arista)      │
-└─────────────────┘                                    └─────────────────┘
+```mermaid
+flowchart LR
+    Detectors --> API
+    Dashboard --> API
+    CLI --> API
+    subgraph Controller[prefixd]
+        API[HTTP API and authentication] --> Policy[Inventory, correlation, policy and guardrails]
+        Policy --> Repository[RepositoryTrait]
+        Policy --> Facade[FlowSpecAnnouncer]
+        Reconciliation --> Repository
+        Reconciliation --> Facade
+    end
+    Repository <--> PostgreSQL[(PostgreSQL)]
+    Facade --> Speaker[Separate rustbgpd or GoBGP daemon]
+    Speaker -->|BGP FlowSpec| Routers
 ```
 
-## Design Principles
-
-### 1. Signal-Driven, Not Detection
-
-prefixd doesn't detect attacks. Detectors (FastNetMon, Prometheus alerts, custom scripts) signal attack events, and prefixd applies policy.
-
-**Why?** Detection is hard and domain-specific. Rate-based detection misses low-and-slow attacks; ML-based detection has false positives. By separating detection from policy, you can:
-
-- Use the best detector for each attack type
-- Tune detection thresholds independently
-- Correlate multiple weak signals (future: v1.5)
-
-### 2. TTL Enforcement
-
-If prefixd crashes or becomes unavailable:
-
-- **Existing rules can remain advertised** while the separate speaker stays up
-- **No new mitigations** are created (attacks may go unblocked)
-- **Application TTL enforcement pauses** until reconciliation resumes
-
-FlowSpec injection carries no controller expiry lease. Controller-crash cleanup
-needs an explicit lease or coupled lifecycle; see [ADR 003](../adr/003-fail-open-ttl.md).
-
-### 3. /32 Only (IPv4)
-
-prefixd enforces that mitigations target single IPs (/32 for IPv4, /128 for IPv6). Broader prefixes are rejected.
-
-**Why?** A misconfigured detector sending a /24 could block 256 IPs. With /32-only, the blast radius of a false positive is one IP.
-
-### 4. Mandatory TTL
-
-Every mitigation must have a TTL. There are no permanent rules.
-
-**Why?** Without TTL, a false positive requires manual intervention. With TTL, false positives auto-resolve when the mitigation expires.
-
-### 5. Guardrails Everywhere
-
-Every mitigation passes through guardrails:
-
-- Safelist check (is this IP protected?)
-- Prefix length check (/32 only)
-- TTL bounds check (min/max)
-- Port count check (max 8)
-- Quota check (per-customer, per-POP, global)
-
-Guardrails can't be bypassed. They're the last line of defense against bad data.
-
----
-
-## Data Flow
-
-### Event Ingestion
-
-```
-POST /v1/events
-     │
-     ▼
-┌─────────────────┐
-│ Parse & Validate│───▶ 400 Bad Request
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Rate Limit Check│───▶ 429 Too Many Requests
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Safelist Check  │───▶ 403 Forbidden (safelisted)
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Inventory Lookup│───▶ Find customer/service context
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Playbook Match  │───▶ Find policy for this vector
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Guardrails      │───▶ 422 Validation Failed
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Create/Extend   │───▶ Duplicate? Extend TTL
-│ Mitigation      │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│ Announce via    │───▶ GoBGP gRPC AddPath
-│ GoBGP           │
-└────────┬────────┘
-         │
-         ▼
-     201 Created
-```
-
-### Reconciliation Loop
-
-Runs every 30 seconds:
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     Reconciliation Loop                         │
-│                                                                 │
-│  1. Load desired state (active mitigations from DB)             │
-│                         │                                       │
-│                         ▼                                       │
-│  2. Load actual state (FlowSpec routes from GoBGP RIB)          │
-│                         │                                       │
-│                         ▼                                       │
-│  3. Find expired mitigations (TTL passed)                       │
-│     └──▶ Withdraw from GoBGP                                   │
-│     └──▶ Mark as "expired" in DB                               │
-│                         │                                       │
-│                         ▼                                       │
-│  4. Find missing rules (in DB, not in RIB)                      │
-│     └──▶ Re-announce via GoBGP                                 │
-│                         │                                       │
-│                         ▼                                       │
-│  5. Find orphan rules (in RIB, not in DB)                       │
-│     └──▶ Withdraw from GoBGP                                   │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**Why reconciliation?**
-
-- GoBGP might restart, losing RIB state
-- prefixd might restart, missing the window to withdraw
-- Network issues might cause announcement failures
-- Manual GoBGP CLI operations might create inconsistency
-
-Reconciliation ensures desired state eventually matches actual state.
-
----
-
-## Component Details
-
-### Policy Engine
-
-The policy engine evaluates playbooks to determine mitigation actions.
-
-```yaml
-# Playbook example
-playbooks:
-  - name: udp_flood
-    match:
-      vector: udp_flood
-    steps:
-      - action: police
-        rate_bps: 10000000
-        ttl_seconds: 120
-      - action: discard
-        ttl_seconds: 300
-        require_confidence_at_least: 0.8
-```
-
-**Evaluation order:**
-
-1. Find playbook matching event vector
-2. Check escalation eligibility (is there an existing mitigation?)
-3. Select step based on confidence threshold
-4. Apply port exclusions from inventory
-
-### Guardrails
-
-Guardrails are non-negotiable safety checks:
-
-| Check | Rejection Reason |
-|-------|------------------|
-| `require_ttl` | TTL is mandatory |
-| `min_ttl_seconds` | TTL below minimum |
-| `max_ttl_seconds` | TTL above maximum |
-| `dst_prefix_maxlen` | Prefix broader than /32 |
-| `max_ports` | Too many ports (router memory) |
-| `max_active_per_customer` | Customer quota exceeded |
-| `max_active_per_pop` | POP quota exceeded |
-| `max_active_global` | Global quota exceeded |
-| Safelist | IP is protected |
-
-### FlowSpec Manager
-
-Translates mitigations into FlowSpec NLRI:
-
-```
-Mitigation                    FlowSpec NLRI
-─────────────────────────────────────────────────
-dst_prefix: 203.0.113.10/32   Type 1: Destination Prefix
-protocol: UDP                 Type 3: IP Protocol
-dst_ports: [!53]              Type 5: Destination Port (negated)
-action: police 10M            Extended Community: traffic-rate
-```
-
-### GoBGP Client
-
-gRPC client for GoBGP v4.x:
-
-- **AddPath** - Announce FlowSpec rule
-- **DeletePath** - Withdraw FlowSpec rule
-- **ListPath** - Query RIB for reconciliation
-- **ListPeer** - Monitor BGP session status
-
-Features:
-- Connection pooling
-- Automatic retry with exponential backoff
-- Timeout handling (10s connect, 30s request)
-
----
-
-## State Management
-
-### PostgreSQL Schema
-
-```sql
--- Events (001 + 003)
-CREATE TABLE events (
-    event_id UUID PRIMARY KEY,
-    external_event_id TEXT,
-    source TEXT NOT NULL,
-    event_timestamp TIMESTAMPTZ NOT NULL,
-    ingested_at TIMESTAMPTZ NOT NULL,
-    victim_ip TEXT NOT NULL,
-    vector TEXT NOT NULL,
-    protocol INTEGER,
-    bps BIGINT,
-    pps BIGINT,
-    top_dst_ports_json TEXT NOT NULL DEFAULT '[]',
-    confidence REAL,
-    schema_version INTEGER NOT NULL DEFAULT 1,
-    raw_details JSONB,                          -- 003
-    action TEXT NOT NULL DEFAULT 'ban',          -- 003
-    UNIQUE(source, external_event_id)
-);
-
--- Mitigations (001 + 005)
-CREATE TABLE mitigations (
-    mitigation_id UUID PRIMARY KEY,
-    scope_hash TEXT NOT NULL,
-    pop TEXT NOT NULL,
-    customer_id TEXT,
-    service_id TEXT,
-    victim_ip TEXT NOT NULL,
-    vector TEXT NOT NULL,
-    schema_version INTEGER NOT NULL DEFAULT 1,
-    match_json TEXT NOT NULL,
-    action_type TEXT NOT NULL,
-    action_params_json TEXT,
-    status TEXT NOT NULL,                        -- pending, active, escalated, expired, withdrawn
-    created_at TIMESTAMPTZ NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL,
-    expires_at TIMESTAMPTZ NOT NULL,
-    withdrawn_at TIMESTAMPTZ,
-    triggering_event_id UUID NOT NULL,
-    last_event_id UUID NOT NULL,
-    escalated_from_id UUID,
-    reason TEXT,
-    rejection_reason TEXT,
-    acknowledged_at TIMESTAMPTZ,                 -- 005
-    acknowledged_by TEXT                          -- 005
-);
-
--- FlowSpec announcements (001)
-CREATE TABLE flowspec_announcements (
-    announcement_id UUID PRIMARY KEY,
-    mitigation_id UUID NOT NULL REFERENCES mitigations(mitigation_id),
-    pop TEXT NOT NULL,
-    peer_name TEXT NOT NULL,
-    peer_address TEXT NOT NULL,
-    nlri_hash TEXT NOT NULL,
-    nlri_json TEXT NOT NULL,
-    action_json TEXT NOT NULL,
-    status TEXT NOT NULL,
-    announced_at TIMESTAMPTZ,
-    withdrawn_at TIMESTAMPTZ,
-    last_error TEXT,
-    retry_count INTEGER NOT NULL DEFAULT 0
-);
-
--- Audit log (001)
-CREATE TABLE audit_log (
-    audit_id UUID PRIMARY KEY,
-    timestamp TIMESTAMPTZ NOT NULL,
-    schema_version INTEGER NOT NULL DEFAULT 1,
-    actor_type TEXT NOT NULL,
-    actor_id TEXT,
-    action TEXT NOT NULL,
-    target_type TEXT,
-    target_id TEXT,
-    details_json TEXT NOT NULL
-);
-
--- Safelist (001)
-CREATE TABLE safelist (
-    prefix TEXT PRIMARY KEY,
-    added_at TIMESTAMPTZ NOT NULL,
-    added_by TEXT NOT NULL,
-    reason TEXT,
-    expires_at TIMESTAMPTZ
-);
-
--- Config snapshots (001)
-CREATE TABLE config_snapshots (
-    snapshot_id UUID PRIMARY KEY,
-    timestamp TIMESTAMPTZ NOT NULL,
-    config_hash TEXT NOT NULL,
-    config_json TEXT NOT NULL
-);
-
--- Operators (002)
-CREATE TABLE operators (
-    operator_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    username TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'operator',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_by TEXT,
-    last_login_at TIMESTAMPTZ
-);
-
--- Sessions (002) — tower-sessions-sqlx-store
-CREATE TABLE tower_sessions.session (
-    id TEXT PRIMARY KEY NOT NULL,
-    data BYTEA NOT NULL,
-    expiry_date TIMESTAMPTZ NOT NULL
-);
-
--- Schema migrations (004)
-CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
--- Notification preferences (006)
-CREATE TABLE notification_preferences (
-    operator_id UUID PRIMARY KEY REFERENCES operators(operator_id) ON DELETE CASCADE,
-    muted_events TEXT[] NOT NULL DEFAULT '{}',
-    quiet_hours_start SMALLINT,
-    quiet_hours_end SMALLINT,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-```
-
-### Multi-POP Model
-
-Multiple prefixd instances share one PostgreSQL:
-
-```
-prefixd (iad1)  ──┐
-prefixd (fra1)  ──┼──▶ PostgreSQL
-prefixd (sin1)  ──┘
-```
-
-Each instance:
-- Filters by its own `pop` field
-- Announces to its local GoBGP
-- Has cross-POP visibility via `?pop=all`
-
----
-
-## Security Model
-
-### Authentication Layers
-
-1. **Network level** - API should be on private network or behind load balancer
-2. **Bearer token** - For API/CLI access
-3. **Session cookie** - For dashboard access
-4. **mTLS** - Optional mutual TLS for zero-trust environments
-
-### Trust Boundaries
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ Trusted Zone                                                    │
-│                                                                 │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐                 │
-│  │ prefixd  │◀──▶│ PostgreSQL│    │  GoBGP   │                 │
-│  └──────────┘    └──────────┘    └──────────┘                 │
-│       ▲                               │                        │
-│       │                               ▼                        │
-│       │                         ┌──────────┐                   │
-│       │                         │  Routers │                   │
-│       │                         └──────────┘                   │
-└───────┼─────────────────────────────────────────────────────────┘
-        │
-        │ HTTPS + Auth
-        │
-┌───────┼─────────────────────────────────────────────────────────┐
-│ Untrusted Zone                                                  │
-│       │                                                         │
-│       ▼                                                         │
-│  ┌──────────┐    ┌──────────┐    ┌──────────┐                 │
-│  │Detectors │    │Dashboard │    │   CLI    │                 │
-│  └──────────┘    └──────────┘    └──────────┘                 │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**Key principle:** Detectors are untrusted. They can suggest mitigations, but guardrails have final say.
-
----
-
-## Performance Characteristics
-
-### Latency
-
-| Operation | Typical | P99 |
-|-----------|---------|-----|
-| Event ingestion | <5ms | <20ms |
-| Inventory lookup | <1μs | <10μs |
-| DB query | <2ms | <10ms |
-| GoBGP announce | ~10ms | ~50ms |
-
-### Throughput
-
-| Operation | Sustained | Burst |
-|-----------|-----------|-------|
-| Event ingestion | ~4,700/s | 10,000/s |
-| DB writes | 2,000/s | 5,000/s |
-| GoBGP announces | 100/s | 200/s |
-
-### Bottleneck: GoBGP
-
-GoBGP gRPC is the bottleneck for high-volume events. Each announcement requires:
-- gRPC round-trip (~10ms)
-- BGP UPDATE construction
-- RIB insertion
-
-For 1000+ mitigations/second, consider batching (not yet implemented).
-
----
-
-## Failure Modes
-
-### prefixd Crash
-
-- Existing rules can persist while the speaker stays up; application TTL expiry
-  resumes with reconciliation
-- No new mitigations until restart
-- Reconciliation syncs state on restart
-
-### PostgreSQL Unavailable
-
-- Event ingestion fails (503)
-- Reconciliation pauses
-- GoBGP rules remain (no withdrawal)
-
-### GoBGP Unavailable
-
-- Event ingestion fails at announcement step
-- Mitigation saved to DB as "pending"
-- Reconciliation retries on GoBGP recovery
-
-### Router Crash
-
-- GoBGP session drops
-- Router recovers, re-establishes BGP
-- GoBGP re-advertises routes
-- No prefixd intervention required
-
----
-
-## Future Architecture
-
-### v1.5: Multi-Signal Correlation
-
-```
-FastNetMon  ──┐
-Prometheus  ──┼──▶ Correlation ──▶ Policy Engine
-Router CPU  ──┘    Engine
-```
-
-Combine weak signals into high-confidence decisions.
-
-### v2.0: Native BGP Speaker
-
-Replace GoBGP sidecar with embedded BGP:
-
-```
-prefixd ──── BGP ────▶ Routers
-  │
-  └── No GoBGP dependency
-```
-
-Reduces operational complexity but increases code complexity.
-
----
-
-## Why These Choices?
-
-### Why GoBGP sidecar instead of native BGP?
-
-- **Time to market** - GoBGP is battle-tested
-- **Flexibility** - GoBGP supports features we might need later
-- **Debugging** - gobgp CLI is useful for troubleshooting
-- **Risk isolation** - BGP bugs don't crash prefixd
-
-### Why PostgreSQL instead of embedded DB?
-
-- **Multi-POP** - Shared state across instances
-- **Operational familiarity** - Teams know Postgres
-- **Tooling** - pgAdmin, backups, monitoring
-- **HA** - Postgres replication is well-understood
-
-### Why Rust?
-
-- **Performance** - Minimal latency in hot path
-- **Safety** - No null pointers, no data races
-- **Ecosystem** - Great async runtime (tokio), gRPC (tonic)
-- **Binary size** - Single ~15MB binary, no runtime deps
+The supplied deployment uses nginx as the dashboard/API entrypoint. The diagram
+shows logical calls, not an instruction to expose controller or speaker management
+ports. See [deployment](../how-to/deployment.md) for transport and authentication.
+
+## Design principles
+
+### Signals and policy
+
+Detectors supply attack events; inventory identifies owned addresses and customer
+or service context. Optional multi-signal correlation groups events and applies
+source-count and confidence thresholds before mitigation. Corroborating-only
+sources can strengthen a group but cannot initiate mitigation alone.
+
+Playbooks select the initial action and TTL. The current event path extends an
+existing canonical owner's TTL rather than automatically executing later
+escalation steps. Policy helpers and configuration fields alone do not establish
+an integrated escalation workflow.
+
+### Bounded mitigation intent
+
+Automatic policy emits IPv4 `/32` or IPv6 `/128` destinations. Guardrails validate
+configured prefix limits, TTL bounds, port counts, safelist protection and quotas
+before creating new intent. The manual API has its own input validators and uses
+the shared guardrails. See [configuration](../reference/configuration.md#guardrails)
+for the limits and [API reference](../reference/api.md#create-mitigation) for
+manual input.
+
+Every rule has an application expiry. The running controller performs expiry
+cleanup; FlowSpec injection carries no controller lease. If prefixd stops while
+the separate speaker remains up, advertisements can outlive their deadlines.
+Recovering reconciliation and successful deletion are required for cleanup.
+[ADR 003](../adr/003-fail-open-ttl.md) records this boundary.
+
+### Separate routing runtime
+
+Policy callers use the shared speaker traits; they do not branch between Rust
+and Go implementations. Backend construction and protocol details belong to the
+adapter. [ADR 023](../adr/023-rustbgpd-over-grpc.md) chooses a separate rustbgpd
+daemon over gRPC rather than embedding its private runtime crates.
+[ADR 025](../adr/025-pluggable-speaker-backends.md) defines backend capabilities;
+ExaBGP and other daemon adapters remain planned until their recovery contracts
+are implemented and qualified.
+
+The controller remains Rust, axum, sqlx and PostgreSQL behind `RepositoryTrait`.
+[ADR 026](../adr/026-facelift-framework-scope.md) defers the proposed Loco migration
+throughout the facelift.
+
+## Data flow
+
+### Event ingestion and creation
+
+1. HTTP middleware applies the shared request-body and rate limits. The handler
+   authenticates and validates the event, including its timestamp, source, victim
+   address, vector and supported action.
+2. A previously stored ban with the same source and external event ID returns a
+   duplicate conflict. A distinct event may extend an existing canonical owner;
+   these are different operations.
+3. Inventory, optional correlation and the first matching playbook determine
+   whether mitigation is eligible. An accepted event can produce no mitigation,
+   for example for an unowned address or an unmet correlation threshold.
+4. New intent passes guardrails. With the controller lifecycle mutex held, it is
+   persisted as Active desired state **before** the speaker mutation. Dry-run
+   skips the mutation.
+5. In enforced mode the shared writer attempts the announcement. An uncertain or
+   failed RPC retains desired intent and returns an unconfirmed outcome for
+   readable reconciliation. It does not mean the speaker rejected the rule.
+
+Active status and creation notifications describe controller intent. Successful
+RPC acceptance, local read-back, export, peer receipt and forwarding enforcement
+are separate observations. Neither a creation response nor a healthy BGP session
+proves that a router is applying the rule.
+
+### Withdrawal and expiry
+
+Detector unban looks up the original ban by source and external event ID, then
+its active mitigation. Operator single/bulk withdrawal and TTL expiry share the
+same durable deletion path:
+
+1. Validate the current canonical owner and immutable speaker binding.
+2. Persist an immutable withdrawal request containing the original rule, target,
+   actor, reason, operation ID and whether real deletion is required.
+3. Attempt deletion on that target. Failure or ambiguity leaves cleanup pending
+   and prevents reconciliation from reannouncing its rule.
+4. After local deletion succeeds, commit the terminal mitigation status,
+   original-actor audit and operation completion atomically. If that commit fails,
+   the persisted request remains retryable.
+
+Enforced-mode requests remain pending in dry-run; changing modes does not supply
+remote deletion acknowledgement. Unknown or foreign-POP rules are never removed
+as a substitute for ownership checks. See the
+[withdrawal implementation](../../src/domain/withdrawal.rs) and
+[recovery semantics](../reference/speaker-backends.md#withdrawal-recovery).
+
+### Reconciliation
+
+Reconciliation runs at startup and at the configured interval. Pending
+withdrawal/expiry cleanup, correlation housekeeping, announcement repair and peer
+observation are independent stages.
+
+Repair requires complete eligible POP intent and a successful complete local
+read. An observation error is not an empty RIB; an unsupported reader skips
+repair. Expired intent, pending creation and pending withdrawals cannot authorize
+fresh announcements. Each mutation rechecks current ownership and pending intent
+under the controller mutex. That mutex is released between rules and does not
+fence another controller process.
+
+Missing NLRI identities can be reannounced. Action-only drift is not currently
+repaired, and unknown local rules are preserved. Recovery has no fixed deadline.
+See the [scheduler](../../src/scheduler/reconcile.rs) and
+[backend reference](../reference/speaker-backends.md#rule-and-reconciliation-semantics).
+
+## Component details
+
+### Policy and FlowSpec representation
+
+Playbooks map a vector to an initial discard or police action and TTL.
+
+For UDP/TCP floods, policy computes equality-port matches from event ports and
+service `allowed_ports`. Disjoint explicit nonempty lists are rejected with
+`422` / `NoAllowedPorts` before mitigation creation or owner TTL extension. An
+unconstrained side uses the other side's ports; deliberately unconstrained inputs
+retain no destination-port restriction. This is intersection, not a negated
+exclusion rule. Automatic ICMP uses protocol 1 for IPv4 and 58 for IPv6; the manual
+API's `icmp` selector currently means protocol 1.
+
+`FlowSpecRule` contains destination prefix, optional protocol, destination-port
+equalities and discard or traffic policing. Policy rates use bits/sec; adapters
+handle wire-unit conversion and reject unsupported representations. See the
+[domain types](../../src/domain/flowspec.rs) and backend reference for exact limits.
+
+### Speaker interface
+
+| Interface | Responsibility |
+| --- | --- |
+| `FlowSpecWriter` | Required announce/upsert and idempotent withdrawal |
+| `FlowSpecReader` | Optional complete local-rule inventory |
+| `PeerObserver` | Optional session-state observation |
+| `FlowSpecAnnouncer` | Selected facade and capability accessors |
+
+rustbgpd reads retained local injection intent. GoBGP reads its accepted local
+RIB after import policy. Neither view proves export or enforcement. Unsupported
+observation, failed observation and a successful empty result remain distinct.
+The legacy health component name `gobgp` does not select the backend.
+
+Additional adapters must define safe recovery for their available observations;
+see the [trait](../../src/bgp/announcer.rs) and backend reference.
+
+## State management
+
+### PostgreSQL
+
+The [migrations](../../migrations/) are the schema authority:
+
+| State | Purpose |
+| --- | --- |
+| `events` | Detector history and source/external-ID deduplication |
+| `mitigations` | Desired match, action, expiry, POP and lifecycle status |
+| `withdrawal_requests` | Immutable pending and completed deletion operations |
+| `speaker_targets`, `speaker_pop_bindings` | Registered target identity and exclusive POP assignment |
+| `flowspec_announcements` | Existing announcement schema; not a complete runtime acknowledgement ledger |
+| Signal groups and their event links | Correlation history and contributing sources |
+| `audit_log` | Attributed operation history |
+| Safelist, operators, sessions and preferences | Protection and operator access/state |
+
+Database retention must preserve pending cleanup and referenced history. Use the
+[documented retention transaction](../how-to/troubleshooting.md#database-growth),
+not unscoped deletion of terminal rows.
+
+### Multi-POP ownership
+
+Controllers may share PostgreSQL for visibility, but each POP binds to one
+normalized backend/endpoint/routing-namespace identity and each registered target
+belongs to at most one POP. Run one controller per POP and use its physical
+speaker exclusively. Cross-POP list/statistics access does not authorize another
+POP's mutations or provide operation through a database outage.
+
+Startup validates the registered target before connecting to the speaker.
+Credential rotation preserves target identity; pending withdrawals retain the
+original target even if configuration changes. Registration does not provide an
+interprocess lease, recognize DNS aliases, or fence a second controller/tool
+writing to the same physical speaker.
+
+## Security model
+
+Authentication is selected by deployment mode:
+
+- `credentials`: PostgreSQL-backed operator sessions with viewer/operator/admin
+  role checks. Session cookies are HttpOnly and SameSite=Lax; Secure is enabled
+  when native HTTP TLS is configured. Session expiry is based on inactivity.
+- `bearer`: the configured token provides operator-level API access; existing
+  authenticated sessions retain their own roles.
+- `mtls`: startup requires native TLS with client verification; accepted clients
+  receive the current administrative trust level, not per-certificate roles.
+- `none`: bypasses authentication and role checks for development/test use.
+
+The WebSocket feed requires a browser session unless auth is disabled; a bearer
+token is not a WebSocket login. Account/session and protected handlers enforce
+their own requirements. Public liveness, metrics and OpenAPI access do not imply
+access to operational health or mutations. Configuration exposure uses an explicit
+safe-field allowlist and separate secret redaction.
+
+Ingress, PostgreSQL and speaker management access are separate trust boundaries.
+Use authenticated private management transport and review HTTPS/cookie settings
+at the actual ingress. See [API authentication](../reference/api.md#authentication),
+[deployment](../how-to/deployment.md) and [auth implementation](../../src/api/auth.rs).
+
+## Failure modes
+
+| Failure | Current behavior and limit |
+| --- | --- |
+| Controller stops | No new decisions or TTL cleanup; the independent speaker can retain advertisements. |
+| PostgreSQL unavailable | Persistence/ownership reads and dependent requests fail; cleanup and repair cannot safely proceed without their required state. |
+| Speaker unavailable or reply lost | Persisted desired intent or deletion intent remains; outcomes are uncertain until successfully observed/retried on the same target. |
+| Router/session loss | Delivery depends on speaker/router policy, reconnection and restart-retention settings; prefixd health cannot prove forwarding recovery. |
+
+A database restore does not undo speaker mutations. Preserve pending intent,
+speaker ownership and audit history during recovery.
+
+## Evidence and limits
+
+The shipped [backend checks](../reference/speaker-backends.md#readable-backend-qualification)
+exercise local RPCs, restart and peer receipt within their stated scope; they do
+not establish vendor forwarding or every production topology.
+[Historical benchmarks](../perf/benchmarks.md) retain their original test context,
+not a current capacity or recovery-time guarantee.

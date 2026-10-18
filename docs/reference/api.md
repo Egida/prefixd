@@ -1704,7 +1704,6 @@ Returns configured alert destinations with secrets redacted.
 ```
 
 **Per-destination events:** Each destination may include an optional `events` array to override the global event filter. If present, only those event types are sent to that destination. If absent or empty, the destination inherits the global `events` list. See ADR 017.
-```
 
 ### Update Alerting Config
 
@@ -1928,6 +1927,9 @@ Requires session authentication (send session cookie).
 ```
 
 **ResyncRequired:** Sent when server detects client may have missed messages. Client should refresh data.
+
+`event_ingested` is defined in the message schema but is not currently broadcast
+by event ingestion. Event lists retain their periodic API refresh.
 
 ---
 
