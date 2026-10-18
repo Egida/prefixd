@@ -408,7 +408,7 @@ pub struct AlertingConfig {
 impl AlertingConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: AlertingConfig = serde_yaml::from_str(&content)?;
+        let config: AlertingConfig = crate::config::parse_yaml(&content)?;
         Ok(config)
     }
 
@@ -447,7 +447,7 @@ impl AlertingConfig {
             std::fs::copy(path, &bak)?;
         }
 
-        let yaml = serde_yaml::to_string(self)?;
+        let yaml = serde_saphyr::to_string(self)?;
         let mut tmp_file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)

@@ -6,19 +6,19 @@ Thanks for your interest in contributing!
 
 ### Prerequisites
 
-- Rust 1.88+ (`rustup update stable`)
+- Rust 1.89+ (`rustup update stable`)
 - Docker and Docker Compose
 - PostgreSQL 14+ (or use Docker)
 - protobuf compiler (`protoc`)
 
-CI checks the locked dependency graph on Linux with Rust 1.88.0, including
+CI checks the locked dependency graph on Linux with Rust 1.89.0, including
 development dependencies, alongside the current stable tests and lints. To
 repeat the minimum-compiler checks with that toolchain installed:
 
 ```bash
-cargo +1.88.0 check --locked --bins --features bgp-rustbgpd
-cargo +1.88.0 check --locked --all-targets --all-features
-cargo +1.88.0 check --locked --no-default-features --bins
+cargo +1.89.0 check --locked --bins --features bgp-rustbgpd
+cargo +1.89.0 check --locked --all-targets --all-features
+cargo +1.89.0 check --locked --no-default-features --bins
 ```
 
 The production Docker builder pins Rust 1.99.1 and its image digest in

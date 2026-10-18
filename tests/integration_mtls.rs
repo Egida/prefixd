@@ -64,7 +64,7 @@ fn write_settings(directory: &Path, settings: &Settings) {
     common::write_yaml(
         directory,
         "prefixd.yaml",
-        &serde_yaml::to_string(settings).unwrap(),
+        &serde_saphyr::to_string(settings).unwrap(),
     );
 }
 
@@ -169,12 +169,12 @@ fn write_app_files(directory: &Path) {
     common::write_yaml(
         directory,
         "inventory.yaml",
-        &serde_yaml::to_string(&common::test_inventory()).unwrap(),
+        &serde_saphyr::to_string(&common::test_inventory()).unwrap(),
     );
     common::write_yaml(
         directory,
         "playbooks.yaml",
-        &serde_yaml::to_string(&common::test_playbooks()).unwrap(),
+        &serde_saphyr::to_string(&common::test_playbooks()).unwrap(),
     );
 }
 

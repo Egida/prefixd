@@ -258,7 +258,7 @@ impl CorrelationConfig {
     /// Load correlation config from a YAML file.
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: CorrelationConfig = serde_yaml::from_str(&content)?;
+        let config: CorrelationConfig = crate::config::parse_yaml(&content)?;
         let errors = config.validate();
         if !errors.is_empty() {
             return Err(anyhow::anyhow!(
@@ -306,7 +306,7 @@ impl CorrelationConfig {
             std::fs::copy(path, &bak)?;
         }
 
-        let yaml = serde_yaml::to_string(self)?;
+        let yaml = serde_saphyr::to_string(self)?;
         let mut tmp_file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -554,7 +554,7 @@ mod tests {
     fn test_deserialize_empty_yaml() {
         // Missing correlation section should result in defaults
         let yaml = "";
-        let config: CorrelationConfig = serde_yaml::from_str(yaml).unwrap_or_default();
+        let config: CorrelationConfig = crate::config::parse_yaml(yaml).unwrap_or_default();
         assert!(!config.enabled);
         assert_eq!(config.window_seconds, 300);
         assert_eq!(config.min_sources, 1);
@@ -565,7 +565,7 @@ mod tests {
         let yaml = r#"
 enabled: true
 "#;
-        let config: CorrelationConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CorrelationConfig = crate::config::parse_yaml(yaml).unwrap();
         assert!(config.enabled);
         assert_eq!(config.window_seconds, 300);
         assert_eq!(config.min_sources, 1);
@@ -593,7 +593,7 @@ sources:
     weight: 1.0
     type: manual
 "#;
-        let config: CorrelationConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CorrelationConfig = crate::config::parse_yaml(yaml).unwrap();
         assert!(config.enabled);
         assert_eq!(config.window_seconds, 600);
         assert_eq!(config.min_sources, 2);
@@ -699,7 +699,7 @@ sources:
 min_sources: 3
 confidence_threshold: 0.9
 "#;
-        let override_: PlaybookCorrelationOverride = serde_yaml::from_str(yaml).unwrap();
+        let override_: PlaybookCorrelationOverride = crate::config::parse_yaml(yaml).unwrap();
         assert_eq!(override_.min_sources, Some(3));
         assert_eq!(override_.confidence_threshold, Some(0.9));
     }
@@ -709,7 +709,7 @@ confidence_threshold: 0.9
         let yaml = r#"
 min_sources: 2
 "#;
-        let override_: PlaybookCorrelationOverride = serde_yaml::from_str(yaml).unwrap();
+        let override_: PlaybookCorrelationOverride = crate::config::parse_yaml(yaml).unwrap();
         assert_eq!(override_.min_sources, Some(2));
         assert_eq!(override_.confidence_threshold, None);
     }
@@ -717,7 +717,7 @@ min_sources: 2
     #[test]
     fn test_playbook_correlation_override_empty() {
         let yaml = "{}";
-        let override_: PlaybookCorrelationOverride = serde_yaml::from_str(yaml).unwrap();
+        let override_: PlaybookCorrelationOverride = crate::config::parse_yaml(yaml).unwrap();
         assert_eq!(override_.min_sources, None);
         assert_eq!(override_.confidence_threshold, None);
     }
@@ -768,7 +768,7 @@ observability:
   metrics_listen: "0.0.0.0:9090"
 "#;
         // This will be tested via the Settings struct after we add the field
-        let _config: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let _config: crate::config::Settings = crate::config::parse_yaml(yaml).unwrap();
     }
 
     #[test]
@@ -784,7 +784,7 @@ sources:
     weight: 1.5
     type: telemetry
 "#;
-        let config: CorrelationConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CorrelationConfig = crate::config::parse_yaml(yaml).unwrap();
         assert!(config.enabled);
         assert_eq!(config.window_seconds, 120);
         assert_eq!(config.min_sources, 3);
@@ -856,7 +856,7 @@ sources:
       partial_block: 0.8
       alert: 0.3
 "#;
-        let config: CorrelationConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: CorrelationConfig = crate::config::parse_yaml(yaml).unwrap();
         let fnm = &config.sources["fastnetmon"];
         assert_eq!(fnm.confidence_mapping["ban"], 0.95);
         assert_eq!(fnm.confidence_mapping["partial_block"], 0.8);
@@ -892,7 +892,7 @@ sources:
     #[test]
     fn non_finite_correlation_yaml_validation() {
         for (field, yaml) in non_finite_yaml_cases() {
-            let config: CorrelationConfig = serde_yaml::from_str(&yaml).unwrap();
+            let config: CorrelationConfig = crate::config::parse_yaml(&yaml).unwrap();
             let value = match field {
                 "confidence_threshold" => config.confidence_threshold,
                 "default_weight" => config.default_weight,
@@ -927,10 +927,10 @@ sources:
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("prefixd.yaml");
         for (field, yaml) in non_finite_yaml_cases() {
-            let mut settings: serde_yaml::Value =
-                serde_yaml::from_str(include_str!("../../configs/prefixd.yaml")).unwrap();
-            settings["correlation"] = serde_yaml::from_str(&yaml).unwrap();
-            std::fs::write(&path, serde_yaml::to_string(&settings).unwrap()).unwrap();
+            let mut settings: crate::config::Settings =
+                crate::config::parse_yaml(include_str!("../../configs/prefixd.yaml")).unwrap();
+            settings.correlation = crate::config::parse_yaml(&yaml).unwrap();
+            std::fs::write(&path, serde_saphyr::to_string(&settings).unwrap()).unwrap();
             let Err(error) = crate::config::Settings::load(&path) else {
                 panic!("settings load accepted non-finite {field}");
             };
@@ -945,7 +945,7 @@ sources:
         for value in [".nan", ".inf", "-.inf"] {
             let yaml =
                 format!("sources:\n  detector:\n    confidence_mapping:\n      ban: {value}\n");
-            let config: CorrelationConfig = serde_yaml::from_str(&yaml).unwrap();
+            let config: CorrelationConfig = crate::config::parse_yaml(&yaml).unwrap();
             assert!(
                 config
                     .validate()
@@ -1307,7 +1307,7 @@ sources:
 
     #[test]
     fn default_source_mode_is_primary() {
-        let src: SourceConfig = serde_yaml::from_str("weight: 1.0\ntype: detector").unwrap();
+        let src: SourceConfig = crate::config::parse_yaml("weight: 1.0\ntype: detector").unwrap();
         assert_eq!(src.mode, SourceMode::Primary);
         assert!(src.match_dimensions.is_empty());
     }
@@ -1320,7 +1320,7 @@ type: telemetry
 mode: corroborating
 match_dimensions: [customer_id, pop]
 "#;
-        let src: SourceConfig = serde_yaml::from_str(yaml).unwrap();
+        let src: SourceConfig = crate::config::parse_yaml(yaml).unwrap();
         assert_eq!(src.mode, SourceMode::Corroborating);
         assert_eq!(
             src.match_dimensions,
@@ -1422,7 +1422,7 @@ weight: 0.5
 mode: corroborating
 match_dimensions: [customer_id, bogus_dimension]
 "#;
-        let res: Result<SourceConfig, _> = serde_yaml::from_str(yaml);
+        let res: Result<SourceConfig, _> = crate::config::parse_yaml(yaml);
         assert!(res.is_err(), "expected deserialize error");
     }
 }
