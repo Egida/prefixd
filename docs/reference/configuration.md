@@ -367,19 +367,25 @@ correlation:
 | `enabled` | boolean | `false` | Whether the correlation engine is active |
 | `window_seconds` | integer | `300` | Time window for grouping signals (seconds) |
 | `min_sources` | integer | `1` | Minimum distinct sources to trigger mitigation |
-| `confidence_threshold` | float | `0.5` | Minimum derived confidence to trigger |
+| `confidence_threshold` | float | `0.5` | Finite minimum derived confidence to trigger, from 0.0 through 1.0 |
 | `confidence_decay_half_life_seconds` | integer | `0` | Exponential half-life (seconds) for time-decaying per-event confidence contributions; 0 disables decay. Bounded by `10 × window_seconds`. See [ADR 022](../adr/022-confidence-decay.md). |
-| `default_weight` | float | `1.0` | Weight for unknown/unconfigured sources |
+| `default_weight` | float | `1.0` | Finite, nonnegative weight for unknown/unconfigured sources |
 | `sources` | map | `{}` | Per-source weight and type configuration |
 
 **Source Configuration:**
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `weight` | float | `1.0` | Weight in derived confidence computation (higher = more influence) |
+| `weight` | float | `1.0` | Finite, nonnegative weight in derived confidence computation (higher = more influence) |
 | `type` | string | `""` | Descriptive type (`detector`, `telemetry`, `manual`) |
 | `mode` | string | `primary` | `primary` = can trigger mitigations; `corroborating` = only strengthens other sources (ADR 021) |
 | `match_dimensions` | list | `[]` | Required when `mode=corroborating`. Drawn from `customer_id`, `pop`, `service_id`, `interface`. Must be empty when `mode=primary`. |
+
+NaN and infinity are rejected on settings load, standalone correlation load,
+reload and API edits, including JSON numbers that overflow these `f32` fields.
+Finite weights have no additional upper limit. Rejected edits leave the saved
+file and active correlation configuration unchanged; rejected reloads preserve
+the active correlation configuration.
 
 **Corroborating sources example:**
 

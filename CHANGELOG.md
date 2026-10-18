@@ -89,6 +89,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reject non-finite correlation confidence thresholds and source/default weights
+  on YAML loading and API edits, including numeric overflow.
+  Preserve the active correlation configuration after a rejected reload or edit.
+
 - Accept explicit `icmpv6` in manual mitigation requests as IPv6 protocol 58.
   Keep `icmp` as IPv4 protocol 1 and reject cross-family ICMP choices before
   saving intent or calling the speaker.

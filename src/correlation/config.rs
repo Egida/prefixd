@@ -339,12 +339,15 @@ impl CorrelationConfig {
             errors.push("min_sources must be >= 1".to_string());
         }
 
-        if self.confidence_threshold < 0.0 || self.confidence_threshold > 1.0 {
-            errors.push("confidence_threshold must be between 0.0 and 1.0".to_string());
+        if !self.confidence_threshold.is_finite()
+            || self.confidence_threshold < 0.0
+            || self.confidence_threshold > 1.0
+        {
+            errors.push("confidence_threshold must be finite and between 0.0 and 1.0".to_string());
         }
 
-        if self.default_weight < 0.0 {
-            errors.push("default_weight must be >= 0.0".to_string());
+        if !self.default_weight.is_finite() || self.default_weight < 0.0 {
+            errors.push("default_weight must be finite and >= 0.0".to_string());
         }
 
         // Sanity bound: a half-life shorter than 1s or much larger than the
@@ -362,8 +365,11 @@ impl CorrelationConfig {
         }
 
         for (name, source) in &self.sources {
-            if source.weight < 0.0 {
-                errors.push(format!("source '{}': weight must be >= 0.0", name));
+            if !source.weight.is_finite() || source.weight < 0.0 {
+                errors.push(format!(
+                    "source '{}': weight must be finite and >= 0.0",
+                    name
+                ));
             }
             for (action, &confidence) in &source.confidence_mapping {
                 if !(0.0..=1.0).contains(&confidence) {
@@ -862,6 +868,130 @@ sources:
         let config = CorrelationConfig::default();
         let errors = config.validate();
         assert!(errors.is_empty(), "default config should be valid");
+    }
+
+    fn non_finite_yaml_cases() -> Vec<(&'static str, String)> {
+        [".nan", ".inf", "-.inf"]
+            .into_iter()
+            .flat_map(|value| {
+                [
+                    (
+                        "confidence_threshold",
+                        format!("confidence_threshold: {value}\n"),
+                    ),
+                    ("default_weight", format!("default_weight: {value}\n")),
+                    (
+                        "weight",
+                        format!("sources:\n  detector:\n    weight: {value}\n"),
+                    ),
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn non_finite_correlation_yaml_validation() {
+        for (field, yaml) in non_finite_yaml_cases() {
+            let config: CorrelationConfig = serde_yaml::from_str(&yaml).unwrap();
+            let value = match field {
+                "confidence_threshold" => config.confidence_threshold,
+                "default_weight" => config.default_weight,
+                _ => config.sources["detector"].weight,
+            };
+            assert!(
+                !value.is_finite(),
+                "YAML must actually decode a non-finite value"
+            );
+            assert!(
+                config.validate().iter().any(|error| error.contains(field)),
+                "accepted non-finite {field}: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_finite_correlation_standalone_load() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("correlation.yaml");
+        for (field, yaml) in non_finite_yaml_cases() {
+            std::fs::write(&path, yaml).unwrap();
+            let Err(error) = CorrelationConfig::load(&path) else {
+                panic!("standalone load accepted non-finite {field}");
+            };
+            assert!(error.to_string().contains(field));
+        }
+    }
+
+    #[test]
+    fn non_finite_correlation_settings_load() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("prefixd.yaml");
+        for (field, yaml) in non_finite_yaml_cases() {
+            let mut settings: serde_yaml::Value =
+                serde_yaml::from_str(include_str!("../../configs/prefixd.yaml")).unwrap();
+            settings["correlation"] = serde_yaml::from_str(&yaml).unwrap();
+            std::fs::write(&path, serde_yaml::to_string(&settings).unwrap()).unwrap();
+            let Err(error) = crate::config::Settings::load(&path) else {
+                panic!("settings load accepted non-finite {field}");
+            };
+            assert!(error.to_string().contains(field));
+        }
+    }
+
+    #[test]
+    fn non_finite_correlation_confidence_mapping_control() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("correlation.yaml");
+        for value in [".nan", ".inf", "-.inf"] {
+            let yaml =
+                format!("sources:\n  detector:\n    confidence_mapping:\n      ban: {value}\n");
+            let config: CorrelationConfig = serde_yaml::from_str(&yaml).unwrap();
+            assert!(
+                config
+                    .validate()
+                    .iter()
+                    .any(|error| error.contains("confidence_mapping"))
+            );
+            std::fs::write(&path, yaml).unwrap();
+            assert!(CorrelationConfig::load(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn finite_correlation_threshold_and_weight_boundaries() {
+        for threshold in [0.0, 1.0] {
+            for weight in [0.0, -0.0, 2.0, f32::MAX] {
+                let mut config = CorrelationConfig {
+                    confidence_threshold: threshold,
+                    default_weight: weight,
+                    ..Default::default()
+                };
+                config.sources.insert(
+                    "detector".into(),
+                    SourceConfig {
+                        weight,
+                        confidence_mapping: HashMap::from([("ban".into(), threshold)]),
+                        ..Default::default()
+                    },
+                );
+                assert!(
+                    config.validate().is_empty(),
+                    "rejected finite threshold={threshold}, weight={weight}"
+                );
+            }
+        }
+        for threshold in [-f32::EPSILON, 1.0 + f32::EPSILON] {
+            let config = CorrelationConfig {
+                confidence_threshold: threshold,
+                ..Default::default()
+            };
+            assert!(
+                config
+                    .validate()
+                    .iter()
+                    .any(|error| error.contains("confidence_threshold"))
+            );
+        }
     }
 
     #[test]
