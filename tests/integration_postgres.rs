@@ -8,6 +8,109 @@ use tower::ServiceExt;
 use common::TestContext;
 use prefixd::domain::MitigationStatus;
 
+#[tokio::test]
+async fn test_cli_operator_list_matches_shipped_schema() {
+    async fn list(ctx: &TestContext, format: &str) -> String {
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::process::Command::new(env!("CARGO_BIN_EXE_prefixdctl"))
+                .args(["--format", format, "operators", "list"])
+                .env(
+                    "DATABASE_URL",
+                    &ctx.state.settings.storage.connection_string,
+                )
+                .env_remove("PREFIXD_API_TOKEN")
+                .stdin(std::process::Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("CLI operator list completes within 15 seconds")
+        .expect("run CLI operator list");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        for excluded in [
+            "password_hash",
+            "list-hash-null",
+            "list-hash-login",
+            "created_by",
+            "list-private-creator",
+        ] {
+            assert!(
+                !stdout.contains(excluded),
+                "CLI exposes private operator data"
+            );
+        }
+        stdout
+    }
+
+    let ctx = TestContext::new().await;
+    assert_eq!(list(&ctx, "json").await, "[]\n");
+    assert_eq!(list(&ctx, "table").await, "No operators found.\n");
+
+    sqlx::query(
+        "INSERT INTO operators \
+         (operator_id, username, password_hash, role, created_at, created_by, last_login_at) \
+         VALUES \
+         ('00000000-0000-4000-8000-000000000001', 'list-admin', $1, 'admin', \
+          '2026-01-01T01:02:03Z', 'list-private-creator', NULL), \
+         ('00000000-0000-4000-8000-000000000002', 'list-viewer', $2, 'viewer', \
+          '2026-01-02T04:05:06Z', 'list-private-creator', '2026-01-03T07:08:09Z')",
+    )
+    .bind("list-hash-null")
+    .bind("list-hash-login")
+    .execute(&ctx.pool)
+    .await
+    .unwrap();
+
+    let json: serde_json::Value = serde_json::from_str(&list(&ctx, "json").await).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!([
+            {
+                "id": "00000000-0000-4000-8000-000000000001",
+                "username": "list-admin",
+                "role": "admin",
+                "created_at": "2026-01-01T01:02:03Z",
+                "last_login": null
+            },
+            {
+                "id": "00000000-0000-4000-8000-000000000002",
+                "username": "list-viewer",
+                "role": "viewer",
+                "created_at": "2026-01-02T04:05:06Z",
+                "last_login": "2026-01-03T07:08:09Z"
+            }
+        ])
+    );
+    assert_eq!(
+        list(&ctx, "table").await,
+        format!(
+            "{:<36}  {:<20}  {:<8}  {:<20}  LAST LOGIN\n{}\n\
+             {:<36}  {:<20}  {:<8}  {:<20}  never\n\
+             {:<36}  {:<20}  {:<8}  {:<20}  2026-01-03 07:08:09\n",
+            "ID",
+            "USERNAME",
+            "ROLE",
+            "CREATED",
+            "-".repeat(110),
+            "00000000-0000-4000-8000-000000000001",
+            "list-admin",
+            "admin",
+            "2026-01-01 01:02:03",
+            "00000000-0000-4000-8000-000000000002",
+            "list-viewer",
+            "viewer",
+            "2026-01-02 04:05:06"
+        )
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn test_cli_operator_password_terminal() {
