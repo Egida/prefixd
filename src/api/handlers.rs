@@ -2224,8 +2224,10 @@ pub async fn bulk_acknowledge_mitigations(
         })?;
 
     let mut results = Vec::with_capacity(req.mitigation_ids.len());
+    let mut acknowledged = 0u32;
     for id in &req.mitigation_ids {
         if acked_ids.contains(id) {
+            acknowledged += 1;
             results.push(BulkAcknowledgeResult {
                 mitigation_id: *id,
                 status: "acknowledged".to_string(),
@@ -2240,7 +2242,6 @@ pub async fn bulk_acknowledge_mitigations(
         }
     }
 
-    let acknowledged = acked_ids.len() as u32;
     let failed = req.mitigation_ids.len() as u32 - acknowledged;
 
     tracing::info!(
