@@ -120,7 +120,7 @@ pub async fn request_withdrawal(
     repo.begin_withdrawal(&request).await
 }
 
-fn ownership_key(rule: &FlowSpecRule) -> String {
+pub(crate) fn ownership_key(rule: &FlowSpecRule) -> String {
     let mut nlri = rule.nlri.clone();
     nlri.dst_ports.sort_unstable();
     nlri.dst_ports.dedup();

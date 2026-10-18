@@ -119,6 +119,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restore immediate dashboard retries after failed GET requests while continuing
   to share requests that are still pending.
 
+- Repair discard/policing action drift as well as missing FlowSpec matches on
+  exclusively administered speaker targets. Reject ambiguous owners and invalid
+  observed inventories, preserve unknown rules, and recheck lifecycle state before
+  each upsert. Converged polls do not repeat announcements; this adds no fence
+  against another controller writing the same local match.
+
 - Reject non-finite correlation confidence thresholds and source/default weights
   on YAML loading and API edits, including numeric overflow.
   Preserve the active correlation configuration after a rejected reload or edit.

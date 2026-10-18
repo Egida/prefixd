@@ -281,9 +281,28 @@ Expiry enumeration also filters POP before decoding and fails on malformed
 eligible owned rows. Existing durable withdrawals are still attempted when expiry
 enumeration fails; every withdrawal retains its independent ownership validation.
 
-The scheduler currently compares NLRI identity. Repairing action-only drift
-needs separate coverage and implementation. Successful injection does not
-prove export-policy acceptance, router receipt, or traffic enforcement.
+The scheduler compares NLRI identity and exact supported traffic-rate actions.
+A missing rule or a differing discard/policing action is repaired with an upsert;
+the next converged poll sends no announcement. Pending and expired siblings still
+count when checking unique ownership. Ambiguous owners or invalid desired actions
+block their own ownership key while independent repairs continue. Multiple local
+rows for one NLRI or unsupported observed actions fail the complete observation
+stage before any repair; withdrawal cleanup remains independent. Ownership checks
+treat repeated identical port terms as equivalent, while observation preserves
+their distinct NLRI identity. The writer also confirms that an observed match
+addresses the saved backend route before accepting convergence or repairing it.
+GoBGP preserves port-term order: a reordered alias is rejected without a write.
+rustbgpd uses the same sorted-port encoding for comparison, injection and deletion.
+Repairs retain the saved match so its immutable withdrawal intent remains valid.
+
+Action repair assumes one running controller per POP and exclusive administration
+of its physical speaker target. The persistent binding is consistency evidence,
+not a process fence. Neither reader distinguishes an external controller's local
+rule with the same match from action drift; such shared-writer protection is not
+provided. Unknown matches and other POPs' desired rows do not authorize writes.
+GoBGP import policy must preserve supported actions for convergence. Successful
+injection does not prove retained post-policy state, export-policy acceptance,
+router receipt, or traffic enforcement.
 
 Mandatory TTLs are enforced by the running controller. Losing prefixd does not
 drop a separate daemon's router sessions or automatically expire its rules.

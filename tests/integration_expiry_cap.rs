@@ -270,48 +270,52 @@ async fn expiry_during_insert_retains_intent_and_never_announces_it() {
 
 #[tokio::test]
 async fn repair_rechecks_expiry_after_pending_cleanup_read() {
-    let context = common::TestContext::new().await;
-    let speaker = Arc::new(Speaker::default());
-    let state = state(&context, speaker.clone());
-    let app = prefixd::api::create_test_router(state.clone());
-    let value = body(app.oneshot(request("203.0.113.52", None)).await.unwrap()).await;
-    let id = value["mitigation_id"].as_str().unwrap().parse().unwrap();
-    let mut mitigation = state.repo.get_mitigation(id).await.unwrap().unwrap();
-    let cap = deadline_after(2);
-    mitigation.expires_at = cap;
-    state.repo.update_mitigation(&mitigation).await.unwrap();
-    speaker
-        .inner
-        .withdraw(&prefixd::domain::mitigation_rule(&mitigation))
+    for action_drift in [false, true] {
+        let context = common::TestContext::new().await;
+        let speaker = Arc::new(Speaker::default());
+        let state = state(&context, speaker.clone());
+        let app = prefixd::api::create_test_router(state.clone());
+        let value = body(app.oneshot(request("203.0.113.52", None)).await.unwrap()).await;
+        let id = value["mitigation_id"].as_str().unwrap().parse().unwrap();
+        let mut mitigation = state.repo.get_mitigation(id).await.unwrap().unwrap();
+        let cap = deadline_after(2);
+        mitigation.expires_at = cap;
+        state.repo.update_mitigation(&mitigation).await.unwrap();
+        let mut rule = prefixd::domain::mitigation_rule(&mitigation);
+        if action_drift {
+            rule.actions = vec![prefixd::domain::FlowSpecAction::police(9)];
+            speaker.inner.announce(&rule).await.unwrap();
+        } else {
+            speaker.inner.withdraw(&rule).await.unwrap();
+        }
+        let before = speaker.announcements.load(SeqCst);
+        speaker.pause_inventory.store(true, SeqCst);
+        let reconciler = Arc::new(
+            ReconciliationLoop::new(state.repo.clone(), speaker.clone(), 30, false)
+                .with_app_state(state.clone()),
+        );
+        let task = tokio::spawn({
+            let reconciler = reconciler.clone();
+            async move { reconciler.reconcile().await.unwrap() }
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            speaker.inventory_entered.notified(),
+        )
         .await
         .unwrap();
-    let before = speaker.announcements.load(SeqCst);
-    speaker.pause_inventory.store(true, SeqCst);
-    let reconciler = Arc::new(
-        ReconciliationLoop::new(state.repo.clone(), speaker.clone(), 30, false)
-            .with_app_state(state.clone()),
-    );
-    let task = tokio::spawn({
-        let reconciler = reconciler.clone();
-        async move { reconciler.reconcile().await.unwrap() }
-    });
-    tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        speaker.inventory_entered.notified(),
-    )
-    .await
-    .unwrap();
-    let mut gate = context.pool.begin().await.unwrap();
-    sqlx::query("LOCK TABLE withdrawal_requests IN ACCESS EXCLUSIVE MODE")
-        .execute(&mut *gate)
-        .await
-        .unwrap();
-    speaker.inventory_release.notify_one();
-    wait_for_blocked_query(&context.pool, "withdrawal_requests").await;
-    wait_until_expired(cap).await;
-    gate.commit().await.unwrap();
-    task.await.unwrap();
-    assert_eq!(speaker.announcements.load(SeqCst), before);
-    reconciler.reconcile().await.unwrap();
-    assert_eq!(speaker.announcements.load(SeqCst), before);
+        let mut gate = context.pool.begin().await.unwrap();
+        sqlx::query("LOCK TABLE withdrawal_requests IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *gate)
+            .await
+            .unwrap();
+        speaker.inventory_release.notify_one();
+        wait_for_blocked_query(&context.pool, "withdrawal_requests").await;
+        wait_until_expired(cap).await;
+        gate.commit().await.unwrap();
+        task.await.unwrap();
+        assert_eq!(speaker.announcements.load(SeqCst), before);
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.announcements.load(SeqCst), before);
+    }
 }

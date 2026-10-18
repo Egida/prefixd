@@ -96,5 +96,9 @@ qualification or change authentication/configuration behavior here.
 
 ## Follow-ups
 
-The [roadmap](../../ROADMAP.md) retains action-aware reconciliation, separately
-qualified router enforcement and durable write-only recovery as remaining work.
+Polling reconciliation repairs missing rules and supported discard/policing action
+drift under the single-controller, exclusively administered target contract.
+Stronger announcement acknowledgements, a full desired/acknowledged ledger, and
+ownership of indistinguishable external same-match rules remain separate work.
+The [roadmap](../../ROADMAP.md) also retains separately qualified router enforcement
+and durable write-only recovery.
