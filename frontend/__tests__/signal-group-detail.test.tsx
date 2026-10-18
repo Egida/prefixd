@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, waitFor, act } from "@testing-library/react"
+import { render, screen, waitFor, act, within } from "@testing-library/react"
 import { Suspense } from "react"
 
 // ─── Mocks ──────────────────────────────────────────────
@@ -290,6 +290,49 @@ describe("SignalGroupDetailPage", () => {
     // Weight column should show total weight
     // fastnetmon 1.0 + alertmanager 0.8 = 1.8
     expect(screen.getByText("1.8")).toBeInTheDocument()
+  })
+
+  it.each([
+    [0, "0%"], [null, "Unavailable"], [NaN, "Invalid"],
+  ])("does not replace raw or weighted confidence %s with a fabricated zero", async (confidence, label) => {
+    mockUseSignalGroupDetail.mockReturnValue({ data: {
+      ...resolvedGroup,
+      derived_confidence: 0,
+      events: [{ ...sampleEvents[0], confidence }],
+    } })
+    mockUseCorrelationConfig.mockReturnValue({ data: { ...sampleConfig, confidence_threshold: 0 } })
+    await renderPage("grp-1")
+    const row = within(screen.getByRole("table")).getByText("fastnetmon").closest("tr")!
+    const cells = within(row).getAllByRole("cell")
+    expect(cells[1]).toHaveTextContent(label)
+    expect(cells[3]).toHaveTextContent(label)
+    expect(screen.getByRole("meter", { name: "Confidence" })).toHaveAttribute("aria-valuenow", "0")
+    expect(screen.getByText("Confidence Threshold").nextElementSibling).toHaveTextContent("0%")
+  })
+
+  it("matches the backend's zero contribution for valid signals with zero total weight", async () => {
+    mockUseSignalGroupDetail.mockReturnValue({ data: {
+      ...resolvedGroup,
+      derived_confidence: 0,
+      events: sampleEvents.map(event => ({ ...event, source_weight: 0 })),
+    } })
+    await renderPage("grp-1")
+    const table = screen.getByRole("table")
+    for (const [source, raw] of [["fastnetmon", "95%"], ["alertmanager", "80%"]]) {
+      const cells = within(within(table).getByText(source).closest("tr")!).getAllByRole("cell")
+      expect(cells[1]).toHaveTextContent(raw)
+      expect(cells[2]).toHaveTextContent("0.0")
+      expect(cells[3]).toHaveTextContent("0%")
+    }
+    expect(within(table).queryByText("Invalid")).not.toBeInTheDocument()
+    expect(screen.getByRole("meter", { name: "Confidence" })).toHaveAttribute("aria-valuenow", "0")
+  })
+
+  it("shows invalid derived confidence without drawing an evidence bar", async () => {
+    mockUseSignalGroupDetail.mockReturnValue({ data: { ...resolvedGroup, derived_confidence: NaN } })
+    await renderPage("grp-1")
+    expect(screen.getAllByText("Invalid")).toHaveLength(2)
+    expect(screen.queryByRole("meter")).not.toBeInTheDocument()
   })
 
   it("renders bidirectional navigation links", async () => {

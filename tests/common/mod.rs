@@ -76,7 +76,13 @@ impl TestContext {
     }
 
     pub async fn router(&self) -> axum::Router {
-        let auth_layer = create_auth_layer(self.pool.clone(), self.repo.clone(), false).await;
+        let auth_layer = create_auth_layer(
+            self.pool.clone(),
+            self.repo.clone(),
+            self.state.settings.http.auth.mode,
+            false,
+        )
+        .await;
         prefixd::api::create_router(self.state.clone(), auth_layer)
     }
 
@@ -502,7 +508,13 @@ impl E2ETestContext {
     }
 
     pub async fn router(&self) -> axum::Router {
-        let auth_layer = create_auth_layer(self.pool.clone(), self.repo.clone(), false).await;
+        let auth_layer = create_auth_layer(
+            self.pool.clone(),
+            self.repo.clone(),
+            self.state.settings.http.auth.mode,
+            false,
+        )
+        .await;
         prefixd::api::create_router(self.state.clone(), auth_layer)
     }
 }

@@ -21,6 +21,22 @@ async fn test_announce_and_list_active() {
     contract::run_readable_contract(&announcer).await.unwrap();
 }
 
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
+async fn faithful_policing_and_historical_action_withdrawal() {
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    contract::run_action_contract(&speaker).await.unwrap();
+    for afi in [1, 2] {
+        assert!(
+            fixture
+                .paths(afi, prefixd::bgp::apipb::TableType::Global)
+                .await
+                .is_empty()
+        );
+    }
+}
+
 /// Use an isolated speaker: the unsupported local row deliberately blocks strict inventory.
 #[tokio::test]
 #[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]

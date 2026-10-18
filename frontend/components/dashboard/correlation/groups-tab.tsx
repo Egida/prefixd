@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useSignalGroupsPaginated } from "@/hooks/use-api"
 import { Layers, AlertCircle, Loader2, XCircle } from "lucide-react"
 import { SignalGroupStatusBadge, formatRelativeTime } from "./signals-tab"
+import { formatConfidence, isConfidence } from "@/lib/confidence"
 
 const STATUS_OPTIONS = [
   { value: "all", label: "All statuses" },
@@ -242,11 +243,12 @@ export function GroupsTab() {
 }
 
 function ConfidenceDisplay({ confidence }: { confidence: number }) {
-  const pct = Math.round(confidence * 100)
   let colorClass = "text-muted-foreground"
-  if (pct >= 80) colorClass = "text-green-600 dark:text-green-400"
-  else if (pct >= 50) colorClass = "text-yellow-600 dark:text-yellow-400"
-  else colorClass = "text-red-600 dark:text-red-400"
+  if (isConfidence(confidence)) {
+    if (confidence >= 0.8) colorClass = "text-green-600 dark:text-green-400"
+    else if (confidence >= 0.5) colorClass = "text-yellow-600 dark:text-yellow-400"
+    else colorClass = "text-red-600 dark:text-red-400"
+  }
 
-  return <span className={colorClass}>{pct}%</span>
+  return <span className={colorClass}>{formatConfidence(confidence)}</span>
 }

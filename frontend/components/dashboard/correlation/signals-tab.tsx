@@ -1,5 +1,6 @@
 "use client"
 
+import { formatConfidence } from "@/lib/confidence"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Skeleton } from "@/components/ui/skeleton"
@@ -222,7 +223,7 @@ function RecentSignalsTable() {
                   </td>
                   <td className="py-2.5 pr-3 text-muted-foreground">{group.vector.replace(/_/g, " ")}</td>
                   <td className="py-2.5 pr-3 text-right tabular-nums">
-                    {Math.round(group.derived_confidence * 100)}%
+                    {formatConfidence(group.derived_confidence)}
                   </td>
                   <td className="py-2.5 pr-3 text-right tabular-nums">{group.source_count}</td>
                   <td className="py-2.5 text-right text-muted-foreground">

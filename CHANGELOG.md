@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   requirements while retaining duplicate warnings and the separate full-lock
   audit's explicit RSA exception.
 
+- Preserve exact policing rates through both speaker encoders, including 1–7 bps
+  instead of turning them into discard. Reject missing, zero or inexact police
+  rates and rates on discard before saving or extending intent, and when loading
+  or editing playbooks. Keep historical malformed actions withdrawable by their
+  exact local match.
+
 - Reject `http.auth.mode: mtls` without native TLS and nonempty server certificate,
   key and client-CA paths before database, speaker or listener startup. Programmatic
   application-state construction enforces the same validation. Configure all three
@@ -103,12 +109,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Display confidence fractions consistently as percentages across event, mitigation
+  and correlation views. Preserve zero, distinguish missing and invalid values, and
+  avoid implying that confidence confirms mitigation or router installation.
+
 - Restore immediate dashboard retries after failed GET requests while continuing
   to share requests that are still pending.
 
 - Reject non-finite correlation confidence thresholds and source/default weights
   on YAML loading and API edits, including numeric overflow.
   Preserve the active correlation configuration after a rejected reload or edit.
+
+- Keep disabled authentication consistently anonymous: reject named login with
+  HTTP 403, ignore retained operator sessions before request tracing, and hide
+  named dashboard controls. Logout still deletes retained sessions. Wait for a
+  known authentication mode before presenting the login form.
 
 - Accept explicit `icmpv6` in manual mitigation requests as IPv6 protocol 58.
   Keep `icmp` as IPv4 protocol 1 and reject cross-family ICMP choices before

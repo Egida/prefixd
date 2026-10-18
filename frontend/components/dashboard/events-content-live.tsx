@@ -344,7 +344,7 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
                         </div>
                       </td>
                       <td className="px-4 py-3">
-                        <ConfidenceBar value={event.confidence || 0} />
+                        <ConfidenceBar value={event.confidence} />
                       </td>
                       <td className="px-4 py-3 text-center">
                         <Button

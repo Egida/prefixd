@@ -50,10 +50,16 @@ http:
 
 | Mode | Dashboard | API/CLI | Notes |
 |------|-----------|---------|-------|
-| `none` | No login | No auth | Development only |
+| `none` | Anonymous; login returns 403 | No auth | Development only |
 | `bearer` | N/A | Bearer token | API-only access |
 | `mtls` | N/A | Client certificates | Machine-to-machine |
 | `credentials` | Session login | Session cookie | Recommended |
+
+In `none` mode, requests have anonymous administrator permissions. Named sessions
+are ignored before request tracing, `/v1/auth/me` returns 401, and WebSocket
+connections use the anonymous identity. The dashboard hides named preferences and
+sign-out controls. `/v1/auth/logout` still deletes a retained session and clears
+its cookie. Credential sessions and bearer-mode hybrid sessions are unchanged.
 
 ### LDAP/Active Directory (Placeholder)
 
@@ -728,9 +734,16 @@ match:
 
 | Option | Type | Description |
 |--------|------|-------------|
-| `rate_bps` | integer | Rate limit in bits/second (police only) |
+| `rate_bps` | integer | Positive bit rate exactly representable as an `f32` bytes/second traffic rate (police only) |
 | `ttl_seconds` | integer | Mitigation duration |
 | `require_confidence_at_least` | float | Min confidence for this step |
+
+Policing rates are preserved exactly by both speaker backends. Fractional
+bytes/second are supported: 1, 7, 8 and 9 bits/second are valid. Missing or zero
+police rates, rates that lose wire precision (for example 16,777,217 bits/second),
+and a non-null rate on `discard` are rejected on startup, reload and playbook
+edits. Correct the step before reloading; a failed playbook reload keeps the
+previous running playbooks.
 
 ### Escalation
 
