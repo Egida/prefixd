@@ -1037,7 +1037,7 @@ async fn adoption_process_exits_before_factory_connection_and_mismatch_never_con
     let api_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let mut config = settings(
         "process",
-        &format!("http://{}", speaker_listener.local_addr().unwrap()),
+        &format!("HTTP://{}", speaker_listener.local_addr().unwrap()),
     );
     config.http.listen = api_listener.local_addr().unwrap().to_string();
     let directory = tempfile::tempdir().unwrap();
@@ -1122,7 +1122,9 @@ async fn adoption_process_exits_before_factory_connection_and_mismatch_never_con
         .spawn()
         .unwrap();
     let accepted = tokio::time::timeout(Duration::from_secs(10), speaker_listener.accept()).await;
-    normal.kill().await.unwrap();
+    if normal.try_wait().unwrap().is_none() {
+        normal.kill().await.unwrap();
+    }
     normal.wait().await.unwrap();
     assert!(
         accepted.is_ok(),

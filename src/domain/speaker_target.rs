@@ -172,6 +172,10 @@ mod tests {
         alias.local_asn = 65001;
         assert_eq!(original, SpeakerTarget::from_config(&alias).unwrap());
         assert_eq!(
+            original,
+            SpeakerTarget::from_config(&config("HTTP://Speaker.EXAMPLE:50051/")).unwrap()
+        );
+        assert_eq!(
             SpeakerTarget::from_config(&config("http://speaker.example:80")).unwrap(),
             SpeakerTarget::from_config(&config("speaker.example")).unwrap()
         );

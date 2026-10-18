@@ -26,22 +26,22 @@ pub async fn speaker_factory(
         BgpMode::Mock => std::sync::Arc::new(MockAnnouncer::new()),
         BgpMode::Sidecar | BgpMode::Gobgp => {
             anyhow::ensure!(!config.gobgp_grpc.is_empty(), "bgp.gobgp_grpc is required");
-            let mut speaker = GoBgpAnnouncer::new(config.gobgp_grpc.clone());
+            let target = crate::domain::SpeakerTarget::from_config(config)?;
+            let mut speaker = GoBgpAnnouncer::new(target.endpoint().to_owned());
             speaker.connect().await?;
             std::sync::Arc::new(speaker)
         }
         BgpMode::Rustbgpd => {
             #[cfg(feature = "bgp-rustbgpd")]
             {
-                std::sync::Arc::new(
-                    RustBgpdAnnouncer::connect(
-                        config
-                            .rustbgpd
-                            .as_ref()
-                            .ok_or_else(|| anyhow::anyhow!("bgp.rustbgpd is required"))?,
-                    )
-                    .await?,
-                )
+                let mut settings = config
+                    .rustbgpd
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("bgp.rustbgpd is required"))?;
+                settings.endpoint = crate::domain::SpeakerTarget::from_config(config)?
+                    .endpoint()
+                    .to_owned();
+                std::sync::Arc::new(RustBgpdAnnouncer::connect(&settings).await?)
             }
             #[cfg(not(feature = "bgp-rustbgpd"))]
             {
