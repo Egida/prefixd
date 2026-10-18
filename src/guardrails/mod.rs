@@ -2,7 +2,7 @@ use std::net::IpAddr;
 
 use crate::config::{GuardrailsConfig, QuotasConfig, TimersConfig};
 use crate::db::RepositoryTrait;
-use crate::domain::{MatchCriteria, MitigationIntent};
+use crate::domain::{FlowSpecAction, MatchCriteria, MitigationIntent};
 use crate::error::{GuardrailError, PrefixdError, Result};
 
 pub struct Guardrails {
@@ -62,6 +62,12 @@ impl Guardrails {
         repo: &dyn RepositoryTrait,
         is_safelisted: bool,
     ) -> Result<()> {
+        FlowSpecAction::from((intent.action_type, &intent.action_params))
+            .traffic_rate_bytes_per_second()
+            .map_err(|error| {
+                PrefixdError::GuardrailViolation(GuardrailError::InvalidAction(error))
+            })?;
+
         // Check safelist
         if is_safelisted {
             let ip = &intent.match_criteria.dst_prefix;
@@ -228,6 +234,51 @@ fn extract_prefix_length(prefix: &str, is_v6: bool) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn action_validation_precedes_admission() {
+        use crate::domain::{ActionParams, ActionType};
+        let (config, quotas) = test_config();
+        let guardrails = Guardrails::new(config, quotas);
+        let repo = crate::db::MockRepository::new();
+        let mut intent = MitigationIntent {
+            event_id: uuid::Uuid::new_v4(),
+            customer_id: None,
+            service_id: None,
+            pop: "test".into(),
+            match_criteria: MatchCriteria {
+                dst_prefix: "192.0.2.1/32".into(),
+                protocol: None,
+                dst_ports: vec![],
+            },
+            action_type: ActionType::Police,
+            action_params: ActionParams { rate_bps: None },
+            ttl_seconds: 60,
+            reason: "action validation".into(),
+        };
+        for rate in [None, Some(0), Some(16_777_217), Some(u64::MAX)] {
+            intent.action_params.rate_bps = rate;
+            assert!(matches!(
+                guardrails.validate(&intent, &repo, false).await,
+                Err(PrefixdError::GuardrailViolation(
+                    GuardrailError::InvalidAction(_)
+                ))
+            ));
+        }
+        for rate in [1, 7, 8, 9, 1_000_000] {
+            intent.action_params.rate_bps = Some(rate);
+            guardrails.validate(&intent, &repo, false).await.unwrap();
+        }
+        intent.action_type = ActionType::Discard;
+        assert!(matches!(
+            guardrails.validate(&intent, &repo, false).await,
+            Err(PrefixdError::GuardrailViolation(
+                GuardrailError::InvalidAction(_)
+            ))
+        ));
+        intent.action_params.rate_bps = None;
+        guardrails.validate(&intent, &repo, false).await.unwrap();
+    }
 
     fn test_config() -> (GuardrailsConfig, QuotasConfig) {
         (
