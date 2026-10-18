@@ -135,7 +135,6 @@ pub trait RepositoryTrait: Send + Sync {
     async fn get_mitigation(&self, id: Uuid) -> Result<Option<Mitigation>>;
     async fn find_active_by_scope(&self, scope_hash: &str, pop: &str)
     -> Result<Option<Mitigation>>;
-    async fn find_active_by_victim(&self, victim_ip: &str) -> Result<Vec<Mitigation>>;
     async fn find_active_by_triggering_event(&self, event_id: Uuid) -> Result<Option<Mitigation>>;
     async fn list_mitigations(
         &self,

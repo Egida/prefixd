@@ -419,23 +419,6 @@ impl RepositoryTrait for MockRepository {
             .cloned())
     }
 
-    async fn find_active_by_victim(&self, victim_ip: &str) -> Result<Vec<Mitigation>> {
-        let mitigations = self.mitigations.lock().unwrap();
-        Ok(mitigations
-            .iter()
-            .filter(|m| {
-                m.victim_ip == victim_ip
-                    && matches!(
-                        m.status,
-                        MitigationStatus::Pending
-                            | MitigationStatus::Active
-                            | MitigationStatus::Escalated
-                    )
-            })
-            .cloned()
-            .collect())
-    }
-
     async fn find_active_by_triggering_event(&self, event_id: Uuid) -> Result<Option<Mitigation>> {
         let mitigations = self.mitigations.lock().unwrap();
         Ok(mitigations
