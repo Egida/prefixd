@@ -763,8 +763,6 @@ storage:
 observability:
   log_format: pretty
   log_level: info
-  audit_log_path: "./data/audit.jsonl"
-  metrics_listen: "0.0.0.0:9090"
 "#;
         // This will be tested via the Settings struct after we add the field
         let _config: crate::config::Settings = crate::config::parse_yaml(yaml).unwrap();

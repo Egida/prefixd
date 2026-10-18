@@ -51,7 +51,13 @@ class Profiles(unittest.TestCase):
                     "prefixd.yaml" if profile == "rustbgpd" else "prefixd-gobgp.yaml"))
                 for service in services.values():
                     for port in service.get("ports", []):
-                        self.assertNotIn(str(port["target"]), ("50051", "5432"))
+                        self.assertNotIn(str(port["target"]), ("8080", "50051", "5432"))
+                for name, target, published in (("prometheus", 9090, "9091"), ("grafana", 3000, "3001")):
+                    ports = services[name]["ports"]
+                    self.assertEqual(len(ports), 1)
+                    self.assertEqual(ports[0]["host_ip"], "127.0.0.1")
+                    self.assertEqual(ports[0]["target"], target)
+                    self.assertEqual(ports[0]["published"], published)
                 if profile == "rustbgpd":
                     self.assertEqual(services[profile]["image"], releases["0.77.0"]["image"])
                     self.assertEqual(services[profile]["user"], "999:999")

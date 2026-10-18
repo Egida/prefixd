@@ -62,7 +62,7 @@ USER 999:999
 # Default config directory
 ENV PREFIXD_CONFIG=/etc/prefixd
 
-EXPOSE 8080 9090
+EXPOSE 8080
 
 ENTRYPOINT ["prefixd"]
 CMD ["--config", "/etc/prefixd"]

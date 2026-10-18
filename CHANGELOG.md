@@ -90,6 +90,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** Remove ineffective `observability.metrics_listen` and
+  `observability.audit_log_path` settings. Remove these keys from existing
+  configurations before restarting; unknown observability keys now reject
+  loading. Keep unauthenticated metrics on the private API listener, block public
+  proxy access, and bind Prometheus/Grafana publications to host loopback by default.
+
 - Refresh cursor encoding to base64 0.23.1 with only its standard-library feature;
   retain the scalar, unpadded cursor format and strict decoding.
 

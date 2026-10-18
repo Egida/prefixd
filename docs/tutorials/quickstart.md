@@ -129,8 +129,9 @@ docker compose exec rustbgpd rbgp --addr unix:///run/rustbgpd/grpc.sock neighbor
 ```
 
 nginx serves HTTP/WebSocket on port 80. The selected speaker publishes BGP port
-179; Prometheus publishes 9091 and Grafana 3001. PostgreSQL, controller HTTP and
-speaker management are not published separately. Change conflicting host port
+179; Prometheus publishes 9091 and Grafana 3001 on host loopback only. PostgreSQL,
+controller HTTP and speaker management are not published separately. Public
+application proxies block metrics. Change conflicting host port
 mappings before starting. Use HTTPS at the public ingress for a remote deployment.
 The running controller enforces TTLs; stopping it alone does not expire rules.
 

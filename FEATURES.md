@@ -463,9 +463,9 @@ Account administration and self-service password changes are described in the
 
 ### Prometheus Metrics
 
-Exposed at `/metrics`: mitigation lifecycle/status, events, speaker RPC outcomes,
-peer observation, guardrails, HTTP requests, reconciliation, database and alerting
-metrics. Exact metric names and labels live in
+Exposed at `/metrics` on the private API listener: mitigation lifecycle/status,
+events, speaker RPC outcomes, peer observation, guardrails, HTTP requests,
+reconciliation, database and alerting metrics. Exact metric names and labels live in
 [the definitions](src/observability/metrics.rs) and
 [metrics reference](docs/reference/api.md#metrics).
 
