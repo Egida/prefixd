@@ -2800,3 +2800,516 @@ async fn test_expiry_failure_keeps_pending_cleanup_and_peer_refresh() {
     assert!(speaker.announcements.lock().unwrap().is_empty());
     assert_eq!(speaker.session_reads.load(Relaxed), 2);
 }
+
+struct CreationSpeaker {
+    repo: std::sync::Arc<dyn prefixd::db::RepositoryTrait>,
+    inner: prefixd::bgp::MockAnnouncer,
+    mode: std::sync::atomic::AtomicUsize,
+    adds: std::sync::atomic::AtomicUsize,
+    deletes: std::sync::atomic::AtomicUsize,
+    owners_at_rpc: std::sync::Mutex<Vec<Vec<uuid::Uuid>>>,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl CreationSpeaker {
+    fn new(repo: std::sync::Arc<dyn prefixd::db::RepositoryTrait>, mode: usize) -> Self {
+        Self {
+            repo,
+            inner: prefixd::bgp::MockAnnouncer::new(),
+            mode: std::sync::atomic::AtomicUsize::new(mode),
+            adds: std::sync::atomic::AtomicUsize::new(0),
+            deletes: std::sync::atomic::AtomicUsize::new(0),
+            owners_at_rpc: std::sync::Mutex::new(Vec::new()),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+impl prefixd::bgp::FlowSpecAnnouncer for CreationSpeaker {
+    fn backend(&self) -> &'static str {
+        "mock"
+    }
+    fn reader(&self) -> Option<&dyn prefixd::bgp::FlowSpecReader> {
+        Some(self)
+    }
+    fn peer_observer(&self) -> Option<&dyn prefixd::bgp::PeerObserver> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl FlowSpecWriter for CreationSpeaker {
+    async fn announce(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.adds.fetch_add(1, SeqCst);
+        let owners = self
+            .repo
+            .active_mitigations_for_pop("test-pop")
+            .await?
+            .into_iter()
+            .filter(|owner| prefixd::domain::mitigation_rule(owner).nlri_hash() == rule.nlri_hash())
+            .map(|owner| owner.mitigation_id)
+            .collect();
+        self.owners_at_rpc.lock().unwrap().push(owners);
+        let mode = self.mode.load(SeqCst);
+        if mode == 3 {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        if mode == 1 {
+            return Err(prefixd::error::PrefixdError::BgpAnnouncementFailed(
+                "rejected before acceptance".into(),
+            ));
+        }
+        self.inner.announce(rule).await?;
+        if mode == 2 {
+            return Err(prefixd::error::PrefixdError::BgpAnnouncementFailed(
+                "timeout after acceptance".into(),
+            ));
+        }
+        Ok(())
+    }
+    async fn withdraw(&self, rule: &prefixd::domain::FlowSpecRule) -> prefixd::error::Result<()> {
+        self.deletes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.withdraw(rule).await
+    }
+}
+#[async_trait::async_trait]
+impl FlowSpecReader for CreationSpeaker {
+    async fn list_active(&self) -> prefixd::error::Result<Vec<prefixd::domain::FlowSpecRule>> {
+        self.inner.list_active().await
+    }
+}
+#[async_trait::async_trait]
+impl PeerObserver for CreationSpeaker {
+    async fn session_status(&self) -> prefixd::error::Result<Vec<prefixd::bgp::PeerStatus>> {
+        self.inner.session_status().await
+    }
+}
+
+fn creation_state(
+    context: &TestContext,
+    speaker: std::sync::Arc<CreationSpeaker>,
+    dry_run: bool,
+) -> std::sync::Arc<prefixd::AppState> {
+    let mut settings = context.state.settings.clone();
+    settings.mode = if dry_run {
+        prefixd::config::OperationMode::DryRun
+    } else {
+        prefixd::config::OperationMode::Enforced
+    };
+    prefixd::AppState::new(
+        settings,
+        common::test_inventory(),
+        common::test_playbooks(),
+        std::sync::Arc::new(prefixd::db::Repository::new(context.pool.clone())),
+        speaker,
+        ".".into(),
+    )
+    .unwrap()
+}
+
+fn creation_request(kind: &str, ip: &str, external_id: &str) -> Request<Body> {
+    let (uri, payload) = if kind == "manual" {
+        (
+            "/v1/mitigations",
+            serde_json::json!({
+                "victim_ip": ip, "protocol":"udp", "dst_ports":[53], "action":"discard",
+                "ttl_seconds":60, "reason":"creation safety fixture"
+            }),
+        )
+    } else {
+        (
+            "/v1/events",
+            serde_json::json!({
+                "event_id":external_id, "timestamp":chrono::Utc::now(), "source":"creation-test",
+                "victim_ip":ip, "vector":"udp_flood", "pps":50000, "top_dst_ports":[53], "confidence":0.9
+            }),
+        )
+    };
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json")
+        .body(Body::from(payload.to_string()))
+        .unwrap()
+}
+
+async fn creation_json(response: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn test_creation_insert_failure_sends_no_rpc_and_retains_detector_id_gap() {
+    use std::sync::{Arc, atomic::Ordering::SeqCst};
+    let context = TestContext::new().await;
+    let version: String = sqlx::query_scalar("SELECT version()")
+        .fetch_one(&context.pool)
+        .await
+        .unwrap();
+    eprintln!(
+        "PostgreSQL: {version}; creation preparation trigger rejects INSERT after readable preflight"
+    );
+    let speaker = Arc::new(CreationSpeaker::new(context.repo.clone(), 0));
+    let state = creation_state(&context, speaker.clone(), false);
+    let mut updates = state.ws_broadcast.subscribe();
+    let app = prefixd::api::create_test_router(state);
+    // Reads and canonical-owner preflight succeed; only the final INSERT fails.
+    sqlx::raw_sql("CREATE FUNCTION reject_creation() RETURNS trigger AS $$ BEGIN RAISE EXCEPTION 'forced creation preparation failure'; END; $$ LANGUAGE plpgsql; CREATE TRIGGER reject_creation BEFORE INSERT ON mitigations FOR EACH ROW EXECUTE FUNCTION reject_creation();")
+        .execute(&context.pool).await.unwrap();
+    for kind in ["manual", "detector"] {
+        let response = app
+            .clone()
+            .oneshot(creation_request(kind, "203.0.113.10", "failed-prepare"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(speaker.adds.load(SeqCst), 0, "kind={kind}");
+        assert_eq!(context.repo.count_active_global().await.unwrap(), 0);
+        while let Ok(message) = updates.try_recv() {
+            assert!(!matches!(
+                message,
+                prefixd::ws::WsMessage::MitigationCreated { .. }
+            ));
+        }
+    }
+    assert!(
+        context
+            .repo
+            .find_ban_event_by_external_id("creation-test", "failed-prepare")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    sqlx::query("DROP TRIGGER reject_creation ON mitigations")
+        .execute(&context.pool)
+        .await
+        .unwrap();
+    // This pre-existing ingestion gap is deliberately not repaired by deleting/replaying the event.
+    let response = app
+        .clone()
+        .oneshot(creation_request(
+            "detector",
+            "203.0.113.10",
+            "failed-prepare",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(speaker.adds.load(SeqCst), 0);
+    for (kind, ip) in [("manual", "203.0.113.10"), ("detector", "203.0.113.11")] {
+        let response = app
+            .clone()
+            .oneshot(creation_request(kind, ip, "fresh-prepare"))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if kind == "manual" {
+                StatusCode::CREATED
+            } else {
+                StatusCode::ACCEPTED
+            }
+        );
+        let body = creation_json(response).await;
+        assert!(body.get("announcement_outcome").is_none());
+        let id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            speaker.owners_at_rpc.lock().unwrap().last(),
+            Some(&vec![id])
+        );
+        assert_eq!(
+            context
+                .repo
+                .get_mitigation(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Active
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_creation_unconfirmed_intent_recovers_and_retires_without_reinjection() {
+    use prefixd::scheduler::ReconciliationLoop;
+    use std::sync::{Arc, atomic::Ordering::SeqCst};
+    let context = TestContext::new().await;
+    let speaker = Arc::new(CreationSpeaker::new(context.repo.clone(), 1));
+    let state = creation_state(&context, speaker.clone(), false);
+    let app = prefixd::api::create_test_router(state.clone());
+    for (index, (kind, mode)) in [
+        ("manual", 1),
+        ("manual", 2),
+        ("detector", 1),
+        ("detector", 2),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ip = format!("203.0.113.{}", 40 + index);
+        speaker.mode.store(mode, SeqCst);
+        let before = speaker.adds.load(SeqCst);
+        let deletes_before = speaker.deletes.load(SeqCst);
+        let mut updates = state.ws_broadcast.subscribe();
+        let response = app
+            .clone()
+            .oneshot(creation_request(kind, &ip, &format!("uncertain-{index}")))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = creation_json(response).await;
+        assert_eq!(body["announcement_outcome"], "unconfirmed");
+        assert_eq!(
+            speaker.deletes.load(SeqCst),
+            deletes_before,
+            "creation must not compensate by deleting uncertain intent"
+        );
+        if kind == "detector" {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(1), updates.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            let prefixd::ws::WsMessage::MitigationCreated { mitigation } = message else {
+                panic!("committed desired intent must produce a created event");
+            };
+            assert_eq!(mitigation.status, "active");
+            assert!(mitigation.announcement_outcome.is_none());
+        }
+
+        let id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            speaker.owners_at_rpc.lock().unwrap().last(),
+            Some(&vec![id])
+        );
+        let original = context.repo.get_mitigation(id).await.unwrap().unwrap();
+        assert_eq!(original.status, MitigationStatus::Active);
+        assert_eq!(
+            speaker.inner.list_active().await.unwrap().len(),
+            usize::from(mode == 2)
+        );
+        let get = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/mitigations/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            creation_json(get)
+                .await
+                .get("announcement_outcome")
+                .is_none(),
+            "request-local outcome must not become persisted status"
+        );
+        let duplicate = app
+            .clone()
+            .oneshot(creation_request("manual", &ip, "ignored"))
+            .await
+            .unwrap();
+        assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+        assert_eq!(speaker.adds.load(SeqCst), before + 1);
+        let after = context.repo.get_mitigation(id).await.unwrap().unwrap();
+        assert_eq!(after.expires_at, original.expires_at);
+        assert_eq!(after.action_type, original.action_type);
+        assert_eq!(
+            after.action_params.rate_bps,
+            original.action_params.rate_bps
+        );
+        speaker.mode.store(0, SeqCst);
+        let recovered = creation_state(&context, speaker.clone(), false);
+        let reconciler =
+            ReconciliationLoop::new(recovered.repo.clone(), speaker.clone(), 30, false)
+                .with_app_state(recovered.clone());
+        reconciler.reconcile().await.unwrap();
+        let repaired = before + 1 + usize::from(mode == 1);
+        assert_eq!(speaker.adds.load(SeqCst), repaired);
+        assert_eq!(speaker.inner.list_active().await.unwrap().len(), 1);
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.adds.load(SeqCst), repaired);
+        if mode == 1 {
+            let mut expired = context.repo.get_mitigation(id).await.unwrap().unwrap();
+            expired.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+            context.repo.update_mitigation(&expired).await.unwrap();
+            reconciler.reconcile().await.unwrap();
+            assert_eq!(
+                context
+                    .repo
+                    .get_mitigation(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                MitigationStatus::Expired
+            );
+        } else {
+            let response = prefixd::api::create_test_router(recovered)
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/v1/mitigations/{id}/withdraw"))
+                        .header("content-type", "application/json")
+                        .body(Body::from(r#"{"reason":"uncertain intent cleanup"}"#))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                context
+                    .repo
+                    .get_mitigation(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                MitigationStatus::Withdrawn
+            );
+        }
+        assert!(speaker.inner.list_active().await.unwrap().is_empty());
+        let deletes = speaker.deletes.load(SeqCst);
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.adds.load(SeqCst), repaired);
+        assert_eq!(speaker.deletes.load(SeqCst), deletes);
+    }
+}
+
+#[tokio::test]
+async fn test_creation_persisted_before_rpc_survives_controller_cancellation() {
+    use prefixd::scheduler::ReconciliationLoop;
+    use std::sync::{Arc, atomic::Ordering::SeqCst};
+    let context = TestContext::new().await;
+    for (index, kind) in ["manual", "detector"].into_iter().enumerate() {
+        let speaker = Arc::new(CreationSpeaker::new(context.repo.clone(), 3));
+        let state = creation_state(&context, speaker.clone(), false);
+        let app = prefixd::api::create_test_router(state.clone());
+        let ip = format!("203.0.113.{}", 60 + index);
+        let task = tokio::spawn(async move {
+            app.oneshot(creation_request(kind, &ip, "controller-cancel"))
+                .await
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            speaker.entered.notified(),
+        )
+        .await
+        .expect("creation reaches the controlled RPC handoff");
+        let owners = speaker
+            .owners_at_rpc
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            owners.len(),
+            1,
+            "durable owner must exist before entering the RPC"
+        );
+        let id = owners[0];
+        assert_eq!(
+            context
+                .repo
+                .get_mitigation(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Active
+        );
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(speaker.inner.list_active().await.unwrap().is_empty());
+        speaker.mode.store(0, SeqCst);
+        let reconstructed = creation_state(&context, speaker.clone(), false);
+        let reconciler =
+            ReconciliationLoop::new(reconstructed.repo.clone(), speaker.clone(), 30, false)
+                .with_app_state(reconstructed.clone());
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.adds.load(SeqCst), 2);
+        assert_eq!(speaker.inner.list_active().await.unwrap().len(), 1);
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.adds.load(SeqCst), 2);
+        let mut expired = context.repo.get_mitigation(id).await.unwrap().unwrap();
+        expired.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        context.repo.update_mitigation(&expired).await.unwrap();
+        reconciler.reconcile().await.unwrap();
+        assert!(speaker.inner.list_active().await.unwrap().is_empty());
+        reconciler.reconcile().await.unwrap();
+        assert_eq!(speaker.adds.load(SeqCst), 2);
+    }
+}
+
+#[tokio::test]
+async fn test_creation_batch_accepts_unconfirmed_and_dry_run_keeps_its_contract() {
+    use std::sync::{Arc, atomic::Ordering::SeqCst};
+    let context = TestContext::new().await;
+    let speaker = Arc::new(CreationSpeaker::new(context.repo.clone(), 1));
+    let app = prefixd::api::create_test_router(creation_state(&context, speaker.clone(), false));
+    let events: Vec<_> = (0..2).map(|index| serde_json::json!({
+        "event_id":format!("batch-unconfirmed-{index}"), "timestamp":chrono::Utc::now(), "source":"creation-test",
+        "victim_ip":format!("203.0.113.{}", 70 + index), "vector":"udp_flood", "pps":50000, "top_dst_ports":[53], "confidence":0.9
+    })).collect();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/events/batch")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"events":events}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = creation_json(response).await;
+    assert_eq!(body["accepted"], 2);
+    assert_eq!(body["rejected"], 0);
+    for result in body["results"].as_array().unwrap() {
+        assert_eq!(result["announcement_outcome"], "unconfirmed");
+        assert!(result["mitigation_id"].is_string());
+        assert!(result.get("error").is_none());
+    }
+    let before = speaker.adds.load(SeqCst);
+    let dry_app = prefixd::api::create_test_router(creation_state(&context, speaker.clone(), true));
+    for (kind, ip) in [("manual", "203.0.113.80"), ("detector", "203.0.113.81")] {
+        let response = dry_app
+            .clone()
+            .oneshot(creation_request(kind, ip, "dry-creation"))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            if kind == "manual" {
+                StatusCode::CREATED
+            } else {
+                StatusCode::ACCEPTED
+            }
+        );
+        let body = creation_json(response).await;
+        assert!(body.get("announcement_outcome").is_none());
+        let id = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+        assert_eq!(
+            context
+                .repo
+                .get_mitigation(id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            MitigationStatus::Active
+        );
+    }
+    assert_eq!(speaker.adds.load(SeqCst), before);
+    assert!(speaker.inner.list_active().await.unwrap().is_empty());
+}

@@ -2,14 +2,15 @@ use utoipa::OpenApi;
 
 use super::handlers::{
     AddSafelistRequest, AlertmanagerAlert, AlertmanagerAlertResult, AlertmanagerWebhookPayload,
-    AlertmanagerWebhookResponse, AuditListResponse, BatchEventRequest, BatchEventResponse,
-    BatchEventResult, BulkAcknowledgeRequest, BulkAcknowledgeResponse, BulkAcknowledgeResult,
-    BulkWithdrawRequest, BulkWithdrawResponse, BulkWithdrawResult, ChangePasswordRequest,
-    CorrelationContext, CreateOperatorRequest, ErrorResponse, EventResponse, EventsListResponse,
-    FastNetMonAttackDetails, FastNetMonPayload, HealthResponse, IpHistoryResponse, LoginRequest,
-    LoginResponse, MitigationResponse, MitigationsListResponse, OperatorInfo, OperatorListResponse,
-    PublicHealthResponse, ReloadResponse, SignalGroupDetailResponse, SignalGroupsListResponse,
-    TimeseriesResponse, WebhookEventResult, WebhookResponse,
+    AlertmanagerWebhookResponse, AnnouncementOutcome, AuditListResponse, BatchEventRequest,
+    BatchEventResponse, BatchEventResult, BulkAcknowledgeRequest, BulkAcknowledgeResponse,
+    BulkAcknowledgeResult, BulkWithdrawRequest, BulkWithdrawResponse, BulkWithdrawResult,
+    ChangePasswordRequest, CorrelationContext, CreateMitigationRequest, CreateOperatorRequest,
+    ErrorResponse, EventResponse, EventsListResponse, FastNetMonAttackDetails, FastNetMonPayload,
+    HealthResponse, IpHistoryResponse, LoginRequest, LoginResponse, MitigationResponse,
+    MitigationsListResponse, OperatorInfo, OperatorListResponse, PublicHealthResponse,
+    ReloadResponse, SignalGroupDetailResponse, SignalGroupsListResponse, TimeseriesResponse,
+    WebhookEventResult, WebhookResponse,
 };
 use crate::correlation::config::{CorrelationConfig, SourceConfig};
 use crate::correlation::engine::{
@@ -36,6 +37,7 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
         super::handlers::ingest_event,
         super::handlers::ingest_events_batch,
         super::handlers::list_mitigations,
+        super::handlers::create_mitigation,
         super::handlers::get_mitigation,
         super::handlers::bulk_withdraw_mitigations,
         super::handlers::bulk_acknowledge_mitigations,
@@ -78,6 +80,8 @@ use crate::db::{GlobalStats, NotificationPreferences, PopInfo, PopStats, Safelis
     components(
         schemas(
             EventResponse,
+            AnnouncementOutcome,
+            CreateMitigationRequest,
             MitigationResponse,
             MitigationsListResponse,
             PublicHealthResponse,

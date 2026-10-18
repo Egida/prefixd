@@ -56,6 +56,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Persist new detector and manual mitigation intent before speaker announcement,
+  preventing a failed insert or interrupted request from leaving an unowned rule.
+  Retain committed intent after speaker errors so readable reconciliation and
+  TTL/withdrawal cleanup can recover it.
+- Return accepted intent with a request-local `announcement_outcome: "unconfirmed"`
+  and mitigation ID after speaker errors, including batch and signal wrappers.
+  Manual creation uses HTTP 202 for this case; ordinary success/dry-run keep 201.
+  The dashboard warns that announcement is unconfirmed and opens the saved intent.
+
 - Isolate expiry inventory to the controller's POP before decoding and fail on
   corrupt owned rows instead of silently skipping them. Durable withdrawal
   retries and independent reconciliation stages continue after enumeration fails.

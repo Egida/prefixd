@@ -41,8 +41,20 @@ fn decode_cursor(cursor: &str) -> Option<DateTime<Utc>> {
 
 // Response types
 
+/// Outcome of this creation request, not persisted speaker or router status.
+#[derive(Clone, Copy, Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnouncementOutcome {
+    /// Desired intent committed, but this request did not receive a successful speaker reply.
+    Unconfirmed,
+}
+
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct EventResponse {
+    /// Present only when this creation request committed intent without a successful speaker reply.
+    /// Omission is not evidence of enforcement; this outcome is not persisted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub announcement_outcome: Option<AnnouncementOutcome>,
     /// Unique identifier for this event
     pub event_id: Uuid,
     /// External event ID from the detector
@@ -80,6 +92,10 @@ pub struct CorrelationContext {
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct MitigationResponse {
+    /// Present only when this creation request committed intent without a successful speaker reply.
+    /// Omission is not evidence of enforcement; this outcome is not persisted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub announcement_outcome: Option<AnnouncementOutcome>,
     /// Unique mitigation identifier
     pub mitigation_id: Uuid,
     /// Current status (pending, active, withdrawn, expired)
@@ -133,6 +149,7 @@ pub struct MitigationResponse {
 impl From<&Mitigation> for MitigationResponse {
     fn from(m: &Mitigation) -> Self {
         Self {
+            announcement_outcome: None,
             mitigation_id: m.mitigation_id,
             status: m.status.to_string(),
             customer_id: m.customer_id.clone(),
@@ -388,10 +405,13 @@ fn validate_cidr(prefix: &str) -> Result<(), PrefixdError> {
     Ok(())
 }
 
-#[derive(Deserialize)]
-#[allow(dead_code)]
+#[derive(Deserialize, ToSchema)]
 pub struct CreateMitigationRequest {
     #[serde(default)]
+    #[allow(
+        dead_code,
+        reason = "Legacy input accepted for compatibility; authorization uses the session"
+    )]
     operator_id: String,
     reason: String,
     victim_ip: String,
@@ -484,6 +504,33 @@ pub async fn ingest_event(
     }
 }
 
+/// Caller holds the lifecycle mutex; commit desired state before any speaker mutation.
+async fn persist_new_mitigation(
+    state: &AppState,
+    mitigation: &mut Mitigation,
+) -> crate::error::Result<Option<AnnouncementOutcome>> {
+    mitigation.activate();
+    state.repo.insert_mitigation(mitigation).await?;
+    if state.is_dry_run() {
+        return Ok(None);
+    }
+    let rule = FlowSpecRule::new(
+        FlowSpecNlri::from(&mitigation.match_criteria),
+        FlowSpecAction::from((mitigation.action_type, &mitigation.action_params)),
+    );
+    let start = std::time::Instant::now();
+    if let Err(error) = state.announcer.announce(&rule).await {
+        tracing::warn!(mitigation_id = %mitigation.mitigation_id, error = %error,
+            "mitigation intent retained after unconfirmed BGP announcement");
+        return Ok(Some(AnnouncementOutcome::Unconfirmed));
+    }
+    crate::observability::metrics::ANNOUNCEMENTS_TOTAL
+        .with_label_values(&["announced"])
+        .inc();
+    crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
+    Ok(None)
+}
+
 async fn withdraw_and_notify(
     state: &AppState,
     mitigation: &Mitigation,
@@ -563,6 +610,7 @@ async fn handle_unban(
             return Ok((
                 StatusCode::ACCEPTED,
                 Json(EventResponse {
+                    announcement_outcome: None,
                     event_id: Uuid::new_v4(),
                     external_event_id: None,
                     status: "ignored_no_event_id".to_string(),
@@ -587,6 +635,7 @@ async fn handle_unban(
             return Ok((
                 StatusCode::ACCEPTED,
                 Json(EventResponse {
+                    announcement_outcome: None,
                     event_id: Uuid::new_v4(),
                     external_event_id: Some(ext_id),
                     status: "not_found".to_string(),
@@ -609,6 +658,7 @@ async fn handle_unban(
             return Ok((
                 StatusCode::ACCEPTED,
                 Json(EventResponse {
+                    announcement_outcome: None,
                     event_id: original_event.event_id,
                     external_event_id: Some(ext_id),
                     status: "no_active_mitigation".to_string(),
@@ -645,6 +695,7 @@ async fn handle_unban(
     Ok((
         StatusCode::ACCEPTED,
         Json(EventResponse {
+            announcement_outcome: None,
             event_id: unban_event.event_id,
             external_event_id: unban_event.external_event_id,
             status: "withdrawn".to_string(),
@@ -726,6 +777,7 @@ async fn handle_ban(
         return Ok((
             StatusCode::ACCEPTED,
             Json(EventResponse {
+                announcement_outcome: None,
                 event_id: event.event_id,
                 external_event_id: event.external_event_id.clone(),
                 status: "accepted_no_mitigation".to_string(),
@@ -947,6 +999,7 @@ async fn handle_ban(
             return Ok((
                 StatusCode::ACCEPTED,
                 Json(EventResponse {
+                    announcement_outcome: None,
                     event_id: event.event_id,
                     external_event_id: event.external_event_id.clone(),
                     status: "accepted".to_string(),
@@ -1021,6 +1074,7 @@ async fn handle_ban(
             return Ok((
                 StatusCode::ACCEPTED,
                 Json(EventResponse {
+                    announcement_outcome: None,
                     event_id: event.event_id,
                     external_event_id: event.external_event_id.clone(),
                     status: "accepted_no_playbook".to_string(),
@@ -1054,6 +1108,7 @@ async fn handle_ban(
         return Ok((
             StatusCode::ACCEPTED,
             Json(EventResponse {
+                announcement_outcome: None,
                 event_id: event.event_id,
                 external_event_id: event.external_event_id.clone(),
                 status: "extended".to_string(),
@@ -1101,33 +1156,7 @@ async fn handle_ban(
         Mitigation::from_intent(intent, event.victim_ip.clone(), event.attack_vector());
     mitigation.signal_group_id = signal_group_id;
 
-    // Announce FlowSpec (if not dry-run)
-    if !state.is_dry_run() {
-        let nlri = FlowSpecNlri::from(&mitigation.match_criteria);
-        let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
-        let rule = FlowSpecRule::new(nlri, action);
-
-        let start = std::time::Instant::now();
-        if let Err(e) = state.announcer.announce(&rule).await {
-            tracing::error!(error = %e, "BGP announcement failed");
-            mitigation.reject(e.to_string());
-            state
-                .repo
-                .insert_mitigation(&mitigation)
-                .await
-                .map_err(AppError)?;
-            return Err(AppError(e));
-        }
-        crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-            .with_label_values(&["announced"])
-            .inc();
-        crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
-    }
-
-    mitigation.activate();
-    state
-        .repo
-        .insert_mitigation(&mitigation)
+    let announcement_outcome = persist_new_mitigation(&state, &mut mitigation)
         .await
         .map_err(AppError)?;
 
@@ -1172,6 +1201,7 @@ async fn handle_ban(
     Ok((
         StatusCode::ACCEPTED,
         Json(EventResponse {
+            announcement_outcome,
             event_id: event.event_id,
             external_event_id: event.external_event_id.clone(),
             status: "accepted".to_string(),
@@ -1505,6 +1535,18 @@ pub async fn get_mitigation(
     Ok(Json(response))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/mitigations",
+    tag = "mitigations",
+    request_body = CreateMitigationRequest,
+    responses(
+        (status = 201, description = "Mitigation intent created", body = MitigationResponse),
+        (status = 202, description = "Intent created; announcement unconfirmed for this request", body = MitigationResponse),
+        (status = 409, description = "Conflicting owner or pending withdrawal"),
+        (status = 422, description = "Guardrail rejection"),
+    )
+)]
 pub async fn create_mitigation(
     State(state): State<Arc<AppState>>,
     auth_session: AuthSession,
@@ -1645,34 +1687,23 @@ pub async fn create_mitigation(
     let mut mitigation =
         Mitigation::from_intent(intent, req.victim_ip, crate::domain::AttackVector::Unknown);
 
-    if !state.is_dry_run() {
-        let nlri = FlowSpecNlri::from(&mitigation.match_criteria);
-        let action = FlowSpecAction::from((mitigation.action_type, &mitigation.action_params));
-        let rule = FlowSpecRule::new(nlri, action);
-        let start = std::time::Instant::now();
-        if let Err(e) = state.announcer.announce(&rule).await {
-            return Ok(AppError(e).into_response());
-        }
-        crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-            .with_label_values(&["announced"])
-            .inc();
-        crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
-    }
-
-    mitigation.activate();
-    if let Err(e) = state.repo.insert_mitigation(&mitigation).await {
-        return Ok(AppError(e).into_response());
-    }
+    let announcement_outcome = match persist_new_mitigation(&state, &mut mitigation).await {
+        Ok(outcome) => outcome,
+        Err(error) => return Ok(AppError(error).into_response()),
+    };
 
     crate::observability::metrics::MITIGATIONS_CREATED
         .with_label_values(&[&mitigation.action_type.to_string(), &state.settings.pop])
         .inc();
 
-    Ok((
-        StatusCode::CREATED,
-        Json(MitigationResponse::from(&mitigation)),
-    )
-        .into_response())
+    let mut response = MitigationResponse::from(&mitigation);
+    response.announcement_outcome = announcement_outcome;
+    let status = if announcement_outcome.is_some() {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::CREATED
+    };
+    Ok((status, Json(response)).into_response())
 }
 
 pub async fn withdraw_mitigation(
@@ -1979,6 +2010,10 @@ pub struct BatchEventRequest {
 
 #[derive(Serialize, ToSchema)]
 pub struct BatchEventResult {
+    /// Present only when this creation request committed intent without a successful speaker reply.
+    /// Omission is not evidence of enforcement; this outcome is not persisted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub announcement_outcome: Option<AnnouncementOutcome>,
     index: usize,
     event_id: Uuid,
     status: String,
@@ -2048,6 +2083,7 @@ pub async fn ingest_events_batch(
         if let Some(err) = validation_err {
             rejected += 1;
             results.push(BatchEventResult {
+                announcement_outcome: None,
                 index,
                 event_id: Uuid::nil(),
                 status: "rejected".to_string(),
@@ -2071,6 +2107,7 @@ pub async fn ingest_events_batch(
             Ok((_status, Json(resp))) => {
                 accepted += 1;
                 results.push(BatchEventResult {
+                    announcement_outcome: resp.announcement_outcome,
                     index,
                     event_id: resp.event_id,
                     status: resp.status,
@@ -2081,6 +2118,7 @@ pub async fn ingest_events_batch(
             Err(AppError(err)) => {
                 rejected += 1;
                 results.push(BatchEventResult {
+                    announcement_outcome: None,
                     index,
                     event_id: Uuid::nil(),
                     status: "rejected".to_string(),
@@ -4422,6 +4460,10 @@ pub struct AlertmanagerAlert {
 /// Per-alert result in the Alertmanager webhook response.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AlertmanagerAlertResult {
+    /// Present only when this creation request committed intent without a successful speaker reply.
+    /// Omission is not evidence of enforcement; this outcome is not persisted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub announcement_outcome: Option<AnnouncementOutcome>,
     /// Index in the alerts array
     pub index: usize,
     /// Processing status (processed, duplicate, withdrawn, error)
@@ -4612,6 +4654,7 @@ async fn process_alertmanager_alert(
         Some(v) => v,
         None => {
             return Err(AlertmanagerAlertResult {
+                announcement_outcome: None,
                 index,
                 status: "error".to_string(),
                 event_id: None,
@@ -4631,6 +4674,7 @@ async fn process_alertmanager_alert(
         Some(ip) => ip,
         None => {
             return Err(AlertmanagerAlertResult {
+                announcement_outcome: None,
                 index,
                 status: "error".to_string(),
                 event_id: None,
@@ -4646,6 +4690,7 @@ async fn process_alertmanager_alert(
     // Validate IP
     if victim_ip.parse::<IpAddr>().is_err() {
         return Err(AlertmanagerAlertResult {
+            announcement_outcome: None,
             index,
             status: "error".to_string(),
             event_id: None,
@@ -4695,6 +4740,7 @@ async fn process_alertmanager_alert(
     match input.action.as_str() {
         "unban" => match handle_unban(state.clone(), input).await {
             Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
+                announcement_outcome: resp.announcement_outcome,
                 index,
                 status: "withdrawn".to_string(),
                 event_id: Some(resp.event_id),
@@ -4702,6 +4748,7 @@ async fn process_alertmanager_alert(
                 error: None,
             }),
             Err(AppError(e)) => Ok(AlertmanagerAlertResult {
+                announcement_outcome: None,
                 index,
                 status: "withdrawn_noop".to_string(),
                 event_id: None,
@@ -4711,6 +4758,7 @@ async fn process_alertmanager_alert(
         },
         _ => match handle_ban(state.clone(), input).await {
             Ok((_status, Json(resp))) => Ok(AlertmanagerAlertResult {
+                announcement_outcome: resp.announcement_outcome,
                 index,
                 status: resp.status,
                 event_id: Some(resp.event_id),
@@ -4718,6 +4766,7 @@ async fn process_alertmanager_alert(
                 error: None,
             }),
             Err(AppError(PrefixdError::DuplicateEvent { .. })) => Ok(AlertmanagerAlertResult {
+                announcement_outcome: None,
                 index,
                 status: "duplicate".to_string(),
                 event_id: None,
@@ -4725,6 +4774,7 @@ async fn process_alertmanager_alert(
                 error: None,
             }),
             Err(AppError(e)) => Err(AlertmanagerAlertResult {
+                announcement_outcome: None,
                 index,
                 status: "error".to_string(),
                 event_id: None,
@@ -5036,6 +5086,10 @@ fn format_duration(seconds: i64) -> String {
 /// Per-event result for the generic webhook endpoint.
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct WebhookEventResult {
+    /// Present only when this creation request committed intent without a successful speaker reply.
+    /// Omission is not evidence of enforcement; this outcome is not persisted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub announcement_outcome: Option<AnnouncementOutcome>,
     /// Position in the payload (0 for single-event adapters, 0..N for root_path).
     pub index: usize,
     /// Processing status (processed, duplicate, withdrawn, withdrawn_noop, error).
@@ -5182,6 +5236,7 @@ async fn ingest_webhook_inner(
             Err(e) => {
                 failed += 1;
                 results.push(WebhookEventResult {
+                    announcement_outcome: None,
                     index,
                     status: "error".into(),
                     event_id: None,
@@ -5194,6 +5249,7 @@ async fn ingest_webhook_inner(
                     Ok((_status, Json(resp))) => {
                         processed += 1;
                         results.push(WebhookEventResult {
+                            announcement_outcome: resp.announcement_outcome,
                             index,
                             status: "withdrawn".into(),
                             event_id: Some(resp.event_id),
@@ -5204,6 +5260,7 @@ async fn ingest_webhook_inner(
                     Err(AppError(e)) => {
                         processed += 1;
                         results.push(WebhookEventResult {
+                            announcement_outcome: None,
                             index,
                             status: "withdrawn_noop".into(),
                             event_id: None,
@@ -5216,6 +5273,7 @@ async fn ingest_webhook_inner(
                     Ok((_status, Json(resp))) => {
                         processed += 1;
                         results.push(WebhookEventResult {
+                            announcement_outcome: resp.announcement_outcome,
                             index,
                             status: resp.status,
                             event_id: Some(resp.event_id),
@@ -5226,6 +5284,7 @@ async fn ingest_webhook_inner(
                     Err(AppError(PrefixdError::DuplicateEvent { .. })) => {
                         processed += 1;
                         results.push(WebhookEventResult {
+                            announcement_outcome: None,
                             index,
                             status: "duplicate".into(),
                             event_id: None,
@@ -5236,6 +5295,7 @@ async fn ingest_webhook_inner(
                     Err(AppError(e)) => {
                         failed += 1;
                         results.push(WebhookEventResult {
+                            announcement_outcome: None,
                             index,
                             status: "error".into(),
                             event_id: None,
