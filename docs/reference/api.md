@@ -279,12 +279,17 @@ Authorization: Bearer <token>
 | `status` | string | Filter by one or more statuses (comma-separated): `pending`, `active`, `escalated`, `withdrawn`, `expired`, `rejected` |
 | `customer_id` | string | Filter by customer |
 | `victim_ip` | string | Filter by exact victim IP |
-| `pop` | string | Filter by POP (or "all") |
+| `pop` | string | Exact case-sensitive POP identifier; omitted or literal `all` lists every POP |
 | `acknowledged` | boolean | Filter by acknowledged status (`true`/`false`) |
 | `limit` | integer | Max results (default 100, max 1000) |
 | `cursor` | string | Opaque `m1` continuation from the previous `next_cursor` (maximum 128 bytes) |
 | `start` | string | Start of date range (ISO 8601, inclusive) |
 | `end` | string | End of date range (ISO 8601, exclusive) |
+
+A concrete `pop` filters rows before ordering, cursor continuation and page limits.
+Identifiers match stored values exactly, including case, spaces and Unicode;
+unknown identifiers return an empty page. Empty identifiers and identifiers containing
+NUL return `400`. Omission and literal `all` both preserve the global listing scope.
 
 Pages use descending `(created_at, mitigation_id)` order, so equal creation timestamps
 remain complete across page boundaries. Copy `next_cursor` unchanged and keep the

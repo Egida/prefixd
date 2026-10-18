@@ -2523,49 +2523,101 @@ async fn test_cursor_pagination_mitigations() {
 
 #[tokio::test]
 async fn test_mitigation_cursor_preserves_ties_and_nanosecond_positions() {
-    use chrono::{DateTime, Duration, Utc};
-    use prefixd::domain::{ActionParams, ActionType, MatchCriteria, Mitigation, MitigationIntent};
+    use chrono::{DateTime, Duration, SecondsFormat, Utc};
+    use prefixd::domain::{
+        ActionParams, ActionType, MatchCriteria, Mitigation, MitigationIntent, MitigationStatus,
+    };
+    use std::collections::BTreeSet;
     use uuid::Uuid;
 
     let (app, repo) = setup_app_correlation_with_repo(1, 0.5).await;
     let timestamp: DateTime<Utc> = "2026-10-18T12:00:00.123456789Z".parse().unwrap();
-    // Deliberately insert out of both timestamp and UUID order.
-    for (id, created_at) in [
-        (2, timestamp + Duration::nanoseconds(1)),
-        (5, timestamp),
-        (3, timestamp),
-        (4, timestamp),
-        (1, timestamp - Duration::nanoseconds(1)),
-    ] {
+    let pop_a = "Edge / β +1";
+    let pop_b = "iad1";
+    // Interleave POPs and insert out of timestamp/UUID order; six rows fail other filters.
+    for id in [2_u128, 7, 5, 3, 6, 4, 1, 8, 9, 10, 11, 12, 13] {
         let mut mitigation = Mitigation::from_intent(
             MitigationIntent {
                 event_id: Uuid::new_v4(),
-                customer_id: None,
+                customer_id: Some("cursor_customer".into()),
                 service_id: None,
-                pop: "test1".into(),
+                pop: if id % 2 == 0 { pop_b } else { pop_a }.into(),
                 match_criteria: MatchCriteria {
-                    dst_prefix: format!("203.0.113.{id}/32"),
+                    dst_prefix: "203.0.113.10/32".into(),
                     protocol: Some(17),
-                    dst_ports: vec![53],
+                    dst_ports: vec![1000 + u16::try_from(id).unwrap()],
                 },
                 action_type: ActionType::Discard,
                 action_params: ActionParams { rate_bps: None },
                 ttl_seconds: 300,
                 reason: "cursor fixture".into(),
             },
-            format!("203.0.113.{id}"),
+            "203.0.113.10".into(),
             AttackVector::UdpFlood,
         );
         mitigation.mitigation_id = Uuid::from_u128(id);
-        mitigation.created_at = created_at;
-        mitigation.activate();
+        mitigation.created_at = match id {
+            2 => timestamp + Duration::nanoseconds(1),
+            1 => timestamp - Duration::nanoseconds(1),
+            8 => timestamp - Duration::nanoseconds(3),
+            9 => timestamp + Duration::nanoseconds(2),
+            _ => timestamp,
+        };
+        mitigation.status = if id % 2 == 0 {
+            MitigationStatus::Escalated
+        } else {
+            MitigationStatus::Active
+        };
+        match id {
+            10 => mitigation.status = MitigationStatus::Withdrawn,
+            11 => mitigation.customer_id = Some("other_customer".into()),
+            12 => {
+                mitigation.victim_ip = "203.0.113.11".into();
+                mitigation.match_criteria.dst_prefix = "203.0.113.11/32".into();
+                mitigation.scope_hash = mitigation.match_criteria.compute_scope_hash();
+            }
+            _ => {}
+        }
         repo.insert_mitigation(&mitigation).await.unwrap();
     }
-    for suffix in ["", "&pop=all"] {
+    let acknowledged_ids: Vec<_> = (1..=12).map(Uuid::from_u128).collect();
+    let acknowledged = repo
+        .acknowledge_mitigations(&acknowledged_ids, "cursor-operator")
+        .await
+        .unwrap();
+    assert_eq!(
+        acknowledged.into_iter().collect::<BTreeSet<_>>(),
+        acknowledged_ids.into_iter().collect::<BTreeSet<_>>()
+    );
+    let start = (timestamp - Duration::nanoseconds(2)).to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let end = (timestamp + Duration::nanoseconds(2)).to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let filters = format!(
+        "status=active,escalated&customer_id=cursor_customer&victim_ip=203.0.113.10&acknowledged=true&start={start}&end={end}"
+    );
+    let every_id = vec![2_u128, 7, 6, 5, 4, 3, 1];
+    let mut scoped_sets = Vec::new();
+    for (selected_pop, expected_ids) in [
+        (None, every_id.clone()),
+        (Some("all"), every_id),
+        (Some(pop_a), vec![7, 5, 3, 1]),
+        (Some(pop_b), vec![2, 6, 4]),
+        (Some("unknown"), vec![]),
+        (Some("IAD1"), vec![]),
+        (Some(" "), vec![]),
+    ] {
+        let suffix = selected_pop
+            .map(|pop| format!("&pop={}", urlencoding::encode(pop)))
+            .unwrap_or_default();
+        let expected_counts: Vec<_> = if expected_ids.is_empty() {
+            vec![0]
+        } else {
+            expected_ids.chunks(2).map(|page| page.len()).collect()
+        };
         let mut cursor = None;
         let mut ids = Vec::new();
-        for expected_count in [2, 2, 1] {
-            let mut uri = format!("/v1/mitigations?limit=2{suffix}");
+        let mut unique = BTreeSet::new();
+        for (page_index, expected_count) in expected_counts.into_iter().enumerate() {
+            let mut uri = format!("/v1/mitigations?limit=2&{filters}{suffix}");
             if let Some(value) = &cursor {
                 uri.push_str(&format!("&cursor={value}"));
             }
@@ -2579,14 +2631,24 @@ async fn test_mitigation_cursor_preserves_ties_and_nanosecond_positions() {
                 .await
                 .unwrap();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(json["count"], expected_count);
-            ids.extend(
-                json["mitigations"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|row| Uuid::parse_str(row["mitigation_id"].as_str().unwrap()).unwrap()),
+            assert_eq!(
+                json["count"],
+                expected_count,
+                "page {} cursor_present={} selected_pop={selected_pop:?}",
+                page_index + 1,
+                cursor.is_some()
             );
+            for row in json["mitigations"].as_array().unwrap() {
+                let id = Uuid::parse_str(row["mitigation_id"].as_str().unwrap()).unwrap();
+                assert!(unique.insert(id), "duplicate mitigation across pages");
+                assert_eq!(row["customer_id"], "cursor_customer");
+                assert_eq!(row["victim_ip"], "203.0.113.10");
+                assert!(row["acknowledged_at"].is_string());
+                if let Some(pop) = selected_pop.filter(|pop| *pop != "all") {
+                    assert_eq!(row["pop"], pop);
+                }
+                ids.push(id);
+            }
             cursor = json["next_cursor"].as_str().map(str::to_owned);
             assert_eq!(json["has_more"], cursor.is_some());
             if let Some(value) = &cursor {
@@ -2594,9 +2656,54 @@ async fn test_mitigation_cursor_preserves_ties_and_nanosecond_positions() {
                 assert!(value.len() <= 128);
             }
         }
-        assert_eq!(ids, [2, 5, 4, 3, 1].map(Uuid::from_u128));
+        let expected: Vec<_> = expected_ids.into_iter().map(Uuid::from_u128).collect();
+        assert_eq!(ids, expected);
+        assert_eq!(unique, expected.into_iter().collect());
         assert!(cursor.is_none());
+        if selected_pop == Some(pop_a) || selected_pop == Some(pop_b) {
+            scoped_sets.push(unique);
+        }
     }
+    assert!(scoped_sets[0].is_disjoint(&scoped_sets[1]));
+    assert_eq!(scoped_sets[0].len() + scoped_sets[1].len(), 7);
+}
+
+#[tokio::test]
+async fn test_mitigation_pop_filter_rejects_empty_and_nul() {
+    let app = setup_app().await;
+    for value in ["", "%00", "iad%001"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/mitigations?pop={value}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "pop={value}");
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap()
+                .contains("invalid POP filter")
+        );
+    }
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/mitigations?pop=iad1&pop=other")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

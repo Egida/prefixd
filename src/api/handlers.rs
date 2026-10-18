@@ -365,7 +365,7 @@ pub struct ListMitigationsQuery {
     customer_id: Option<String>,
     /// Filter by victim IP address
     victim_ip: Option<String>,
-    /// Filter by POP. Use "all" to see mitigations from all POPs.
+    /// Exact POP filter; omission and literal "all" list every POP.
     pop: Option<String>,
     /// Filter by acknowledged status (true/false)
     acknowledged: Option<bool>,
@@ -1458,7 +1458,7 @@ pub async fn list_audit(
         ("status" = Option<String>, Query, description = "Filter by status (comma-separated)"),
         ("customer_id" = Option<String>, Query, description = "Filter by customer ID"),
         ("victim_ip" = Option<String>, Query, description = "Filter by victim IP address"),
-        ("pop" = Option<String>, Query, description = "Filter by POP, use 'all' for cross-POP"),
+        ("pop" = Option<String>, Query, description = "Exact case-sensitive POP; omitted or literal 'all' lists every POP. Empty/NUL identifiers are invalid."),
         ("acknowledged" = Option<bool>, Query, description = "Filter by acknowledged status"),
         ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
         ("cursor" = Option<String>, Query, description = "Opaque m1 continuation from next_cursor (max 128 bytes); superseded timestamp-only cursors are rejected"),
@@ -1467,7 +1467,7 @@ pub async fn list_audit(
     ),
     responses(
         (status = 200, description = "List of mitigations", body = MitigationsListResponse),
-        (status = 400, description = "Invalid or superseded mitigation cursor", body = ErrorResponse)
+        (status = 400, description = "Invalid POP filter or invalid/superseded mitigation cursor", body = ErrorResponse)
     )
 )]
 pub async fn list_mitigations(
@@ -1494,38 +1494,34 @@ pub async fn list_mitigations(
             )).into_response()),
         },
     };
+    let pop = match query.pop.as_deref() {
+        None | Some("all") => None,
+        Some(value) if value.is_empty() || value.contains('\0') => {
+            return Ok(AppError(PrefixdError::InvalidRequest(
+                "invalid POP filter; use a nonempty identifier without NUL, or omit pop to list every POP".into(),
+            )).into_response());
+        }
+        Some(value) => Some(value.to_owned()),
+    };
     let params = MitigationListParams {
+        pop,
         limit: limit + 1,
         cursor,
         start: query.start.as_deref().and_then(parse_datetime),
         end: query.end.as_deref().and_then(parse_datetime),
     };
 
-    let mut mitigations = if query.pop.as_deref() == Some("all") {
-        state
-            .repo
-            .list_mitigations_all_pops(
-                status_filter.as_deref(),
-                query.customer_id.as_deref(),
-                query.victim_ip.as_deref(),
-                query.acknowledged,
-                &params,
-            )
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    } else {
-        state
-            .repo
-            .list_mitigations(
-                status_filter.as_deref(),
-                query.customer_id.as_deref(),
-                query.victim_ip.as_deref(),
-                query.acknowledged,
-                &params,
-            )
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    };
+    let mut mitigations = state
+        .repo
+        .list_mitigations(
+            status_filter.as_deref(),
+            query.customer_id.as_deref(),
+            query.victim_ip.as_deref(),
+            query.acknowledged,
+            &params,
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let has_more = mitigations.len() > limit as usize;
     if has_more {

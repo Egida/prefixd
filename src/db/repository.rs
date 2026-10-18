@@ -573,6 +573,7 @@ impl RepositoryTrait for Repository {
             WHERE ($1::text[] IS NULL OR status = ANY($1))
               AND ($2::text IS NULL OR customer_id = $2)
               AND ($3::text IS NULL OR victim_ip = $3)
+              AND ($10::text IS NULL OR pop = $10)
               AND ($4::timestamptz IS NULL OR (created_at, mitigation_id) < ($4, $9::uuid))
               AND ($5::timestamptz IS NULL OR created_at >= $5)
               AND ($6::timestamptz IS NULL OR created_at < $6)
@@ -590,6 +591,7 @@ impl RepositoryTrait for Repository {
         .bind(acknowledged)                // $7
         .bind(params.limit as i64)         // $8
         .bind(params.cursor.map(|cursor| cursor.mitigation_id)) // $9
+        .bind(params.pop.as_deref())       // $10
         .fetch_all(&self.pool)
         .await?;
 
@@ -800,58 +802,6 @@ impl RepositoryTrait for Repository {
             total_events: total_events.0 as u32,
             pops,
         })
-    }
-
-    async fn list_mitigations_all_pops(
-        &self,
-        status_filter: Option<&[MitigationStatus]>,
-        customer_id: Option<&str>,
-        victim_ip: Option<&str>,
-        acknowledged: Option<bool>,
-        params: &MitigationListParams,
-    ) -> Result<Vec<Mitigation>> {
-        let status_strings: Option<Vec<String>> =
-            status_filter.map(|statuses| statuses.iter().map(|s| s.as_str().to_string()).collect());
-
-        let rows = sqlx::query_as::<_, MitigationRow>(
-            r#"
-            SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
-                   match_json, action_type, action_params_json, status,
-                   created_at, updated_at, expires_at, withdrawn_at,
-                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
-                   acknowledged_at, acknowledged_by, signal_group_id
-            FROM mitigations
-            WHERE ($1::text[] IS NULL OR status = ANY($1))
-              AND ($2::text IS NULL OR customer_id = $2)
-              AND ($3::text IS NULL OR victim_ip = $3)
-              AND ($4::timestamptz IS NULL OR (created_at, mitigation_id) < ($4, $9::uuid))
-              AND ($5::timestamptz IS NULL OR created_at >= $5)
-              AND ($6::timestamptz IS NULL OR created_at < $6)
-              AND ($7::bool IS NULL OR ($7 = true AND acknowledged_at IS NOT NULL) OR ($7 = false AND acknowledged_at IS NULL))
-            ORDER BY created_at DESC, mitigation_id DESC
-            LIMIT $8
-            "#,
-        )
-        .bind(status_strings.as_deref())  // $1
-        .bind(customer_id)                 // $2
-        .bind(victim_ip)                   // $3
-        .bind(params.cursor.map(|cursor| cursor.created_at)) // $4
-        .bind(params.start)                // $5
-        .bind(params.end)                  // $6
-        .bind(acknowledged)                // $7
-        .bind(params.limit as i64)         // $8
-        .bind(params.cursor.map(|cursor| cursor.mitigation_id)) // $9
-        .fetch_all(&self.pool)
-        .await?;
-
-        rows.into_iter()
-            .map(|row| {
-                Mitigation::from_row(row).inspect_err(|error| {
-                    ROW_PARSE_ERRORS.with_label_values(&["mitigations"]).inc();
-                    tracing::error!(%error, "rejecting corrupted mitigation page");
-                })
-            })
-            .collect()
     }
 
     // Timeseries
