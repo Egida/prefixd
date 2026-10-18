@@ -244,6 +244,13 @@ must not trigger repeated injection. No received peer's rule is withdrawn by
 this API. Other controllers sharing local injection are not distinguished by an
 ownership marker; unknown local rules are currently reported, not deleted.
 
+New detector and manual mitigations are persisted as Active desired intent before
+announcement. Speaker errors retain that row for readable recovery and return a
+request-local unconfirmed outcome; they do not prove rejection or delete intent.
+Active status and creation notifications describe desired state, while successful
+announcement metrics describe local RPC acceptance. This is not the full durable
+desired/acknowledged revision ledger or write-only recovery contract.
+
 Reconciliation reads the complete desired owner inventory for its POP. Malformed
 persisted rows fail the pass before repairs begin. Pending creation rows are
 excluded from repairs and status-active counts; expired and pending-withdrawal

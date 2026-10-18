@@ -104,9 +104,15 @@ export function MitigateNowDialog({ open, onOpenChange }: MitigateNowDialogProps
       })
 
       if (result.mitigation_id) {
-        toast.success("Mitigation created", {
-          description: `${victimIp} — ${vector.replace(/_/g, " ")}`,
-        })
+        if (result.announcement_outcome === "unconfirmed") {
+          toast.warning("Mitigation intent saved; announcement unconfirmed", {
+            description: "Intent is saved for reconciliation. Check speaker state and mitigation details.",
+          })
+        } else {
+          toast.success("Mitigation created", {
+            description: `${victimIp} — ${vector.replace(/_/g, " ")}`,
+          })
+        }
         reset()
         onOpenChange(false)
         router.push(`/mitigations/${result.mitigation_id}`)

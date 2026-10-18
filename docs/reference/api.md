@@ -109,7 +109,29 @@ Content-Type: application/json
 }
 ```
 
+When a new mitigation is needed, prefixd commits its Active desired row before
+calling the speaker. A persistence failure sends no announcement. If intent
+commits but the speaker call fails or times out, the response is still `202` and
+includes the mitigation ID plus `"announcement_outcome": "unconfirmed"`.
+The controller retains that intent for readable reconciliation and TTL/withdrawal
+cleanup. This request did not receive a successful speaker reply; the rule may
+already exist remotely.
+
+`announcement_outcome` is optional and request-local. It is omitted for ordinary
+success, dry-run, responses that did not create a rule, and subsequent list/detail
+reads. Omission does not prove speaker acceptance or router enforcement. The
+Active status, mitigation-created events and desired-intent counts describe
+controller intent; announcement-success metrics require a successful local RPC.
+
+Detector event storage still precedes mitigation preparation and correlation is
+not one transaction with creation. A later preparation failure can return `500`
+after consuming the external event ID; resubmitting the same source/ID can return
+`409 DuplicateEvent` even though no mitigation exists. Prefixd does not delete or
+replay those events automatically. This bounded creation fix does not provide
+atomic detector ingestion.
+
 Common status values:
+
 - Ban path: `"accepted"`, `"extended"`, `"accepted_no_playbook"`, `"accepted_no_mitigation"`
 - Unban path: `"withdrawn"`, `"ignored_no_event_id"`, `"not_found"`, `"no_active_mitigation"`
 
@@ -185,6 +207,11 @@ Accepts up to 100 events in a single request. Each event is processed sequential
 | 207 | Partial success (some rejected) |
 | 400 | Empty batch or exceeds 100 event limit |
 | 401 | Authentication required |
+
+A result whose intent committed but whose announcement is unconfirmed includes
+`announcement_outcome: "unconfirmed"` and its mitigation ID. It counts as accepted,
+not rejected, and does not receive an `error` field. The same additive outcome is
+preserved by Alertmanager and generic webhook result wrappers.
 
 ### List Events
 
@@ -337,7 +364,7 @@ Directly create a mitigation (e.g. from the dashboard "Mitigate Now" form). Unli
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `operator_id` | string | yes | Operator creating the mitigation |
+| `operator_id` | string | no | Legacy field, ignored; authenticated operator identity is authoritative |
 | `reason` | string | yes | Reason for the mitigation |
 | `victim_ip` | string | yes | IPv4 address to protect |
 | `protocol` | string | yes | `"udp"`, `"tcp"`, `"icmp"`, or `"any"` |
@@ -349,6 +376,13 @@ Directly create a mitigation (e.g. from the dashboard "Mitigate Now" form). Unli
 **Response (201 Created):**
 
 Returns the full mitigation object (same shape as [Get Mitigation](#get-mitigation)).
+The desired row is committed before speaker mutation. Ordinary successful creation
+and dry-run retain `201 Created`. If the speaker call fails or times out after
+that commit, the response is `202 Accepted`, includes the same mitigation ID,
+and adds `"announcement_outcome": "unconfirmed"`. Intent remains Active for
+reconciliation and cleanup; do not blindly recreate it. This outcome belongs to
+the creation request and is not stored or returned by later GET/list requests.
+Neither Active status nor omission of the outcome proves router enforcement.
 
 **Error Responses:**
 

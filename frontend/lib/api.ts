@@ -24,7 +24,11 @@ export interface CorrelationContext {
   explanation?: string | null
 }
 
+export type AnnouncementOutcome = "unconfirmed"
+
 export interface Mitigation {
+  /** This creation request had no successful speaker reply; not persisted status. */
+  announcement_outcome?: AnnouncementOutcome
   mitigation_id: string
   scope_hash: string
   status: "pending" | "active" | "escalated" | "expired" | "withdrawn" | "rejected"
@@ -297,6 +301,8 @@ export interface IngestEventRequest {
 }
 
 export interface EventResponse {
+  /** This creation request had no successful speaker reply; not persisted status. */
+  announcement_outcome?: AnnouncementOutcome
   event_id: string
   mitigation_id: string | null
   status: string

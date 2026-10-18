@@ -8495,3 +8495,47 @@ async fn test_ingest_event_unknown_vector() {
     assert_eq!(json["status"], "accepted_no_playbook");
     assert!(json["mitigation_id"].is_null());
 }
+
+#[tokio::test]
+async fn test_openapi_creation_outcome_is_optional_and_manual_accepted_is_documented() {
+    let app = setup_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(document["paths"]["/v1/mitigations"]["post"]["responses"]["201"].is_object());
+    assert!(document["paths"]["/v1/mitigations"]["post"]["responses"]["202"].is_object());
+    assert_eq!(
+        document["components"]["schemas"]["AnnouncementOutcome"]["enum"],
+        serde_json::json!(["unconfirmed"])
+    );
+    for name in [
+        "EventResponse",
+        "MitigationResponse",
+        "BatchEventResult",
+        "AlertmanagerAlertResult",
+        "WebhookEventResult",
+    ] {
+        let schema = &document["components"]["schemas"][name];
+        assert!(
+            schema["properties"]["announcement_outcome"].is_object(),
+            "schema={name}"
+        );
+        if let Some(required) = schema["required"].as_array() {
+            assert!(
+                !required.iter().any(|field| field == "announcement_outcome"),
+                "schema={name}"
+            );
+        }
+    }
+}
