@@ -282,9 +282,20 @@ Authorization: Bearer <token>
 | `pop` | string | Filter by POP (or "all") |
 | `acknowledged` | boolean | Filter by acknowledged status (`true`/`false`) |
 | `limit` | integer | Max results (default 100, max 1000) |
-| `cursor` | string | Cursor for pagination (from previous response `next_cursor`) |
+| `cursor` | string | Opaque `m1` continuation from the previous `next_cursor` (maximum 128 bytes) |
 | `start` | string | Start of date range (ISO 8601, inclusive) |
 | `end` | string | End of date range (ISO 8601, exclusive) |
+
+Pages use descending `(created_at, mitigation_id)` order, so equal creation timestamps
+remain complete across page boundaries. Copy `next_cursor` unchanged and keep the
+same filters while paging; omit `cursor` to start a fresh listing. The cursor is
+opaque: clients must not construct or interpret its contents.
+
+Malformed, oversized and superseded timestamp-only mitigation cursors return
+`400` with a JSON `error`; restart from the first page to obtain a current cursor.
+The `mitigations`, `count`, `next_cursor` and `has_more` response fields are unchanged.
+A persisted row that cannot be decoded fails the entire page with `500`, including
+a corrupt lookahead row; it is never silently omitted or reported as end of history.
 
 **Response:**
 
