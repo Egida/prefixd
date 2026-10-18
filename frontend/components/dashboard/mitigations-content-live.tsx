@@ -92,6 +92,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   const [isWithdrawing, setIsWithdrawing] = useState(false)
   const [withdrawError, setWithdrawError] = useState<string | null>(null)
   const withdrawInFlight = useRef(false)
+  const withdrawCompleted = useRef(false)
   const withdrawTrigger = useRef<HTMLButtonElement | null>(null)
   const searchInput = useRef<HTMLInputElement | null>(null)
   const [mitigateNowOpen, setMitigateNowOpen] = useState(initialMitigateOpen ?? false)
@@ -137,6 +138,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
     setWithdrawError(null)
     try {
       await withdrawMitigation(withdrawTarget.mitigation_id, withdrawReason || "Manual withdrawal", "dashboard")
+      withdrawCompleted.current = true
       setWithdrawTarget(null)
       setWithdrawReason("")
       mutate()
@@ -631,6 +633,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                                     onClick={(e) => {
                                       e.stopPropagation()
                                       withdrawTrigger.current = e.currentTarget
+                                      withdrawCompleted.current = false
                                       setWithdrawTarget(mitigation)
                                     }}
                                     aria-label="Withdraw mitigation"
@@ -690,9 +693,9 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
           setWithdrawError(null)
         }
       }}>
-        <AlertDialogContent onCloseAutoFocus={(event) => {
+        <AlertDialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" onCloseAutoFocus={(event) => {
           event.preventDefault()
-          const target = withdrawTrigger.current?.isConnected ? withdrawTrigger.current : searchInput.current
+          const target = !withdrawCompleted.current && withdrawTrigger.current?.isConnected ? withdrawTrigger.current : searchInput.current
           target?.focus()
         }}>
           <AlertDialogHeader>
@@ -743,7 +746,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
           setBulkWithdrawResults([])
         }
       }}>
-        <AlertDialogContent onCloseAutoFocus={(event) => {
+        <AlertDialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" onCloseAutoFocus={(event) => {
           event.preventDefault()
           const target = bulkWithdrawTrigger.current?.isConnected ? bulkWithdrawTrigger.current : searchInput.current
           target?.focus()

@@ -79,6 +79,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
   const [isWithdrawing, setIsWithdrawing] = useState(false)
   const [withdrawError, setWithdrawError] = useState<string | null>(null)
   const withdrawInFlight = useRef(false)
+  const withdrawCompleted = useRef(false)
   const withdrawTrigger = useRef<HTMLButtonElement | null>(null)
   const victimLink = useRef<HTMLAnchorElement | null>(null)
   const [reportMarkdown, setReportMarkdown] = useState<string | null>(null)
@@ -101,6 +102,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
     setWithdrawError(null)
     try {
       await withdrawMitigation(mitigation.mitigation_id, withdrawReason || "Manual withdrawal", "dashboard")
+      withdrawCompleted.current = true
       setShowWithdrawDialog(false)
       setWithdrawReason("")
       mutate()
@@ -197,7 +199,10 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
               <Button
                 ref={withdrawTrigger}
                 variant="destructive"
-                onClick={() => setShowWithdrawDialog(true)}
+                onClick={() => {
+                  withdrawCompleted.current = false
+                  setShowWithdrawDialog(true)
+                }}
                 className="ml-2"
               >
                 <AlertTriangle className="h-4 w-4 mr-2" />
@@ -572,9 +577,9 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
           setWithdrawError(null)
         }
       }}>
-        <AlertDialogContent onCloseAutoFocus={(event) => {
+        <AlertDialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" onCloseAutoFocus={(event) => {
           event.preventDefault()
-          const target = withdrawTrigger.current?.isConnected ? withdrawTrigger.current : victimLink.current
+          const target = !withdrawCompleted.current && withdrawTrigger.current?.isConnected ? withdrawTrigger.current : victimLink.current
           target?.focus()
         }}>
           <AlertDialogHeader>

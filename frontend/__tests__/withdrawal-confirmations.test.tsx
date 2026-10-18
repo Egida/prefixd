@@ -74,13 +74,17 @@ function deferred<T>() {
 }
 
 async function renderView(view: "list" | "detail") {
+  const params = Promise.resolve({ id: targets[0].mitigation_id })
+  const content = () => view === "list" ? <MitigationsContentLive /> : (
+    <Suspense fallback={<p>Loading...</p>}>
+      <MitigationDetailPage params={params} />
+    </Suspense>
+  )
+  let rendered!: ReturnType<typeof render>
   await act(async () => {
-    render(view === "list" ? <MitigationsContentLive /> : (
-      <Suspense fallback={<p>Loading...</p>}>
-        <MitigationDetailPage params={Promise.resolve({ id: targets[0].mitigation_id })} />
-      </Suspense>
-    ))
+    rendered = render(content())
   })
+  return () => rendered.rerender(content())
 }
 
 async function openSingle(view: "list" | "detail") {
@@ -138,7 +142,7 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     const pending = deferred<void>()
     mocks.withdraw.mockReturnValue(pending.promise)
     await renderView(view)
-    const { trigger, dialog } = await openSingle(view)
+    const { dialog } = await openSingle(view)
     expect(dialog).toHaveTextContent("Router convergence and traffic filtering are not verified here")
     const reason = within(dialog).getByLabelText("Reason (optional)")
     fireEvent.change(reason, { target: { value: "attack resolved" } })
@@ -157,7 +161,10 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
     expect(dialog).toBeVisible()
     await act(async () => pending.resolve())
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
-    await waitFor(() => expect(trigger).toHaveFocus())
+    const stableTarget = view === "list"
+      ? screen.getByPlaceholderText("Search IP...")
+      : screen.getByRole("link", { name: targets[0].victim_ip })
+    await waitFor(() => expect(stableTarget).toHaveFocus())
     expect(mocks.mutate).toHaveBeenCalledTimes(1)
   })
 
@@ -213,6 +220,31 @@ describe.each(["list", "detail"] as const)("%s single withdrawal confirmation", 
       ? screen.getByPlaceholderText("Search IP...")
       : screen.getByRole("link", { name: targets[0].victim_ip })
     await waitFor(() => expect(fallback).toHaveFocus())
+  })
+
+  it("keeps focus stable when refreshed data removes the opener after closure", async () => {
+    const pending = deferred<void>()
+    const refresh = deferred<void>()
+    mocks.withdraw.mockReturnValue(pending.promise)
+    const rerender = await renderView(view)
+    mocks.mutate.mockImplementationOnce(() => refresh.promise.then(() => {
+      mocks.useMitigations.mockReturnValue({ data: { mitigations: [] }, mutate: mocks.mutate })
+      mocks.useMitigation.mockReturnValue({ data: { ...targets[0], status: "withdrawn" }, mutate: mocks.mutate })
+      rerender()
+    }))
+    const { trigger, dialog } = await openSingle(view)
+    fireEvent.click(within(dialog).getByRole("button", { name: "Withdraw" }))
+    await act(async () => pending.resolve())
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument())
+    expect(trigger).toBeInTheDocument()
+    expect(mocks.mutate).toHaveBeenCalledTimes(1)
+    const stableTarget = view === "list"
+      ? screen.getByPlaceholderText("Search IP...")
+      : screen.getByRole("link", { name: targets[0].victim_ip })
+    await waitFor(() => expect([trigger, stableTarget]).toContain(document.activeElement))
+    await act(async () => refresh.resolve())
+    expect(trigger).not.toBeInTheDocument()
+    await waitFor(() => expect(stableTarget).toHaveFocus())
   })
 })
 
