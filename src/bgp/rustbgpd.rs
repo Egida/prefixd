@@ -11,12 +11,12 @@ use async_trait::async_trait;
 use std::{future::Future, time::Duration};
 use tonic::{
     Code, Request,
-    transport::{Certificate, Channel, ClientTlsConfig, Endpoint},
+    transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity},
 };
 
 pub struct RustBgpdAnnouncer {
     channel: Channel,
-    token: tonic::metadata::MetadataValue<tonic::metadata::Ascii>,
+    token: Option<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>,
 }
 
 fn invalid(message: &str) -> PrefixdError {
@@ -25,21 +25,78 @@ fn invalid(message: &str) -> PrefixdError {
 
 impl RustBgpdAnnouncer {
     pub async fn connect(config: &RustBgpdConfig) -> anyhow::Result<Self> {
-        let token = std::env::var(&config.bearer_token_env).map_err(|_| {
-            anyhow::anyhow!("rustbgpd bearer token environment variable is missing")
-        })?;
+        let token = if config.bearer_token_env.is_empty() {
+            String::new()
+        } else {
+            std::env::var(&config.bearer_token_env).map_err(|_| {
+                anyhow::anyhow!("rustbgpd bearer token environment variable is missing")
+            })?
+        };
         Self::connect_with_token(config, &token).await
     }
 
     async fn connect_with_token(config: &RustBgpdConfig, token: &str) -> anyhow::Result<Self> {
-        // Other HTTP dependencies can enable both Rustls providers.
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let uri: tonic::codegen::http::Uri = config.endpoint.parse()?;
         anyhow::ensure!(
-            uri.authority().is_some() && uri.authority().unwrap().as_str().find('@').is_none(),
+            config.client_cert_path.is_some() == config.client_key_path.is_some(),
+            "rustbgpd client certificate and key must be configured together"
+        );
+        anyhow::ensure!(
+            !token.chars().any(char::is_whitespace),
+            "invalid rustbgpd bearer token"
+        );
+        let token = if token.is_empty() {
+            None
+        } else {
+            let mut value: tonic::metadata::MetadataValue<_> = format!("Bearer {token}")
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid rustbgpd bearer token"))?;
+            value.set_sensitive(true);
+            Some(value)
+        };
+        if let Some(path) = config.unix_socket_path()? {
+            anyhow::ensure!(
+                config.ca_cert_path.is_none() && config.client_cert_path.is_none(),
+                "TLS options are not valid for rustbgpd Unix sockets"
+            );
+            #[cfg(unix)]
+            {
+                let channel = Endpoint::from_static("http://[::]:50051")
+                    .connect_timeout(Duration::from_secs(10))
+                    .timeout(Duration::from_secs(30))
+                    .connect_with_connector(tower::service_fn(move |_| {
+                        let path = path.clone();
+                        async move {
+                            connect_owner_socket(&path)
+                                .await
+                                .map(hyper_util::rt::TokioIo::new)
+                        }
+                    }))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("rustbgpd Unix connection failed"))?;
+                return Ok(Self { channel, token });
+            }
+            #[cfg(not(unix))]
+            anyhow::bail!("rustbgpd Unix sockets are unsupported on this platform");
+        }
+        anyhow::ensure!(
+            !config.endpoint.contains(['@', '?', '#'])
+                && !config
+                    .endpoint
+                    .chars()
+                    .any(|c| c.is_whitespace() || c.is_control()),
             "invalid rustbgpd endpoint"
         );
-        let mut endpoint = Endpoint::from_shared(config.endpoint.clone())?
+        let uri: tonic::codegen::http::Uri = config
+            .endpoint
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid rustbgpd endpoint"))?;
+        anyhow::ensure!(
+            uri.authority().is_some() && matches!(uri.path(), "" | "/"),
+            "invalid rustbgpd endpoint"
+        );
+        let mut endpoint = Endpoint::from_shared(config.endpoint.clone())
+            .map_err(|_| anyhow::anyhow!("invalid rustbgpd endpoint"))?
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30));
         match uri.scheme_str() {
@@ -54,36 +111,51 @@ impl RustBgpdAnnouncer {
                         .is_ok_and(|ip| ip.is_loopback()),
                     "plaintext rustbgpd requires a literal loopback address"
                 );
+                anyhow::ensure!(
+                    config.ca_cert_path.is_none() && config.client_cert_path.is_none(),
+                    "TLS options require HTTPS"
+                );
+                anyhow::ensure!(token.is_some(), "rustbgpd bearer token is required");
             }
             Some("https") => {
-                let mut tls = ClientTlsConfig::new().with_native_roots();
+                anyhow::ensure!(
+                    token.is_some() || config.client_cert_path.is_some(),
+                    "rustbgpd bearer token or client certificate is required"
+                );
+                let mut tls = ClientTlsConfig::new()
+                    .with_native_roots()
+                    .timeout(Duration::from_secs(10));
                 if let Some(path) = &config.ca_cert_path {
-                    tls = tls.ca_certificate(Certificate::from_pem(tokio::fs::read(path).await?));
+                    tls = tls.ca_certificate(Certificate::from_pem(read_tls_file(path).await?));
                 }
-                endpoint = endpoint.tls_config(tls)?;
+                if let (Some(cert), Some(key)) = (&config.client_cert_path, &config.client_key_path)
+                {
+                    tls = tls.identity(Identity::from_pem(
+                        read_tls_file(cert).await?,
+                        read_tls_file(key).await?,
+                    ));
+                }
+                endpoint = endpoint
+                    .tls_config(tls)
+                    .map_err(|_| anyhow::anyhow!("invalid rustbgpd TLS configuration"))?;
             }
-            _ => anyhow::bail!("rustbgpd endpoint must use http or https"),
+            _ => anyhow::bail!("rustbgpd endpoint must use unix, http or https"),
         }
-        anyhow::ensure!(
-            !token.is_empty() && !token.chars().any(char::is_whitespace),
-            "rustbgpd bearer token must not be empty or contain whitespace"
-        );
-        let mut token: tonic::metadata::MetadataValue<_> = format!("Bearer {token}")
-            .parse()
-            .map_err(|_| anyhow::anyhow!("invalid rustbgpd bearer token"))?;
-        token.set_sensitive(true);
-        Ok(Self {
-            channel: endpoint.connect().await?,
-            token,
-        })
+        let channel = tokio::time::timeout(Duration::from_secs(10), endpoint.connect())
+            .await
+            .map_err(|_| anyhow::anyhow!("rustbgpd connection timed out"))?
+            .map_err(|_| anyhow::anyhow!("rustbgpd connection failed"))?;
+        Ok(Self { channel, token })
     }
 
     fn request<T>(&self, value: T) -> Request<T> {
         let mut request = Request::new(value);
         request.set_timeout(Duration::from_secs(30));
-        request
-            .metadata_mut()
-            .insert("authorization", self.token.clone());
+        if let Some(token) = &self.token {
+            request
+                .metadata_mut()
+                .insert("authorization", token.clone());
+        }
         request
     }
 
@@ -115,6 +187,50 @@ impl RustBgpdAnnouncer {
         }
         unreachable!()
     }
+}
+
+async fn read_tls_file(path: &str) -> anyhow::Result<Vec<u8>> {
+    tokio::fs::read(path)
+        .await
+        .map_err(|_| anyhow::anyhow!("cannot read rustbgpd TLS credential file"))
+}
+
+#[cfg(unix)]
+async fn connect_owner_socket(path: &std::path::Path) -> std::io::Result<tokio::net::UnixStream> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let denied = || {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "rustbgpd socket must be owner-only",
+        )
+    };
+    let parent = path.parent().ok_or_else(denied)?;
+    let uid = rustix::process::geteuid().as_raw();
+    for ancestor in parent.ancestors() {
+        let directory = tokio::fs::symlink_metadata(ancestor).await?;
+        let mode = directory.mode();
+        // Sticky directories protect entries owned by root or this trusted UID.
+        if !directory.is_dir()
+            || ![0, uid].contains(&directory.uid())
+            || (mode & 0o022 != 0 && mode & 0o1000 == 0)
+            || (ancestor == parent && (directory.uid() != uid || mode & 0o077 != 0))
+        {
+            return Err(denied());
+        }
+    }
+    let socket = tokio::fs::symlink_metadata(path).await?;
+    if !socket.file_type().is_socket()
+        || socket.uid() != uid
+        || socket.mode() & 0o077 != 0
+        || tokio::fs::canonicalize(parent).await? != parent
+    {
+        return Err(denied());
+    }
+    let stream = tokio::net::UnixStream::connect(path).await?;
+    if stream.peer_cred()?.uid() != uid {
+        return Err(denied());
+    }
+    Ok(stream)
 }
 
 fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)> {

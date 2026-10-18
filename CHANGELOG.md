@@ -23,6 +23,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Connect to rustbgpd through an owner-only Unix socket or verified native
+  client-certificate mTLS. Unix reconnects validate ownership and permissions;
+  certificate and token rotation retain the same speaker target identity.
+  Existing loopback bearer and verified HTTPS configurations remain supported.
+  Reject non-root HTTP endpoint paths before registration because gRPC does not
+  use those prefixes to distinguish speaker targets.
+  Rust `RustBgpdConfig` literals need the new optional identity fields or
+  `..Default::default()`; existing YAML retains its defaults.
+  Bound initial network connections and TLS handshakes to ten seconds.
+
 - Bind each POP to an immutable, credential-free speaker target before connecting.
   Migration 014 retains target IDs on withdrawal requests; lifecycle guards reject
   missing or mismatched ownership. Existing speaker history requires the one-shot

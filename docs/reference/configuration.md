@@ -172,14 +172,31 @@ bgp:
     bearer_token_env: "PREFIXD_RUSTBGPD_TOKEN"
     # For a remote endpoint, use https:// and a trusted server CA:
     # ca_cert_path: "/etc/prefixd/rustbgpd-ca.pem"
+    # For native mTLS, configure both client identity files:
+    # client_cert_path: "/etc/prefixd/client.pem"
+    # client_key_path: "/etc/prefixd/client-key.pem"
   local_asn: 65010
   router_id: "10.10.0.10"
 ```
 
+For owner-only co-location, use `endpoint: unix:///var/lib/rustbgpd/grpc.sock`
+and omit `bearer_token_env` unless the socket listener also requires a token.
+The shared runtime directory and socket must belong to the controller UID and
+have no group/world permissions. Native mTLS requires HTTPS and a complete
+`client_cert_path`/`client_key_path` pair; the CA authenticates the server, and
+its certificate must match the endpoint hostname. Credential paths and token
+references do not change the persistent speaker identity. See the
+[speaker transport examples](speaker-backends.md) for daemon-side permissions
+and certificate principal requirements.
+
+Existing YAML may omit the new client identity fields. Rust callers constructing
+`RustBgpdConfig` literals must add the two optional fields or use
+`..Default::default()` for omitted transport options.
+
 `gobgp_grpc` is optional when using rustbgpd or mock. Bearer authentication is
-required for rustbgpd; plaintext permits only literal loopback addresses.
+required for plaintext TCP; plaintext permits only literal loopback addresses.
 HTTPS verifies the server against system roots and any configured PEM CA.
-The rustbgpd listener principal needs the `operator` role for injection and
+The authenticated rustbgpd principal needs the `operator` role for injection and
 withdrawal. Its BGP ASN, router ID, neighbors and export policies are configured
 in rustbgpd itself; these prefixd fields do not configure its sessions.
 

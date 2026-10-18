@@ -1284,6 +1284,8 @@ async fn test_rustbgpd_config_credentials_are_not_exposed() {
         endpoint: "https://private-speaker.example:50051".into(),
         bearer_token_env: "PRIVATE_SPEAKER_TOKEN".into(),
         ca_cert_path: Some("/private/speaker-ca.pem".into()),
+        client_cert_path: Some("/private/client.pem".into()),
+        client_key_path: Some("/private/client-key.pem".into()),
     });
     let state = AppState::new(
         settings,
@@ -1315,6 +1317,8 @@ async fn test_rustbgpd_config_credentials_are_not_exposed() {
         "private-speaker",
         "PRIVATE_SPEAKER_TOKEN",
         "/private/speaker-ca.pem",
+        "/private/client.pem",
+        "/private/client-key.pem",
     ] {
         assert!(!body.contains(private_value));
     }

@@ -17,6 +17,7 @@ fn fixture_settings(fixture: &fixture::Speaker, pop: &str) -> prefixd::config::S
         endpoint: fixture.endpoint.clone(),
         bearer_token_env: "PREFIXD_RUSTBGPD_TEST_TOKEN".into(),
         ca_cert_path: None,
+        ..Default::default()
     });
     settings
 }
@@ -389,4 +390,108 @@ async fn live_rustbgpd_restart_recovers_with_the_same_client_and_desired_state()
     server.abort();
     shutdown.send(()).unwrap();
     task.await.unwrap();
+}
+
+async fn secure_controller_lifecycle(transport: &str) {
+    use prefixd::bgp::RustBgpdAnnouncer;
+    let fixture = fixture::Speaker::start_secure(transport).await;
+    let speaker = fixture.connect().await;
+    let mut rule = rule();
+    for prefix in ["192.0.2.235/32", "2001:db8::235/128"] {
+        rule.nlri.dst_prefix = prefix.into();
+        speaker.announce(&rule).await.unwrap();
+        assert!(
+            speaker
+                .list_active()
+                .await
+                .unwrap()
+                .iter()
+                .any(|active| active.nlri_hash() == rule.nlri_hash())
+        );
+        speaker.withdraw(&rule).await.unwrap();
+    }
+    if transport == "uds" {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let socket = fixture.config.unix_socket_path().unwrap().unwrap();
+        let before = std::fs::metadata(&socket).unwrap();
+        assert_eq!(before.mode() & 0o777, 0o600);
+        eprintln!(
+            "owner socket authenticated: uid={}, socket_mode={:o}",
+            before.uid(),
+            before.mode() & 0o777
+        );
+        assert_eq!(before.uid(), rustix::process::geteuid().as_raw());
+        assert_eq!(
+            std::fs::metadata(socket.parent().unwrap()).unwrap().mode() & 0o777,
+            0o700
+        );
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o660)).unwrap();
+        assert!(RustBgpdAnnouncer::connect(&fixture.config).await.is_err());
+        std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+        fixture.container.stop_with_timeout(Some(0)).await.unwrap();
+        fixture.container.start().await.unwrap();
+        fixture.ready().await;
+        assert_eq!(std::fs::metadata(&socket).unwrap().mode() & 0o777, 0o600);
+        eprintln!(
+            "owner socket recreated: before_inode={}, after_inode={}",
+            before.ino(),
+            std::fs::metadata(&socket).unwrap().ino()
+        );
+        speaker.announce(&rule).await.unwrap();
+        speaker.withdraw(&rule).await.unwrap();
+    } else {
+        for invalid in ["missing", "wrong-ca", "wrong-client"] {
+            let mut config = fixture.config.clone();
+            match invalid {
+                "missing" => {
+                    config.client_cert_path = None;
+                    config.client_key_path = None;
+                    config.bearer_token_env = "PREFIXD_RUSTBGPD_TEST_TOKEN".into();
+                }
+                "wrong-ca" => {
+                    config.ca_cert_path = Some(
+                        concat!(
+                            env!("CARGO_MANIFEST_DIR"),
+                            "/src/bgp/testdata/server-cert.pem"
+                        )
+                        .into(),
+                    )
+                }
+                "wrong-client" => {
+                    config.client_cert_path = Some(
+                        concat!(
+                            env!("CARGO_MANIFEST_DIR"),
+                            "/src/bgp/testdata/server-cert.pem"
+                        )
+                        .into(),
+                    );
+                    config.client_key_path = Some(
+                        concat!(
+                            env!("CARGO_MANIFEST_DIR"),
+                            "/src/bgp/testdata/server-key.pem"
+                        )
+                        .into(),
+                    );
+                }
+                _ => unreachable!(),
+            }
+            if let Ok(client) = RustBgpdAnnouncer::connect(&config).await {
+                assert!(client.announce(&rule).await.is_err());
+            }
+        }
+        fixture.assert_partial_tls_rejected().await;
+    }
+    assert!(speaker.list_active().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
+async fn live_rustbgpd_owner_socket_lifecycle_and_recreation() {
+    secure_controller_lifecycle("uds").await;
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
+async fn live_rustbgpd_native_mtls_lifecycle_and_rejected_credentials() {
+    secure_controller_lifecycle("mtls").await;
 }

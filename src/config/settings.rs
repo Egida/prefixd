@@ -208,12 +208,51 @@ pub enum BgpMode {
     Mock,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RustBgpdConfig {
     pub endpoint: String,
+    #[serde(default)]
     pub bearer_token_env: String,
     #[serde(default)]
     pub ca_cert_path: Option<String>,
+    #[serde(default)]
+    pub client_cert_path: Option<String>,
+    #[serde(default)]
+    pub client_key_path: Option<String>,
+}
+
+impl RustBgpdConfig {
+    /// Lexical identity survives socket recreation; never resolve a socket symlink.
+    pub fn unix_socket_path(&self) -> Result<Option<std::path::PathBuf>> {
+        if !self.endpoint.starts_with("unix:") {
+            return Ok(None);
+        }
+        let path = self
+            .endpoint
+            .strip_prefix("unix://")
+            .ok_or_else(|| anyhow::anyhow!("invalid rustbgpd Unix endpoint"))?;
+        anyhow::ensure!(
+            path.starts_with('/')
+                && !path.contains(['@', '?', '#', '%', '\\', '\0'])
+                && !path.chars().any(|c| c.is_whitespace() || c.is_control()),
+            "invalid rustbgpd Unix endpoint"
+        );
+        let mut normalized = std::path::PathBuf::new();
+        for component in std::path::Path::new(path).components() {
+            match component {
+                std::path::Component::RootDir | std::path::Component::Normal(_) => {
+                    normalized.push(component.as_os_str())
+                }
+                std::path::Component::CurDir => {}
+                _ => anyhow::bail!("invalid rustbgpd Unix endpoint"),
+            }
+        }
+        anyhow::ensure!(
+            normalized.file_name().is_some(),
+            "invalid rustbgpd Unix endpoint"
+        );
+        Ok(Some(normalized))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
