@@ -422,6 +422,9 @@ pub struct CreateMitigationRequest {
     #[serde(default)]
     rate_bps: Option<u64>,
     ttl_seconds: u32,
+    /// Optional ceiling for this creation's expiry; later detector extensions are separate.
+    #[serde(default)]
+    expires_at_cap: Option<DateTime<Utc>>,
 }
 #[derive(Deserialize)]
 #[allow(dead_code)]
@@ -519,6 +522,11 @@ async fn persist_new_mitigation(
         FlowSpecAction::from((mitigation.action_type, &mitigation.action_params)),
     );
     let start = std::time::Instant::now();
+    if mitigation.expires_at <= Utc::now() {
+        tracing::warn!(mitigation_id = %mitigation.mitigation_id,
+            "mitigation expired during persistence; announcement skipped");
+        return Ok(Some(AnnouncementOutcome::Unconfirmed));
+    }
     if let Err(error) = state.announcer.announce(&rule).await {
         tracing::warn!(mitigation_id = %mitigation.mitigation_id, error = %error,
             "mitigation intent retained after unconfirmed BGP announcement");
@@ -1686,6 +1694,17 @@ pub async fn create_mitigation(
     // Create and announce
     let mut mitigation =
         Mitigation::from_intent(intent, req.victim_ip, crate::domain::AttackVector::Unknown);
+    if let Some(cap) = req.expires_at_cap {
+        mitigation.expires_at = mitigation.expires_at.min(cap);
+        if let Err(error) =
+            guardrails.validate_remaining_ttl(mitigation.expires_at - mitigation.created_at)
+        {
+            crate::observability::metrics::GUARDRAIL_REJECTIONS
+                .with_label_values(&["TtlOutOfBounds"])
+                .inc();
+            return Ok(AppError(error).into_response());
+        }
+    }
 
     let announcement_outcome = match persist_new_mitigation(&state, &mut mitigation).await {
         Ok(outcome) => outcome,

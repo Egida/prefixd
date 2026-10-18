@@ -532,10 +532,12 @@ impl ReconciliationLoop {
             };
             let current_pending = self.repo.pending_withdrawals(pop).await?;
             let rule = self.build_flowspec_rule(&mitigation);
-            if current_pending.iter().any(|request| {
-                request.mitigation_id == mitigation.mitigation_id
-                    || request.nlri_hash == rule.nlri_hash()
-            }) {
+            if mitigation.expires_at <= chrono::Utc::now()
+                || current_pending.iter().any(|request| {
+                    request.mitigation_id == mitigation.mitigation_id
+                        || request.nlri_hash == rule.nlri_hash()
+                })
+            {
                 continue;
             }
             let hash = rule.nlri_hash();

@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `..Default::default()`; existing YAML retains its defaults.
   Bound initial network connections and TLS handshakes to ten seconds.
 
+- Add an optional `expires_at_cap` to manual mitigation creation for maintenance
+  recreation without extending the original deadline. Existing TTL guardrails
+  apply to remaining lifetime. Expired intent is not announced after a database
+  wait, including reconciliation's final pending-cleanup check.
+
 - Bind each POP to an immutable, credential-free speaker target before connecting.
   Migration 014 retains target IDs on withdrawal requests; lifecycle guards reject
   missing or mismatched ownership. Existing speaker history requires the one-shot

@@ -106,6 +106,22 @@ impl Guardrails {
         Ok(())
     }
 
+    pub(crate) fn validate_remaining_ttl(&self, remaining: chrono::Duration) -> Result<()> {
+        if remaining <= chrono::Duration::zero()
+            || remaining < chrono::Duration::seconds(self.min_ttl.into())
+            || remaining > chrono::Duration::seconds(self.max_ttl.into())
+        {
+            return Err(PrefixdError::GuardrailViolation(
+                GuardrailError::TtlOutOfBounds {
+                    ttl: u32::try_from(remaining.num_seconds()).unwrap_or_default(),
+                    min: self.min_ttl,
+                    max: self.max_ttl,
+                },
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_prefix_length(&self, criteria: &MatchCriteria) -> Result<()> {
         // Use proper IP address parsing instead of contains(':') heuristic
         // This correctly handles IPv4-mapped IPv6 and invalid strings
@@ -237,6 +253,29 @@ mod tests {
                 max_announcements_per_peer: 100,
             },
         )
+    }
+
+    #[test]
+    fn remaining_lifetime_respects_precise_ttl_boundaries() {
+        use chrono::Duration;
+        let (config, quotas) = test_config();
+        let guardrails = Guardrails::new(config, quotas);
+        for remaining in [Duration::seconds(30), Duration::seconds(1800)] {
+            assert!(guardrails.validate_remaining_ttl(remaining).is_ok());
+        }
+        for remaining in [
+            Duration::seconds(-1),
+            Duration::zero(),
+            Duration::seconds(30) - Duration::nanoseconds(1),
+            Duration::seconds(1800) + Duration::nanoseconds(1),
+        ] {
+            assert!(matches!(
+                guardrails.validate_remaining_ttl(remaining),
+                Err(PrefixdError::GuardrailViolation(
+                    GuardrailError::TtlOutOfBounds { .. }
+                ))
+            ));
+        }
     }
 
     fn relaxed_config() -> (GuardrailsConfig, QuotasConfig) {
