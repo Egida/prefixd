@@ -13222,3 +13222,44 @@ mod query_router_validator_boundaries {
         }
     }
 }
+
+#[tokio::test]
+async fn test_timeseries_duration_overflow_preserves_auth_and_shape() {
+    let app = setup_app_with_bearer().await;
+    for metric in ["mitigations", "events"] {
+        for (range, bucket) in [
+            ("178956971d", "71582789h"),
+            ("536870912d", "1073741824h"),
+            ("4294967295d", "4294967295h"),
+            ("4294967296d", "4294967296h"),
+            ("invalid", "invalid"),
+            ("0h", "0m"),
+        ] {
+            let uri = format!("/v1/stats/timeseries?metric={metric}&range={range}&bucket={bucket}");
+            let response = app
+                .clone()
+                .oneshot(Request::get(&uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get(&uri)
+                        .header("authorization", "Bearer test-secret-token-123")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["metric"], metric);
+            // Mock checks routing/authentication only; PostgreSQL tests measure intervals.
+            assert_eq!(json["buckets"], serde_json::json!([]));
+        }
+    }
+}

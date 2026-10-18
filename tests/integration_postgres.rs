@@ -5425,3 +5425,234 @@ async fn checked_timestamp_cli_rows_fail_with_database_errors_after_valid_contro
         }
     }
 }
+
+#[tokio::test]
+async fn test_authenticated_timeseries_duration_overflow_matches_postgres_bounds() {
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    use chrono::{DateTime, Duration, Utc};
+    use prefixd::{
+        AppState,
+        auth::create_auth_layer,
+        bgp::MockAnnouncer,
+        config::AuthMode,
+        domain::{AttackEvent, AttackEventInput, OperatorRole},
+    };
+    use std::{collections::BTreeMap, sync::Arc};
+
+    async fn fetch(
+        app: &axum::Router,
+        cookie: &str,
+        metric: &str,
+        range: &str,
+        bucket: &str,
+    ) -> serde_json::Value {
+        let uri = format!("/v1/stats/timeseries?metric={metric}&range={range}&bucket={bucket}");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(&uri)
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    let ctx = TestContext::new().await;
+    let salt = SaltString::encode_b64(b"timeseries-duration-test").unwrap();
+    let hash = Argon2::default()
+        .hash_password(b"timeseries-test-password", &salt)
+        .unwrap()
+        .to_string();
+    ctx.repo
+        .create_operator("timeseries-reader", &hash, OperatorRole::Viewer, None)
+        .await
+        .unwrap();
+    let mut settings = ctx.state.settings.clone();
+    settings.http.auth.mode = AuthMode::Credentials;
+    let state = AppState::new(
+        settings,
+        common::test_inventory(),
+        common::test_playbooks(),
+        ctx.repo.clone(),
+        Arc::new(MockAnnouncer::new()),
+        ".".into(),
+    )
+    .unwrap();
+    let auth = create_auth_layer(
+        ctx.pool.clone(),
+        ctx.repo.clone(),
+        AuthMode::Credentials,
+        false,
+    )
+    .await;
+    let app = prefixd::api::create_router(state, auth);
+    for metric in ["events", "mitigations"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/v1/stats/timeseries?metric={metric}&range=4294967295d&bucket=4294967295h"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"username":"timeseries-reader","password":"timeseries-test-password"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response
+        .headers()
+        .get(axum::http::header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+
+    let current_hour = || {
+        sqlx::query_scalar::<_, DateTime<Utc>>(
+            "SELECT date_bin('1 hour'::interval, NOW(), '1970-01-01 00:00:00+00'::timestamptz)",
+        )
+        .fetch_one(&ctx.pool)
+    };
+    let anchor = current_hour().await.unwrap();
+    let mut expected_events = BTreeMap::new();
+    for (index, (age_hours, minute)) in [(2, 5), (30, 5), (30, 10), (100, 5), (192, 5)]
+        .into_iter()
+        .enumerate()
+    {
+        let bucket = anchor - Duration::hours(age_hours);
+        let created_at = bucket + Duration::minutes(minute);
+        let mut event = AttackEvent::from_input(
+            serde_json::from_value::<AttackEventInput>(serde_json::json!({
+                "event_id": format!("timeseries-duration-{index}"),
+                "timestamp": created_at,
+                "source": "timeseries-test",
+                "victim_ip": "203.0.113.200",
+                "vector": "udp_flood",
+            }))
+            .unwrap(),
+        );
+        event.ingested_at = created_at;
+        ctx.repo.insert_event(&event).await.unwrap();
+        if age_hours < 168 {
+            *expected_events.entry(bucket).or_insert(0_i64) += 1;
+        }
+    }
+    let mut expected_mitigations = BTreeMap::new();
+    for (index, (age_hours, minute)) in [(3, 5), (50, 5), (50, 10), (192, 5)]
+        .into_iter()
+        .enumerate()
+    {
+        let bucket = anchor - Duration::hours(age_hours);
+        let created_at = bucket + Duration::minutes(minute);
+        let mut mitigation = inventory_mitigation(
+            &format!("203.0.113.{}/32", 150 + index),
+            "test1",
+            created_at,
+            MitigationStatus::Expired,
+        );
+        mitigation.expires_at = created_at + Duration::hours(1);
+        ctx.repo.insert_mitigation(&mitigation).await.unwrap();
+        if age_hours < 168 {
+            *expected_mitigations.entry(bucket).or_insert(0_i64) += 1;
+        }
+    }
+    assert_eq!(expected_events.values().sum::<i64>(), 4);
+    assert_eq!(expected_mitigations.values().sum::<i64>(), 3);
+
+    let mut mitigation_buckets = None;
+    for (metric, expected) in [
+        ("events", &expected_events),
+        ("mitigations", &expected_mitigations),
+    ] {
+        // This interval has one stable epoch bucket; equality cannot race an hourly boundary.
+        let reference = fetch(&app, &cookie, metric, "168h", "4294967295m").await;
+        assert_eq!(reference["metric"], metric);
+        assert_eq!(
+            reference["buckets"],
+            serde_json::json!([{
+                "bucket": DateTime::<Utc>::UNIX_EPOCH,
+                "count": expected.values().sum::<i64>(),
+            }])
+        );
+        if metric == "mitigations" {
+            mitigation_buckets = Some(reference["buckets"].clone());
+        }
+        for range in ["178956971d", "536870912d", "4294967295d"] {
+            let actual = fetch(&app, &cookie, metric, range, "4294967295m").await;
+            assert_eq!(actual["metric"], metric);
+            assert_eq!(
+                actual["buckets"], reference["buckets"],
+                "metric={metric} range={range}"
+            );
+        }
+        for bucket in ["71582789h", "1073741824h", "4294967295h"] {
+            let actual = fetch(&app, &cookie, metric, "168h", bucket).await;
+            assert_eq!(actual["metric"], metric);
+            assert_eq!(
+                actual["buckets"], reference["buckets"],
+                "metric={metric} bucket={bucket}"
+            );
+        }
+        for range in ["168h", "178956971d", "536870912d"] {
+            let before = current_hour().await.unwrap();
+            let series = fetch(&app, &cookie, metric, range, "60m").await;
+            let after = current_hour().await.unwrap();
+            let buckets = series["buckets"].as_array().unwrap();
+            assert_eq!(buckets.len(), 169);
+            let last: DateTime<Utc> = buckets.last().unwrap()["bucket"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(
+                before <= last && last <= after,
+                "DB time must bracket the last bucket"
+            );
+            let first = last - Duration::hours(168);
+            let mut remaining = (*expected).clone();
+            for (index, row) in buckets.iter().enumerate() {
+                let timestamp: DateTime<Utc> = row["bucket"].as_str().unwrap().parse().unwrap();
+                assert_eq!(
+                    timestamp,
+                    first + Duration::hours(i64::try_from(index).unwrap())
+                );
+                assert_eq!(
+                    row["count"].as_i64().unwrap(),
+                    remaining.remove(&timestamp).unwrap_or(0),
+                    "metric={metric} range={range} bucket={timestamp}"
+                );
+            }
+            assert!(
+                remaining.is_empty(),
+                "all seeded in-range buckets must be present"
+            );
+        }
+    }
+    let unknown = fetch(&app, &cookie, "unknown", "178956971d", "71582789h").await;
+    assert_eq!(unknown["metric"], "unknown");
+    assert_eq!(unknown["buckets"], mitigation_buckets.unwrap());
+}
