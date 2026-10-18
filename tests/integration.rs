@@ -5614,6 +5614,53 @@ async fn test_fastnetmon_valid_payload() {
     );
 }
 
+#[tokio::test]
+async fn test_fastnetmon_large_syn_counters_preserve_vector() {
+    let scale = i64::MAX / 100;
+    for (tcp_pps, syn_pps, expected) in [
+        (i64::MAX, i64::MAX, "syn_flood"),
+        (scale * 100, scale * 60, "ack_flood"),
+        (scale * 100, scale * 61, "syn_flood"),
+    ] {
+        let (app, _repo) = setup_app_correlation_with_repo(1, 0.5).await;
+        let mut payload: serde_json::Value = serde_json::from_str(&make_fastnetmon_payload(
+            "ban",
+            "203.0.113.10",
+            Some("large-syn-counter"),
+        ))
+        .unwrap();
+        let details = &mut payload["attack_details"];
+        details["incoming_tcp_pps"] = tcp_pps.into();
+        details["incoming_syn_tcp_pps"] = syn_pps.into();
+        details["incoming_udp_pps"] = 0.into();
+        details["incoming_icmp_pps"] = 0.into();
+        details["total_incoming_pps"] = tcp_pps.into();
+
+        let (status, accepted) = post_fastnetmon(&app, &payload.to_string()).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{expected}: {accepted}");
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let events = json["events"].as_array().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["event_id"], accepted["event_id"]);
+        assert_eq!(events[0]["source"], "fastnetmon");
+        assert_eq!(events[0]["vector"], expected);
+        assert_eq!(events[0]["pps"], tcp_pps);
+    }
+}
+
 /// VAL-ADAPT-012: FastNetMon confidence mapping — default (ban=0.9, partial_block=0.7, alert=0.5)
 #[tokio::test]
 async fn test_fastnetmon_confidence_mapping_default() {

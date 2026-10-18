@@ -144,6 +144,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Avoid overflow when classifying FastNetMon SYN percentages from large valid
+  integer counters, preserving the existing integer threshold and protocol rules.
+
 - Apply concrete POP filters before mitigation pagination. Match identifiers
   exactly, preserve omitted/`all` global listings, and reject empty or NUL filters
   with `400` instead of ignoring them.
