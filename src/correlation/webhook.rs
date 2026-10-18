@@ -465,8 +465,8 @@ fn map_one(
         resolve_vector(adapter, transformed.as_deref())
     };
 
-    let bps = extract_numeric(&compiled.bps, node, compiled.transforms.get("bps"))?;
-    let pps = extract_numeric(&compiled.pps, node, compiled.transforms.get("pps"))?;
+    let bps = extract_numeric("bps", &compiled.bps, node, compiled.transforms.get("bps"))?;
+    let pps = extract_numeric("pps", &compiled.pps, node, compiled.transforms.get("pps"))?;
 
     let confidence_raw = compiled
         .confidence
@@ -538,25 +538,41 @@ fn map_one(
 }
 
 fn extract_numeric(
+    field: &'static str,
     path: &Option<JsonPath>,
     node: &Value,
     transform: Option<&CompiledTransform>,
 ) -> Result<Option<i64>, MapError> {
     // Computed transforms bypass the primary JSONPath entirely.
-    if let Some(CompiledTransform::Computed { paths, scale }) = transform {
-        return Ok(compute_product(paths, *scale, node).map(|f| f as i64));
-    }
+    let after = if let Some(CompiledTransform::Computed { paths, scale }) = transform {
+        compute_product(paths, *scale, node)
+    } else {
+        let raw = path
+            .as_ref()
+            .and_then(|p| p.query(node).at_most_one().ok().flatten())
+            .and_then(Value::as_number);
+        if transform.is_none() {
+            if let Some(integer) = raw.and_then(serde_json::Number::as_i64) {
+                return Ok(Some(integer));
+            }
+        }
+        apply_numeric_transform(raw.and_then(serde_json::Number::as_f64), node, transform)
+    };
 
-    let raw_f64 = path
-        .as_ref()
-        .and_then(|p| p.query(node).at_most_one().ok().flatten())
-        .and_then(|v| match v {
-            Value::Number(n) => n.as_f64(),
-            _ => None,
-        });
-
-    let after = apply_numeric_transform(raw_f64, node, transform);
-    Ok(after.map(|f| f as i64))
+    after
+        .map(|value| {
+            // JSON integer underflow can round to MIN; MAX rounds up to 2^63.
+            // Only the exact integer fast path can safely accept the endpoints.
+            if value.is_finite() && value > i64::MIN as f64 && value < i64::MAX as f64 {
+                Ok(value as i64)
+            } else {
+                Err(MapError::InvalidValue {
+                    field,
+                    expected: "a finite number strictly between -2^63 and 2^63",
+                })
+            }
+        })
+        .transpose()
 }
 
 fn apply_numeric_transform(
@@ -567,7 +583,9 @@ fn apply_numeric_transform(
     match transform {
         None => raw,
         Some(CompiledTransform::UnitConversion { multiplier }) => raw.map(|v| v * multiplier),
-        Some(CompiledTransform::Computed { paths, scale }) => compute_product(paths, *scale, node),
+        Some(CompiledTransform::Computed { paths, scale }) => {
+            compute_product(paths, *scale, node).filter(|value| value.is_finite())
+        }
         // RegexExtract is rejected at compile time for numeric fields.
         Some(CompiledTransform::RegexExtract { .. }) => raw,
     }
@@ -599,11 +617,7 @@ fn compute_product(paths: &[JsonPath], scale: f64, node: &Value) -> Option<f64> 
         };
         product *= n;
     }
-    if product.is_finite() {
-        Some(product)
-    } else {
-        None
-    }
+    Some(product)
 }
 
 fn resolve_vector(adapter: &WebhookAdapter, raw: Option<&str>) -> AttackVector {
@@ -719,6 +733,243 @@ mod tests {
         assert_eq!(event.top_dst_ports, Some(vec![53, 123]));
         assert_eq!(event.action, "ban");
         assert_eq!(event.source, "test");
+    }
+
+    #[test]
+    fn numeric_rates_preserve_exact_untransformed_integers() {
+        let adapter = basic_adapter();
+        let compiled = CompiledAdapter::compile(&adapter).unwrap();
+        for value in [
+            i64::MIN,
+            -9_007_199_254_740_993,
+            -9_007_199_254_740_992,
+            -9_007_199_254_740_991,
+            0,
+            9_007_199_254_740_991,
+            9_007_199_254_740_992,
+            9_007_199_254_740_993,
+            i64::MAX,
+        ] {
+            let body: Value = serde_json::from_str(&format!(
+                r#"{{"target":{{"ip":"203.0.113.5"}},"metrics":{{"bps":{value},"pps":{value}}}}}"#
+            ))
+            .unwrap();
+            let event = map_payload(&adapter, &compiled, &body)
+                .into_iter()
+                .next()
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.bps, Some(value));
+            assert_eq!(event.pps, Some(value));
+        }
+    }
+
+    #[test]
+    fn numeric_rates_truncate_fractions_and_accept_interior_float_bounds() {
+        let adapter = basic_adapter();
+        let compiled = CompiledAdapter::compile(&adapter).unwrap();
+        for (value, expected) in [
+            (12.75, 12),
+            (-12.75, -12),
+            (0.99, 0),
+            (-0.99, 0),
+            (-0.0, 0),
+            (9_223_372_036_854_774_784.0, 9_223_372_036_854_774_784),
+            (-9_223_372_036_854_774_784.0, -9_223_372_036_854_774_784),
+        ] {
+            let body = json!({
+                "target": { "ip": "203.0.113.5" },
+                "metrics": { "bps": value, "pps": value },
+            });
+            let event = map_payload(&adapter, &compiled, &body)
+                .into_iter()
+                .next()
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.bps, Some(expected));
+            assert_eq!(event.pps, Some(expected));
+        }
+    }
+
+    #[test]
+    fn numeric_rates_reject_out_of_range_json_and_ambiguous_float_endpoints() {
+        let adapter = basic_adapter();
+        let compiled = CompiledAdapter::compile(&adapter).unwrap();
+        for field in ["bps", "pps"] {
+            for literal in [
+                "9223372036854775808",
+                "18446744073709551615",
+                "18446744073709551616",
+                "-9223372036854775809",
+                "-18446744073709551615",
+                "9223372036854775807.0",
+                "-9223372036854775808.0",
+                "1e100",
+                "-1e100",
+            ] {
+                let body: Value = serde_json::from_str(&format!(
+                    r#"{{"target":{{"ip":"203.0.113.5"}},"metrics":{{"{field}":{literal}}}}}"#
+                ))
+                .unwrap();
+                assert!(
+                    matches!(
+                        map_payload(&adapter, &compiled, &body).pop().unwrap(),
+                        Err(MapError::InvalidValue { field: invalid, .. }) if invalid == field
+                    ),
+                    "field={field}, literal={literal}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_rates_reject_invalid_unit_conversion_results() {
+        for field in ["bps", "pps"] {
+            for (value, multiplier) in [
+                (f64::MAX, 2.0),
+                (-f64::MAX, 2.0),
+                (4_611_686_018_427_387_904.0, 2.0),
+                (-4_611_686_018_427_387_904.0, 2.0),
+                (1e100, 1.0),
+            ] {
+                let mut adapter = basic_adapter();
+                adapter.transforms.insert(
+                    field.into(),
+                    WebhookTransform::UnitConversion { multiplier },
+                );
+                let compiled = CompiledAdapter::compile(&adapter).unwrap();
+                let mut body = json!({ "target": { "ip": "203.0.113.5" }, "metrics": {} });
+                body["metrics"][field] = json!(value);
+                assert!(
+                    matches!(
+                        map_payload(&adapter, &compiled, &body).pop().unwrap(),
+                        Err(MapError::InvalidValue { field: invalid, .. }) if invalid == field
+                    ),
+                    "field={field}, value={value}, multiplier={multiplier}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_rates_reject_invalid_computed_results() {
+        for field in ["bps", "pps"] {
+            let mut adapter = basic_adapter();
+            adapter.transforms.insert(
+                field.into(),
+                WebhookTransform::Computed {
+                    paths: vec!["$.first".into(), "$.second".into(), "$.third".into()],
+                    scale: 1.0,
+                },
+            );
+            let compiled = CompiledAdapter::compile(&adapter).unwrap();
+            for (first, second, third) in [
+                (f64::MAX, 2.0, 1.0),
+                (-f64::MAX, 2.0, 1.0),
+                (f64::MAX, 2.0, 0.0),
+                (4_611_686_018_427_387_904.0, 2.0, 1.0),
+                (-4_611_686_018_427_387_904.0, 2.0, 1.0),
+                (1e100, 1.0, 1.0),
+            ] {
+                let body = json!({
+                    "target": { "ip": "203.0.113.5" },
+                    "first": first, "second": second, "third": third,
+                });
+                assert!(
+                    matches!(
+                        map_payload(&adapter, &compiled, &body).pop().unwrap(),
+                        Err(MapError::InvalidValue { field: invalid, .. }) if invalid == field
+                    ),
+                    "field={field}, factors={first}, {second}, {third}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_rate_transforms_preserve_fractional_truncation_and_missing_values() {
+        for field in ["bps", "pps"] {
+            for transform in [
+                WebhookTransform::UnitConversion { multiplier: 2.0 },
+                WebhookTransform::Computed {
+                    paths: vec![format!("$.metrics.{field}")],
+                    scale: 2.0,
+                },
+            ] {
+                let mut adapter = basic_adapter();
+                adapter.transforms.insert(field.into(), transform);
+                let compiled = CompiledAdapter::compile(&adapter).unwrap();
+                for (value, expected) in [
+                    (json!(12.875), Some(25)),
+                    (json!(-12.875), Some(-25)),
+                    (Value::Null, None),
+                    (json!("12.875"), None),
+                    (json!(true), None),
+                ] {
+                    let mut body = json!({ "target": { "ip": "203.0.113.5" }, "metrics": {} });
+                    body["metrics"][field] = value;
+                    let event = map_payload(&adapter, &compiled, &body)
+                        .pop()
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(if field == "bps" { event.bps } else { event.pps }, expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn numeric_rate_transforms_can_reduce_out_of_i64_input_into_range() {
+        for field in ["bps", "pps"] {
+            for transform in [
+                WebhookTransform::UnitConversion { multiplier: 0.5 },
+                WebhookTransform::Computed {
+                    paths: vec![format!("$.metrics.{field}")],
+                    scale: 0.5,
+                },
+            ] {
+                let mut adapter = basic_adapter();
+                adapter.transforms.insert(field.into(), transform);
+                let compiled = CompiledAdapter::compile(&adapter).unwrap();
+                let mut body = json!({ "target": { "ip": "203.0.113.5" }, "metrics": {} });
+                body["metrics"][field] = json!(9_223_372_036_854_775_808_u64);
+                let event = map_payload(&adapter, &compiled, &body)
+                    .pop()
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    if field == "bps" { event.bps } else { event.pps },
+                    Some(4_611_686_018_427_387_904)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn confidence_transform_overflow_keeps_existing_normalization() {
+        for (transform, expected) in [
+            (
+                WebhookTransform::UnitConversion { multiplier: 2.0 },
+                Some(1.0),
+            ),
+            (
+                WebhookTransform::Computed {
+                    paths: vec!["$.score".into()],
+                    scale: 2.0,
+                },
+                None,
+            ),
+        ] {
+            let mut adapter = basic_adapter();
+            adapter.transforms.insert("confidence".into(), transform);
+            let compiled = CompiledAdapter::compile(&adapter).unwrap();
+            let body = json!({ "target": { "ip": "203.0.113.5" }, "score": f64::MAX });
+            let event = map_payload(&adapter, &compiled, &body)
+                .pop()
+                .unwrap()
+                .unwrap();
+            assert_eq!(event.confidence, expected);
+        }
     }
 
     #[test]
