@@ -103,6 +103,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discard/policing support.
 
 ### Changed
+- Add a sequential local verification gate and focused CI recipes; keep optional
+  commit/push hooks scoped, non-mutating and separate from the full pre-PR bar.
+
 - **Breaking:** Remove the unused Rust API method
   `RepositoryTrait::find_active_by_victim` and its PostgreSQL and mock
   implementations.

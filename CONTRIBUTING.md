@@ -10,6 +10,8 @@ Thanks for your interest in contributing!
 - Docker and Docker Compose
 - PostgreSQL 14+ (or use Docker)
 - protobuf compiler (`protoc`)
+- [just](https://just.systems/), `cargo-audit` and `cargo-deny`
+- Bun 1.4.3 and native Node.js 26.12.0 for the dashboard
 
 CI checks the locked dependency graph on Linux with Rust 1.89.0, including
 development dependencies, alongside the current stable tests and lints. To
@@ -58,13 +60,38 @@ cargo test --locked --features test-utils
 scripts/test-rustbgpd.sh
 PREFIXD_RUSTBGPD_TEST_VERSION=0.76.0 scripts/test-rustbgpd.sh
 
-# GoBGP compatibility fixtures
+# GoBGP fixtures
 scripts/test-gobgp.sh
 ```
 
 ---
 
 ## Development Workflow
+
+### Local verification
+
+Run `just gate` before opening a PR with substantive code changes. It runs
+formatting, both locked Rust test
+and Clippy feature combinations, minimum-compiler checks, the release build,
+frozen dashboard install/types/tests/build, advisory checks and the owned GoBGP
+and rustbgpd 0.76.0/0.77.0 fixtures, sequentially. It needs Docker and the tools
+listed above; it does not install missing tools or Rust toolchains.
+Prose-only changes need affected-link checks and `git diff --check`.
+
+Use `just --list` for focused checks such as `just fmt`, `just clippy`,
+`just test-fast`, `just msrv` or `just frontend`. Recipes expose ordinary
+commands, and CI shares them while retaining separate jobs and speaker versions.
+The Rust advisory recipe keeps CI's explicit unfixed `rsa` exception; warnings
+remain visible.
+
+The gate preserves caller `CARGO_BUILD_JOBS` and `CARGO_TARGET_DIR`. On a shared
+host, allocate CPUs and set existing worker controls such as
+`VITEST_MAX_WORKERS` before starting it; `PREFIXD_TEST_CPUSET` separately
+restricts the owned speaker containers. Coordinate other builds yourself.
+
+This manual gate is broader than the optional hooks below. Image builds and
+publication, release/SBOM operations, long labs, performance/fuzz work and
+owned authenticated browser qualification remain separate checks.
 
 ### Branch Naming
 
@@ -75,14 +102,16 @@ scripts/test-gobgp.sh
 
 ### Commit Messages
 
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
+Use `type(scope): imperative summary` for commits and PR titles, following
+[Conventional Commits](https://www.conventionalcommits.org/). Choose the affected
+module as the scope and write the summary as an instruction:
 
 ```
-feat: add IPv6 FlowSpec support
-fix: handle GoBGP reconnection correctly
-docs: update deployment guide for GoBGP v4
-refactor: extract guardrails into separate module
-test: add integration tests for reconciliation
+feat(bgp): add IPv6 FlowSpec support
+fix(bgp): handle GoBGP reconnection correctly
+docs(deploy): update deployment guide for GoBGP v4
+refactor(guardrails): extract guardrails into separate module
+test(scheduler): add integration tests for reconciliation
 ```
 
 ### Pull Requests
@@ -90,7 +119,8 @@ test: add integration tests for reconciliation
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Run tests and lints
+4. For substantive code, run `just gate` and change-specific checks. For prose-only
+   changes, check affected links and run `git diff --check`.
 5. Submit PR against `main`
 
 PRs should:
@@ -107,10 +137,10 @@ PRs should:
 
 ```bash
 # Format code
-cargo fmt
+cargo fmt --all
 
 # Check formatting
-cargo fmt -- --check
+just fmt
 ```
 
 ### Linting
@@ -123,7 +153,7 @@ retain them only for an actual compiler diagnostic.
 
 ```bash
 # Run clippy
-cargo clippy --all-targets --all-features -- -D warnings
+just clippy
 ```
 
 ### Dependency policy
@@ -138,17 +168,22 @@ optional, uncompiled MySQL dependency. Cargo-deny's selected graph does not
 currently include it; passing cargo-deny is not an exception-free full-lock audit.
 The Rust advisory and frontend `bun audit` checks remain required in CI.
 
-### Pre-commit Hooks
+### Optional Git hooks
 
-Optional but recommended:
+With `just` and either `prek` or Python `pre-commit` installed, enable both
+configured stages:
 
 ```bash
-# Install pre-commit
-pip install pre-commit
-pre-commit install
-
-# Hooks run automatically on commit
+prek install --hook-type pre-commit --hook-type pre-push
+# Or:
+pre-commit install --hook-type pre-commit --hook-type pre-push
 ```
+
+Commit hooks check formatting without rewriting files and run locked all-feature
+Clippy for Rust inputs. Push hooks run locked all-feature library and binary
+unit tests. Manifests, lockfiles, protobufs and Cargo/toolchain configuration
+also trigger lint/tests; prose-only changes skip Rust builds. These quick hooks
+do not run Docker, MSRV or frontend checks and do not replace `just gate`.
 
 ---
 
