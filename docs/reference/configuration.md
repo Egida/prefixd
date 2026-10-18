@@ -331,6 +331,13 @@ safelist:
 
 ### Correlation
 
+At startup and reload, a present `correlation.yaml` takes precedence over the
+inline `correlation` section in `prefixd.yaml`. Startup still validates the main
+settings file first. Only a missing standalone file falls back to the inline
+section; malformed, invalid or unreadable standalone configuration fails loading.
+The authenticated correlation editor saves to this standalone file, so saved
+changes also survive a daemon restart.
+
 The multi-signal correlation engine groups related attack events from multiple detection sources and uses corroboration to make high-confidence mitigation decisions.
 
 When `enabled` is false (the default), the correlation engine is bypassed and events follow the direct path to policy evaluation — identical to pre-correlation behavior.

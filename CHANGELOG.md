@@ -72,6 +72,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Load saved standalone `correlation.yaml` at startup so correlation editor
+  changes survive restart. Reject invalid or unreadable files instead of silently
+  reverting to inline settings.
+
 - Persist new detector and manual mitigation intent before speaker announcement,
   preventing a failed insert or interrupted request from leaving an unowned rule.
   Retain committed intent after speaker errors so readable reconciliation and
