@@ -22,7 +22,7 @@ use crate::domain::{
     FlowSpecNlri, FlowSpecRule, MatchCriteria, Mitigation, MitigationIntent, MitigationStatus,
     execute_withdrawal, find_mitigation_owner, request_withdrawal,
 };
-use crate::error::PrefixdError;
+use crate::error::{GuardrailError, PrefixdError};
 use crate::guardrails::Guardrails;
 use crate::policy::PolicyEngine;
 
@@ -750,7 +750,19 @@ async fn handle_ban(
         state.settings.pop.clone(),
         state.settings.timers.default_ttl_seconds,
     );
-    let candidate_intent = policy.evaluate(&event, context.as_ref());
+    let candidate_intent = match policy.evaluate(&event, context.as_ref()) {
+        Err(error @ PrefixdError::GuardrailViolation(GuardrailError::NoAllowedPorts)) => {
+            crate::observability::metrics::EVENTS_REJECTED
+                .with_label_values(&[event.source.as_str(), "guardrail"])
+                .inc();
+            crate::observability::metrics::GUARDRAIL_REJECTIONS
+                .with_label_values(&["NoAllowedPorts"])
+                .inc();
+            tracing::warn!(error = %error, "policy rejected mitigation");
+            return Err(AppError(error));
+        }
+        result => result,
+    };
     let mut existing_owner = None;
     // Reject before storing the detector ID so the same event remains retryable.
     if let Ok(intent) = &candidate_intent {
