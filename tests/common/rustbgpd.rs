@@ -1,3 +1,7 @@
+#![allow(
+    dead_code,
+    reason = "owned fixture helpers are reused by independent integration targets"
+)]
 use prefixd::{
     bgp::{RustBgpdAnnouncer, rustbgpd_pb as pb},
     config::RustBgpdConfig,
@@ -16,6 +20,7 @@ use testcontainers::{
 pub struct Speaker {
     pub container: ContainerAsync<GenericImage>,
     pub endpoint: String,
+    pub bgp_port: u16,
     pub config: RustBgpdConfig,
     version: String,
     // Keep the owner-only configuration/token mount alive until container removal.
@@ -28,6 +33,14 @@ impl Speaker {
     }
 
     pub async fn start_secure(transport: &str) -> Self {
+        Self::start_configured(transport, None).await
+    }
+
+    pub async fn start_peered(peer_asn: u32) -> Self {
+        Self::start_configured("bearer", Some(peer_asn)).await
+    }
+
+    async fn start_configured(transport: &str, peer_asn: Option<u32>) -> Self {
         let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.77.0".into());
         let releases: serde_json::Value =
             serde_json::from_str(include_str!("../fixtures/rustbgpd/releases.json")).unwrap();
@@ -120,6 +133,41 @@ impl Speaker {
             }
             _ => panic!("unknown secure fixture transport"),
         };
+        let peering = peer_asn
+            .map(|asn| {
+                format!(
+                    r#"
+[flowspec]
+validation = "off"
+[policy.definitions.lab-import]
+default_action = "permit"
+[[policy.definitions.lab-import.statements]]
+prefix = "0.0.0.0/0"
+ge = 0
+le = 32
+action = "permit"
+set_local_pref = 200
+[[policy.definitions.lab-import.statements]]
+prefix = "::/0"
+ge = 0
+le = 128
+action = "permit"
+set_local_pref = 200
+[policy.definitions.lab-export]
+default_action = "permit"
+[policy]
+import_chain = ["lab-import"]
+export_chain = ["lab-export"]
+[[neighbors]]
+address = "127.0.0.1"
+remote_asn = {asn}
+description = "owned GoBGP peer"
+families = ["ipv4_flowspec", "ipv6_flowspec"]
+hold_time = 9
+"#
+                )
+            })
+            .unwrap_or_default();
         std::fs::write(
             files.path().join("config.toml"),
             format!(
@@ -146,6 +194,7 @@ access_mode = "read_write"
 [security.grpc.roles]
 prefixd-test = "operator"
 "rustbgpd:prefixd-test" = "operator"
+{peering}
 "#,
                 ports[0],
                 ports[1],
@@ -199,6 +248,7 @@ prefixd-test = "operator"
         let fixture = Self {
             container,
             endpoint: config.endpoint.clone(),
+            bgp_port: ports[0],
             config,
             version,
             _files: files,
@@ -250,6 +300,36 @@ prefixd-test = "operator"
         })
         .await
         .expect("bounded authenticated daemon readiness");
+    }
+
+    /// Raw retained candidate view for the isolated bearer-authenticated peer fixture.
+    pub async fn received_flow_spec(&self, family: i32, peer: &str) -> pb::ListFlowSpecResponse {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            let channel = tonic::transport::Endpoint::from_shared(self.endpoint.clone())
+                .unwrap()
+                .connect_timeout(Duration::from_secs(1))
+                .timeout(Duration::from_secs(2))
+                .connect()
+                .await
+                .unwrap();
+            let mut request = tonic::Request::new(pb::ListFlowSpecRequest {
+                afi_safi: family,
+                received_peer_address: peer.into(),
+                advertised_peer_address: String::new(),
+            });
+            request.set_timeout(Duration::from_secs(2));
+            let token = std::env::var("PREFIXD_RUSTBGPD_TEST_TOKEN").unwrap();
+            request
+                .metadata_mut()
+                .insert("authorization", format!("Bearer {token}").parse().unwrap());
+            pb::rib_service_client::RibServiceClient::new(channel)
+                .list_flow_spec_routes(request)
+                .await
+                .unwrap()
+                .into_inner()
+        })
+        .await
+        .expect("bounded raw received FlowSpec view")
     }
 
     pub async fn assert_partial_tls_rejected(&self) {

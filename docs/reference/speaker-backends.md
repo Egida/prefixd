@@ -373,7 +373,15 @@ without deleting unrelated local rules. Existing rustbgpd TTL and same-client
 restart cases remain in its released-image matrix. CI retains logs on success
 and failure; an unavailable image or daemon fails qualification.
 
+The separate `integration_rustbgpd_peer` target adds a pinned rustbgpd↔GoBGP
+fixture. GoBGP initiates to rustbgpd's allocated BGP port; both sides negotiate
+only IPv4/IPv6 FlowSpec. Its raw received-route checks cover exact discard and
+police actions, withdrawal/re-announcement and preservation of unrelated local
+intent. An explicit lab import policy prefers the GoBGP candidate, so the test
+also checks real selected peer rows against nonselected synthetic local rows
+and the production local reader. It runs through `scripts/test-rustbgpd.sh` for
+each pinned rustbgpd release; source presence alone is not a successful run.
+
 These tests observe local acceptance and daemon-to-daemon BGP receipt. They do
-not establish router enforcement, vendor forwarding, or rustbgpd-to-GoBGP peer
-interoperability. The latter remains a separate required peering qualification;
-ExaBGP and other write-only backends are not qualified by this readable suite.
+not establish router enforcement or vendor forwarding. ExaBGP and other
+write-only backends are not qualified by this readable suite.

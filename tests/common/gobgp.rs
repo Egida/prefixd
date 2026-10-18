@@ -1,3 +1,7 @@
+#![allow(
+    dead_code,
+    reason = "owned fixture helpers are reused by independent integration targets"
+)]
 //! Owned Linux fixtures. Never connect these tests to an operator's speaker.
 use prefixd::bgp::{
     GoBgpAnnouncer,
@@ -195,13 +199,17 @@ impl Speaker {
     }
 
     pub async fn add_peer(&self, remote_port: u16, passive: bool) {
+        self.add_peer_with_asn(remote_port, passive, 65010).await;
+    }
+
+    pub async fn add_peer_with_asn(&self, remote_port: u16, passive: bool, peer_asn: u32) {
         self.client()
             .await
             .add_peer(pb::AddPeerRequest {
                 peer: Some(pb::Peer {
                     conf: Some(pb::PeerConf {
                         neighbor_address: "127.0.0.1".into(),
-                        peer_asn: 65010,
+                        peer_asn,
                         ..Default::default()
                     }),
                     transport: Some(pb::Transport {
