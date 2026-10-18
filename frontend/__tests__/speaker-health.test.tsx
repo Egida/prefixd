@@ -60,6 +60,26 @@ describe("speaker observation UI", () => {
     expect(screen.getByText("established")).toBeInTheDocument()
   })
 
+  it("labels version and uptime as controller data, with backend and session counts separate", () => {
+    mock.health = health("connected", { edge1: "established", edge2: "idle" })
+    mock.health.version = "0.22.0"
+    mock.health.uptime_seconds = 3660
+    mock.health.speaker = { backend: "rustbgpd", capabilities: { rule_reader: true, peer_observer: true } }
+    render(<BgpSessionStatus />)
+    const strip = screen.getByLabelText("Speaker and controller health")
+    expect(screen.getByText("rustbgpd")).toBeInTheDocument()
+    expect(screen.getByText("DOWN")).toBeInTheDocument()
+    expect(strip).toHaveTextContent("1/2 established")
+    expect(strip).toHaveTextContent("Controller v0.22.0 · up 1h 1m")
+    expect(strip).not.toHaveTextContent(/installed|speaker version|speaker uptime/i)
+  })
+
+  it("keeps an initial health fetch separate from successful empty peers", () => {
+    render(<BgpSessionStatus />)
+    expect(screen.getByText("LOADING")).toBeInTheDocument()
+    expect(screen.queryByText("NO PEERS")).not.toBeInTheDocument()
+  })
+
   it("shows a fetch error instead of stale successful peer state", () => {
     mock.health = health("connected", { router: "established" })
     mock.error = new Error("offline")
