@@ -80,6 +80,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Remove the unused policy correlation prototype and ineffective
+  `timers.correlation_window_seconds` configuration/API-settings field. The active
+  multi-signal engine continues to use `correlation.window_seconds`.
+
 - Put active mitigation intent, signal evidence, expiry and honest router-observation
   limits first in the operator workspace. Refresh the light/dark theme, Geist
   typography and navigation; preserve user zoom and remove decorative pulses,

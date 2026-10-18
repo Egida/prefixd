@@ -1,7 +1,5 @@
-mod correlation;
 mod escalation;
 
-pub use correlation::*;
 pub use escalation::*;
 
 use std::net::IpAddr;
