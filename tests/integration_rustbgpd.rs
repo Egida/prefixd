@@ -446,6 +446,7 @@ async fn secure_controller_lifecycle(transport: &str) {
                 "missing" => {
                     config.client_cert_path = None;
                     config.client_key_path = None;
+                    config.bearer_token_env = "PREFIXD_RUSTBGPD_TEST_TOKEN".into();
                 }
                 "wrong-ca" => {
                     config.ca_cert_path = Some(

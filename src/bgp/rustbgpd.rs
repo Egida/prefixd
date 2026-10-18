@@ -205,13 +205,21 @@ async fn connect_owner_socket(path: &std::path::Path) -> std::io::Result<tokio::
         )
     };
     let parent = path.parent().ok_or_else(denied)?;
-    let directory = tokio::fs::symlink_metadata(parent).await?;
-    let socket = tokio::fs::symlink_metadata(path).await?;
     let uid = rustix::process::geteuid().as_raw();
-    if !directory.is_dir()
-        || directory.uid() != uid
-        || directory.mode() & 0o077 != 0
-        || !socket.file_type().is_socket()
+    for ancestor in parent.ancestors() {
+        let directory = tokio::fs::symlink_metadata(ancestor).await?;
+        let mode = directory.mode();
+        // Sticky directories protect entries owned by root or this trusted UID.
+        if !directory.is_dir()
+            || ![0, uid].contains(&directory.uid())
+            || (mode & 0o022 != 0 && mode & 0o1000 == 0)
+            || (ancestor == parent && (directory.uid() != uid || mode & 0o077 != 0))
+        {
+            return Err(denied());
+        }
+    }
+    let socket = tokio::fs::symlink_metadata(path).await?;
+    if !socket.file_type().is_socket()
         || socket.uid() != uid
         || socket.mode() & 0o077 != 0
         || tokio::fs::canonicalize(parent).await? != parent

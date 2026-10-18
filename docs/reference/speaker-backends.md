@@ -141,7 +141,10 @@ Mount the runtime directory at a stable absolute path and run both processes
 with the same UID. The directory must be owner-only (normally `0700`), the
 socket owner-only (normally `0600`), and neither path may traverse symlinks.
 prefixd checks ownership, permissions and the Unix peer UID on every connection,
-including reconnects after socket recreation. An owner-only rustbgpd listener
+including reconnects after socket recreation. Every ancestor must be owned by
+root or the controller UID and prevent untrusted directory replacement; writable
+ancestors require the sticky bit. Root and the controller UID are trusted to
+maintain these paths. An owner-only rustbgpd listener
 without an explicit principal authorizes its owner as `local-operator`; no token
 or role mapping is needed. If its UDS listener sets `token_file`, also configure
 `bearer_token_env` in prefixd. Changing the socket path changes the persistent

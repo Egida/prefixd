@@ -526,6 +526,38 @@ async fn owner_socket_rejects_permissive_directory_socket_and_symlinks() {
     drop(listener);
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn owner_socket_rejects_ancestors_that_allow_untrusted_directory_replacement() {
+    use std::os::unix::fs::PermissionsExt;
+    let ancestor = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
+    let private = ancestor.path().join("private");
+    std::fs::create_dir(&private).unwrap();
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = private.join("grpc.sock");
+    let _listener = tokio::net::UnixListener::bind(&path).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::set_permissions(ancestor.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(
+        connect_owner_socket(&path).await.is_err(),
+        "a private parent is replaceable through a non-sticky writable ancestor"
+    );
+    std::fs::set_permissions(ancestor.path(), std::fs::Permissions::from_mode(0o1777)).unwrap();
+    assert!(connect_owner_socket(&path).await.is_ok());
+    std::fs::set_permissions(ancestor.path(), std::fs::Permissions::from_mode(0o750)).unwrap();
+    assert!(connect_owner_socket(&path).await.is_ok());
+    let alias = ancestor.path().join("alias");
+    std::os::unix::fs::symlink(&private, &alias).unwrap();
+    assert!(
+        connect_owner_socket(&alias.join("grpc.sock"))
+            .await
+            .is_err()
+    );
+}
+
 #[tokio::test]
 async fn native_mtls_presents_the_client_certificate() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
