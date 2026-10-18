@@ -75,6 +75,7 @@ impl AppState {
         config_dir: PathBuf,
         db_pool: Option<PgPool>,
     ) -> Result<Arc<Self>> {
+        settings.http.validate_auth_transport()?;
         let (shutdown_tx, _) = broadcast::channel(1);
         let ws_broadcast = crate::ws::create_broadcast();
         let alerting = AlertingService::new(settings.alerting.clone());
