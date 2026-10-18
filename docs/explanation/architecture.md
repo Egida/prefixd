@@ -44,8 +44,7 @@ sources can strengthen a group but cannot initiate mitigation alone.
 
 Playbooks select the initial action and TTL. The current event path extends an
 existing canonical owner's TTL rather than automatically executing later
-escalation steps. Policy helpers and configuration fields alone do not establish
-an integrated escalation workflow.
+escalation steps.
 
 ### Bounded mitigation intent
 
@@ -135,8 +134,9 @@ fresh announcements. Each mutation rechecks current ownership and pending intent
 under the controller mutex. That mutex is released between rules and does not
 fence another controller process.
 
-Missing NLRI identities can be reannounced. Action-only drift is not currently
-repaired, and unknown local rules are preserved. Recovery has no fixed deadline.
+Missing local rules and supported action differences can be repaired under the
+single-controller, exclusive-target contract. Unknown local rules are preserved;
+recovery has no fixed deadline.
 See the [scheduler](../../src/scheduler/reconcile.rs) and
 [backend reference](../reference/speaker-backends.md#rule-and-reconciliation-semantics).
 

@@ -81,8 +81,7 @@ playbooks:
 - The first matching playbook supplies its initial action and TTL.
 - Optional multi-signal correlation applies source-count and confidence gates.
 - A distinct event for the same canonical rule extends its existing owner.
-- Later-step escalation fields and policy helpers exist, but the production
-  ingestion/scheduler path does not currently execute automatic escalation.
+- Automatic escalation is not implemented.
 
 ### Port Handling
 
@@ -188,8 +187,10 @@ ExaBGP and other production adapters remain planned.
 
 Reconciliation runs at startup and at the configured interval. It retries pending
 withdrawals and TTL cleanup, repairs missing eligible rules after a complete
-successful local read, and reports unknown rules without deleting them. A failed
-read is not an empty RIB. Action-only drift is not currently repaired.
+successful local read, and repairs supported action differences under the
+single-controller, exclusive-target contract. Unknown rules are preserved; a
+failed read is not an empty RIB. See the
+[backend reference](docs/reference/speaker-backends.md#rule-and-reconciliation-semantics).
 
 ### TTL and Recovery Limits
 
@@ -511,10 +512,11 @@ pending. See the [audit API](docs/reference/api.md#audit-log).
 | Endpoint | Access | Meaning |
 | --- | --- | --- |
 | `GET /v1/health` | Public | Lightweight liveness, package version and auth mode |
-| `GET /v1/health/detail` | Mode-aware authentication | Controller uptime, database/status counts, selected backend/capabilities and peer observation |
+| `GET /v1/health/detail` | Mode-aware authentication | Controller uptime, database/status counts, selected backend/capabilities, peer observation and separate daemon metadata |
 
-Detailed health reports the selected backend and peer observation. Its uptime
-is controller uptime, not speaker uptime; health does not confirm forwarding.
+Top-level uptime belongs to the controller. `speaker.daemon` separately reports
+observed rustbgpd version, process uptime, readiness and observation time; GoBGP
+process metadata is explicitly unsupported. Health does not confirm forwarding.
 See the [health reference](docs/reference/api.md#operational-endpoints).
 
 ---
