@@ -103,6 +103,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   discard/policing support.
 
 ### Changed
+- **Breaking:** Remove the unused Rust API method
+  `RepositoryTrait::find_active_by_victim` and its PostgreSQL and mock
+  implementations.
+
 - **Breaking:** Remove unused `escalation`, `http.auth.ldap` and `http.auth.radius`
   configuration sections; remove them from controller configurations. Settings
   JSON drops `escalation`; authentication still exposes only its mode. Remove the

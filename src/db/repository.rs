@@ -560,34 +560,6 @@ impl RepositoryTrait for Repository {
         }
     }
 
-    async fn find_active_by_victim(&self, victim_ip: &str) -> Result<Vec<Mitigation>> {
-        let rows = sqlx::query_as::<_, MitigationRow>(
-            r#"
-            SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
-                   match_json, action_type, action_params_json, status,
-                   created_at, updated_at, expires_at, withdrawn_at,
-                   triggering_event_id, last_event_id, escalated_from_id, reason, rejection_reason,
-                   acknowledged_at, acknowledged_by, signal_group_id
-            FROM mitigations
-            WHERE victim_ip = $1 AND status IN ('pending', 'active', 'escalated')
-            "#,
-        )
-        .bind(victim_ip)
-        .fetch_all(&self.pool)
-        .await?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| match Mitigation::from_row(row) {
-                Ok(m) => Some(m),
-                Err(e) => {
-                    ROW_PARSE_ERRORS.with_label_values(&["mitigations"]).inc();
-                    tracing::error!(error = %e, "skipping corrupted mitigation row");
-                    None
-                }
-            })
-            .collect())
-    }
-
     async fn find_active_by_triggering_event(&self, event_id: Uuid) -> Result<Option<Mitigation>> {
         let row = sqlx::query_as::<_, MitigationRow>(
             r#"
