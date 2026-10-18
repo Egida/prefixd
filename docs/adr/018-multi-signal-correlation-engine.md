@@ -4,6 +4,12 @@
 
 Accepted
 
+Current implementation note: the unused policy `EventCorrelator` prototype and
+ineffective `timers.correlation_window_seconds` setting were removed. Event
+ingestion handles runtime deduplication and TTL extension; the active multi-signal
+engine uses `correlation.window_seconds`. The decision below records the original
+design context.
+
 ## Date
 
 2026-03-19

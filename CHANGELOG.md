@@ -74,6 +74,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Remove the unused policy correlation prototype and ineffective
+  `timers.correlation_window_seconds` configuration/API-settings field. The active
+  multi-signal engine continues to use `correlation.window_seconds`.
+
 - Refresh the dashboard toolchain to Bun 1.4.3, native Node.js 26.12.0 tests,
   React 19.3.1 and current Radix and test dependencies. Next.js remains at 16.4.2.
 - Enforce TypeScript errors in production dashboard builds and add a standalone

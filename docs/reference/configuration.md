@@ -264,9 +264,6 @@ timers:
   # Reconciliation loop interval
   reconciliation_interval_seconds: 30
   
-  # Correlation window for duplicate events
-  correlation_window_seconds: 300
-  
   # Quiet period after withdraw before re-announcing the same destination
   quiet_period_after_withdraw_seconds: 120
 ```
