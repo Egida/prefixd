@@ -16,7 +16,9 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::db::{ListParams, MitigationCursor, MitigationListParams, NotificationPreferences};
+use crate::db::{
+    ListCursor, ListParams, MitigationCursor, MitigationListParams, NotificationPreferences,
+};
 use crate::domain::{
     ActionParams, ActionType, AttackEvent, AttackEventInput, AttackVector, FlowSpecAction,
     FlowSpecNlri, FlowSpecRule, MatchCriteria, Mitigation, MitigationIntent, MitigationStatus,
@@ -29,14 +31,25 @@ use crate::policy::PolicyEngine;
 use super::auth::{require_auth, require_role};
 use crate::auth::AuthSession;
 
-fn encode_cursor(ts: &DateTime<Utc>) -> String {
-    URL_SAFE_NO_PAD.encode(ts.to_rfc3339().as_bytes())
+fn encode_list_cursor(timestamp: DateTime<Utc>, id: Uuid, prefix: &str) -> String {
+    let position = format!("{}\n{}", timestamp.to_rfc3339(), id);
+    format!("{prefix}{}", URL_SAFE_NO_PAD.encode(position.as_bytes()))
 }
 
-fn decode_cursor(cursor: &str) -> Option<DateTime<Utc>> {
-    let bytes = URL_SAFE_NO_PAD.decode(cursor).ok()?;
-    let s = std::str::from_utf8(&bytes).ok()?;
-    s.parse::<DateTime<Utc>>().ok()
+fn decode_list_cursor(value: &str, prefix: &str) -> Option<ListCursor> {
+    if value.len() > 128 || !value.is_ascii() {
+        return None;
+    }
+    let encoded = value.strip_prefix(prefix)?;
+    let bytes = URL_SAFE_NO_PAD.decode(encoded).ok()?;
+    let decoded = std::str::from_utf8(&bytes).ok()?;
+    let (timestamp, id) = decoded.split_once('\n')?;
+    Some(ListCursor {
+        timestamp: DateTime::parse_from_rfc3339(timestamp)
+            .ok()?
+            .with_timezone(&Utc),
+        id: id.parse().ok()?,
+    })
 }
 
 const MAX_MITIGATION_CURSOR_LEN: usize = 128;
@@ -1341,12 +1354,13 @@ async fn handle_ban(
     tag = "events",
     params(
         ("limit" = Option<u32>, Query, description = "Max results (default 100, max 1000)"),
-        ("cursor" = Option<String>, Query, description = "Cursor for pagination (from previous response)"),
+        ("cursor" = Option<String>, Query, description = "Opaque e1 continuation from next_cursor (max 128 bytes); superseded timestamp-only cursors are rejected"),
         ("start" = Option<String>, Query, description = "Start of date range (ISO 8601, inclusive)"),
         ("end" = Option<String>, Query, description = "End of date range (ISO 8601, exclusive)"),
     ),
     responses(
-        (status = 200, description = "List of events", body = EventsListResponse)
+        (status = 200, description = "List of events", body = EventsListResponse),
+        (status = 400, description = "Invalid or superseded event cursor", body = ErrorResponse)
     )
 )]
 pub async fn list_events(
@@ -1354,12 +1368,20 @@ pub async fn list_events(
     auth_session: AuthSession,
     headers: HeaderMap,
     Query(query): Query<CursorQuery>,
-) -> Result<Json<EventsListResponse>, StatusCode> {
+) -> Result<axum::response::Response, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
     let limit = clamp_limit(query.limit.unwrap_or(100));
-    let cursor = query.cursor.as_deref().and_then(decode_cursor);
+    let cursor = match query.cursor.as_deref() {
+        None => None,
+        Some(value) => match decode_list_cursor(value, "e1.") {
+            Some(cursor) => Some(cursor),
+            None => return Ok(AppError(PrefixdError::InvalidRequest(
+                "invalid event cursor; use next_cursor from a fresh event listing (e1, at most 128 bytes)".into(),
+            )).into_response()),
+        },
+    };
     let params = ListParams {
         limit: limit + 1,
         cursor,
@@ -1378,7 +1400,9 @@ pub async fn list_events(
         events.truncate(limit as usize);
     }
     let next_cursor = if has_more {
-        events.last().map(|e| encode_cursor(&e.ingested_at))
+        events
+            .last()
+            .map(|e| encode_list_cursor(e.ingested_at, e.event_id, "e1."))
     } else {
         None
     };
@@ -1388,7 +1412,8 @@ pub async fn list_events(
         count,
         next_cursor,
         has_more,
-    }))
+    })
+    .into_response())
 }
 
 /// List audit log entries
@@ -1398,12 +1423,13 @@ pub async fn list_events(
     tag = "audit",
     params(
         ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
-        ("cursor" = Option<String>, Query, description = "Cursor for pagination (from previous response)"),
+        ("cursor" = Option<String>, Query, description = "Opaque a1 continuation from next_cursor (max 128 bytes); superseded timestamp-only cursors are rejected"),
         ("start" = Option<String>, Query, description = "Start of date range (ISO 8601, inclusive)"),
         ("end" = Option<String>, Query, description = "End of date range (ISO 8601, exclusive)"),
     ),
     responses(
-        (status = 200, description = "List of audit log entries", body = AuditListResponse)
+        (status = 200, description = "List of audit log entries", body = AuditListResponse),
+        (status = 400, description = "Invalid or superseded audit cursor", body = ErrorResponse)
     )
 )]
 pub async fn list_audit(
@@ -1411,13 +1437,21 @@ pub async fn list_audit(
     auth_session: AuthSession,
     headers: HeaderMap,
     Query(query): Query<CursorQuery>,
-) -> Result<Json<AuditListResponse>, StatusCode> {
+) -> Result<axum::response::Response, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     use crate::domain::OperatorRole;
     let _operator = require_role(&state, &auth_session, auth_header, OperatorRole::Operator)?;
 
     let limit = clamp_limit(query.limit.unwrap_or(100));
-    let cursor = query.cursor.as_deref().and_then(decode_cursor);
+    let cursor = match query.cursor.as_deref() {
+        None => None,
+        Some(value) => match decode_list_cursor(value, "a1.") {
+            Some(cursor) => Some(cursor),
+            None => return Ok(AppError(PrefixdError::InvalidRequest(
+                "invalid audit cursor; use next_cursor from a fresh audit listing (a1, at most 128 bytes)".into(),
+            )).into_response()),
+        },
+    };
     let params = ListParams {
         limit: limit + 1,
         cursor,
@@ -1436,7 +1470,9 @@ pub async fn list_audit(
         entries.truncate(limit as usize);
     }
     let next_cursor = if has_more {
-        entries.last().map(|e| encode_cursor(&e.timestamp))
+        entries
+            .last()
+            .map(|e| encode_list_cursor(e.timestamp, e.audit_id, "a1."))
     } else {
         None
     };
@@ -1446,7 +1482,8 @@ pub async fn list_audit(
         count,
         next_cursor,
         has_more,
-    }))
+    })
+    .into_response())
 }
 
 /// List mitigations with optional filters
@@ -3094,34 +3131,52 @@ pub async fn change_password(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_cursor, encode_cursor};
-    use crate::db::PopInfo;
+    use super::{decode_list_cursor, encode_list_cursor};
+    use crate::db::{ListCursor, PopInfo};
     use chrono::{DateTime, Utc};
+    use uuid::Uuid;
 
     #[test]
     fn test_cursor_encoding_known_value() {
         let timestamp = "2026-10-18T00:00:00+00:00"
             .parse::<DateTime<Utc>>()
             .unwrap();
-        let cursor = "MjAyNi0xMC0xOFQwMDowMDowMCswMDowMA";
-
-        assert_eq!(encode_cursor(&timestamp), cursor);
-        assert_eq!(decode_cursor(cursor), Some(timestamp));
+        let id = Uuid::from_u128(1);
+        let encoded =
+            "MjAyNi0xMC0xOFQwMDowMDowMCswMDowMAowMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDE";
+        for prefix in ["e1.", "a1.", "s1."] {
+            let cursor = format!("{prefix}{encoded}");
+            assert_eq!(encode_list_cursor(timestamp, id, prefix), cursor);
+            assert_eq!(
+                decode_list_cursor(&cursor, prefix),
+                Some(ListCursor { timestamp, id })
+            );
+        }
     }
 
     #[test]
     fn test_cursor_decode_rejects_invalid_input() {
-        for cursor in [
-            "MjAyNi0xMC0xOFQwMDowMDowMCswMDowMA==", // Padding is not accepted.
-            "MjAyNi0xMC0xOFQwMDowMDowMCswMDowMB",   // Nonzero unused trailing bits.
-            "MjAyNi0xMC0xOFQwMDowMDowMCswMDowMA\n",
-            "*",
-            "a",
-            "_w", // Decodes to invalid UTF-8.
-            "bm90LWEtdGltZXN0YW1w",
-            "",
-        ] {
-            assert_eq!(decode_cursor(cursor), None, "accepted cursor {cursor:?}");
+        let encoded =
+            "MjAyNi0xMC0xOFQwMDowMDowMCswMDowMAowMDAwMDAwMC0wMDAwLTAwMDAtMDAwMC0wMDAwMDAwMDAwMDE";
+        for prefix in ["e1.", "a1.", "s1."] {
+            for value in [
+                format!("{encoded}="),                         // Padding is not accepted.
+                format!("{}F", &encoded[..encoded.len() - 1]), // Nonzero unused trailing bits.
+                format!("{encoded}\n"),
+                "*".into(),
+                "a".into(),
+                "_w".into(), // Decodes to invalid UTF-8.
+                "bm90LWEtdGltZXN0YW1w".into(),
+                "MjAyNi0xMC0xOFQwMDowMDowMCswMDowMA".into(), // Superseded timestamp-only position.
+                String::new(),
+            ] {
+                let cursor = format!("{prefix}{value}");
+                assert_eq!(
+                    decode_list_cursor(&cursor, prefix),
+                    None,
+                    "accepted cursor {cursor:?}"
+                );
+            }
         }
     }
 
@@ -4488,12 +4543,13 @@ pub struct ListSignalGroupsQuery {
         ("status" = Option<String>, Query, description = "Filter by status (open, resolved, expired)"),
         ("vector" = Option<String>, Query, description = "Filter by attack vector"),
         ("limit" = Option<u32>, Query, description = "Max results (default 100, max 1000)"),
-        ("cursor" = Option<String>, Query, description = "Cursor for pagination (from previous response)"),
+        ("cursor" = Option<String>, Query, description = "Opaque s1 continuation from next_cursor (max 128 bytes); superseded timestamp-only cursors are rejected"),
         ("start" = Option<String>, Query, description = "Start of date range (ISO 8601, inclusive)"),
         ("end" = Option<String>, Query, description = "End of date range (ISO 8601, exclusive)"),
     ),
     responses(
         (status = 200, description = "List of signal groups", body = SignalGroupsListResponse),
+        (status = 400, description = "Invalid or superseded signal-group cursor", body = ErrorResponse),
         (status = 401, description = "Authentication required"),
     )
 )]
@@ -4502,14 +4558,22 @@ pub async fn list_signal_groups(
     auth_session: AuthSession,
     headers: HeaderMap,
     Query(query): Query<ListSignalGroupsQuery>,
-) -> Result<Json<SignalGroupsListResponse>, StatusCode> {
+) -> Result<axum::response::Response, StatusCode> {
     let auth_header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
     require_auth(&state, &auth_session, auth_header)?;
 
     let status_filter = query.status.as_deref().and_then(|s| s.parse().ok());
 
     let limit = clamp_limit(query.limit);
-    let cursor = query.cursor.as_deref().and_then(decode_cursor);
+    let cursor = match query.cursor.as_deref() {
+        None => None,
+        Some(value) => match decode_list_cursor(value, "s1.") {
+            Some(cursor) => Some(cursor),
+            None => return Ok(AppError(PrefixdError::InvalidRequest(
+                "invalid signal-group cursor; use next_cursor from a fresh signal-group listing (s1, at most 128 bytes)".into(),
+            )).into_response()),
+        },
+    };
     let params = ListParams {
         limit: limit + 1,
         cursor,
@@ -4535,7 +4599,9 @@ pub async fn list_signal_groups(
         groups.truncate(limit as usize);
     }
     let next_cursor = if has_more {
-        groups.last().map(|g| encode_cursor(&g.created_at))
+        groups
+            .last()
+            .map(|g| encode_list_cursor(g.created_at, g.group_id, "s1."))
     } else {
         None
     };
@@ -4546,7 +4612,8 @@ pub async fn list_signal_groups(
         count,
         next_cursor,
         has_more,
-    }))
+    })
+    .into_response())
 }
 
 /// Get a specific signal group by ID with contributing events

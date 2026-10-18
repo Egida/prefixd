@@ -230,9 +230,17 @@ Authorization: Bearer <token>
 | Param | Type | Description |
 |-------|------|-------------|
 | `limit` | integer | Max results (default 100, max 1000) |
-| `cursor` | string | Cursor for pagination (from previous response `next_cursor`) |
+| `cursor` | string | Opaque `e1` continuation from the previous `next_cursor` (maximum 128 bytes) |
 | `start` | string | Start of date range (ISO 8601, inclusive) |
 | `end` | string | End of date range (ISO 8601, exclusive) |
+
+Results order by `(ingested_at, event_id)` descending, including tied timestamps.
+Copy `next_cursor` unchanged with the same filters; omit `cursor` to start a fresh
+listing. Malformed, oversized, wrong-endpoint and superseded timestamp-only
+cursors return `400` with a JSON `error`. Restart from the first page to obtain a
+current event cursor. Filters apply before pagination. Undecodable eligible stored rows
+cause `500`, including the lookahead row used for
+`has_more`. Response fields are unchanged; terminal pages have `next_cursor: null`.
 
 **Response:**
 
@@ -256,7 +264,7 @@ Authorization: Bearer <token>
     }
   ],
   "count": 1,
-  "next_cursor": "MjAyNi0wMS0xOFQxMDozMDowMFo",
+  "next_cursor": null,
   "has_more": false
 }
 ```
@@ -626,9 +634,17 @@ Authorization: Bearer <token>
 | `status` | string | Filter by status: `open`, `resolved`, `expired` |
 | `vector` | string | Filter by attack vector |
 | `limit` | integer | Max results (default 100, max 1000) |
-| `cursor` | string | Cursor for pagination (from previous response `next_cursor`) |
+| `cursor` | string | Opaque `s1` continuation from the previous `next_cursor` (maximum 128 bytes) |
 | `start` | string | Start of date range (ISO 8601, inclusive) |
 | `end` | string | End of date range (ISO 8601, exclusive) |
+
+Results order by `(created_at, group_id)` descending, including tied timestamps.
+Copy `next_cursor` unchanged with the same filters; omit `cursor` to start a fresh
+listing. Malformed, oversized, wrong-endpoint and superseded timestamp-only
+cursors return `400` with a JSON `error`. Restart from the first page to obtain a
+current signal-group cursor. Filters apply before pagination. Undecodable eligible stored rows
+cause `500`, including the lookahead row used for
+`has_more`. Response fields are unchanged; terminal pages have `next_cursor: null`.
 
 **Response:**
 
@@ -2010,9 +2026,17 @@ Authorization: Bearer <token>
 | Param | Type | Description |
 |-------|------|-------------|
 | `limit` | integer | Max results (default 100, max 1000) |
-| `cursor` | string | Cursor for pagination (from previous response `next_cursor`) |
+| `cursor` | string | Opaque `a1` continuation from the previous `next_cursor` (maximum 128 bytes) |
 | `start` | string | Start of date range (ISO 8601, inclusive) |
 | `end` | string | End of date range (ISO 8601, exclusive) |
+
+Results order by `(timestamp, audit_id)` descending, including tied timestamps.
+Copy `next_cursor` unchanged with the same filters; omit `cursor` to start a fresh
+listing. Malformed, oversized, wrong-endpoint and superseded timestamp-only
+cursors return `400` with a JSON `error`. Restart from the first page to obtain a
+current audit cursor. Filters apply before pagination. Undecodable eligible stored rows
+cause `500`, including the lookahead row used for
+`has_more`. Response fields are unchanged; terminal pages have `next_cursor: null`.
 
 **Response:**
 

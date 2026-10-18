@@ -10272,3 +10272,108 @@ mod anonymous_auth {
         assert!(spec["paths"]["/v1/auth/login"]["post"]["responses"]["403"].is_object());
     }
 }
+
+#[tokio::test]
+async fn test_public_list_cursor_mock_tuple_order_and_filters() {
+    use chrono::{DateTime, Duration, SecondsFormat, Utc};
+    use prefixd::correlation::engine::{CorrelationEngine, SignalGroupStatus};
+    use prefixd::domain::{AttackEvent, AttackEventInput};
+    use prefixd::observability::{ActorType, AuditEntry};
+    use std::collections::BTreeSet;
+    use uuid::Uuid;
+
+    let (app, repo) = setup_app_correlation_with_repo(1, 0.5).await;
+    let timestamp: DateTime<Utc> = "2026-10-18T12:00:00.123456789Z".parse().unwrap();
+    for id in [7_u128, 1, 8, 5, 9, 2, 6, 3, 4, 10, 11, 12, 13] {
+        let position = match id {
+            8 => timestamp + Duration::nanoseconds(1),
+            9 => timestamp - Duration::nanoseconds(1),
+            10 => timestamp - Duration::seconds(2),
+            11 => timestamp + Duration::seconds(2),
+            _ => timestamp,
+        };
+        if id <= 11 {
+            let mut event = AttackEvent::from_input(AttackEventInput {
+                event_id: None,
+                timestamp: position,
+                source: "cursor".into(),
+                victim_ip: "203.0.113.10".into(),
+                vector: AttackVector::UdpFlood,
+                bps: None,
+                pps: None,
+                top_dst_ports: None,
+                confidence: None,
+                action: "ban".into(),
+                raw_details: None,
+            });
+            event.event_id = Uuid::from_u128(id);
+            event.ingested_at = position;
+            repo.insert_event(&event).await.unwrap();
+            let mut entry = AuditEntry::new(
+                ActorType::System,
+                None,
+                "cursor",
+                None,
+                None,
+                serde_json::json!({}),
+            );
+            entry.audit_id = Uuid::from_u128(id);
+            entry.timestamp = position;
+            repo.insert_audit(&entry).await.unwrap();
+        }
+        let mut group = CorrelationEngine::create_group(
+            &format!("203.0.113.{id}"),
+            if id == 12 { "syn_flood" } else { "udp_flood" },
+            3600,
+        );
+        group.group_id = Uuid::from_u128(id);
+        group.created_at = position;
+        if id == 13 {
+            group.status = SignalGroupStatus::Expired;
+        }
+        repo.insert_signal_group(&group).await.unwrap();
+    }
+    let start = (timestamp - Duration::seconds(1)).to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let end = (timestamp + Duration::seconds(2)).to_rfc3339_opts(SecondsFormat::Nanos, true);
+    for (endpoint, rows_key, id_key, prefix) in [
+        ("events", "events", "event_id", "e1."),
+        ("audit", "entries", "audit_id", "a1."),
+        ("signal-groups", "groups", "group_id", "s1."),
+    ] {
+        let mut cursor = None;
+        let mut ordered = Vec::new();
+        let mut unique = BTreeSet::new();
+        for expected_count in [2, 2, 2, 2, 1] {
+            let mut uri = format!("/v1/{endpoint}?limit=2&start={start}&end={end}");
+            if endpoint == "signal-groups" {
+                uri.push_str("&status=open&vector=udp_flood");
+            }
+            if let Some(value) = &cursor {
+                uri.push_str(&format!("&cursor={value}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["count"], expected_count, "{endpoint}");
+            for row in json[rows_key].as_array().unwrap() {
+                let id = Uuid::parse_str(row[id_key].as_str().unwrap()).unwrap();
+                assert!(unique.insert(id), "{endpoint} duplicate");
+                ordered.push(id);
+            }
+            cursor = json["next_cursor"].as_str().map(str::to_owned);
+            assert_eq!(json["has_more"], cursor.is_some());
+            if let Some(value) = &cursor {
+                assert!(value.starts_with(prefix));
+            }
+        }
+        assert_eq!(ordered, [8, 7, 6, 5, 4, 3, 2, 1, 9].map(Uuid::from_u128));
+        assert!(cursor.is_none());
+    }
+}

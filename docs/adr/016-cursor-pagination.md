@@ -14,9 +14,18 @@ Mitigation listings now order by `(created_at, mitigation_id)` descending and us
 a matching tuple continuation predicate. Their versioned opaque `m1` cursors
 replace timestamp-only mitigation cursors, which return `400`; no compatibility
 parser is provided. See the [current API reference](../reference/api.md#list-mitigations).
-The timestamp-only mitigation encoding and SQL below record the original design.
-Events and audit listings retain their existing cursors; this update does not
-qualify their behavior at tied timestamps.
+Events, audit entries and signal groups likewise order by their timestamp and
+existing UUID, with endpoint-specific `e1`, `a1` and `s1` cursors. These reject
+superseded timestamp-only and wrong-endpoint inputs with `400`. Each listing
+filters before pagination and fails on an undecodable eligible stored row, including
+lookahead; it does not silently omit that row. The timestamp-only encoding and SQL
+below record the original design, not the current wire format.
+
+Audit and signal-group rows have one fallible conversion each. Signal-group
+conversion also applies to inserts returning an existing row, detail/open/expired
+reads and dimension-candidate queries. Dimension candidates selected by SQL must
+decode before matching the probe; malformed dimensions cannot become an empty
+valid value. Query filters and insert-conflict retry handling are unchanged.
 
 ## Context
 
