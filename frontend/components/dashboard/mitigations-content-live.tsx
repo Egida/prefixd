@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, AlertCircle, XCircle, Plus, Download, Trash2 } from "lucide-react"
@@ -13,7 +13,6 @@ import { Label } from "@/components/ui/label"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import {
   AlertDialog,
-  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -28,7 +27,7 @@ import {
 } from "@/components/ui/tooltip"
 import { useMitigations } from "@/hooks/use-api"
 import { usePermissions } from "@/hooks/use-permissions"
-import { withdrawMitigation, bulkWithdrawMitigations, type Mitigation } from "@/lib/api"
+import { withdrawMitigation, bulkWithdrawMitigations, type BulkWithdrawResult, type Mitigation } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { downloadCsv } from "@/lib/csv"
 import { MitigateNowDialog } from "@/components/dashboard/mitigate-now-dialog"
@@ -92,12 +91,18 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   const [withdrawReason, setWithdrawReason] = useState("")
   const [isWithdrawing, setIsWithdrawing] = useState(false)
   const [withdrawError, setWithdrawError] = useState<string | null>(null)
+  const withdrawInFlight = useRef(false)
+  const withdrawTrigger = useRef<HTMLButtonElement | null>(null)
+  const searchInput = useRef<HTMLInputElement | null>(null)
   const [mitigateNowOpen, setMitigateNowOpen] = useState(initialMitigateOpen ?? false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [bulkWithdrawOpen, setBulkWithdrawOpen] = useState(false)
   const [bulkWithdrawReason, setBulkWithdrawReason] = useState("")
   const [isBulkWithdrawing, setIsBulkWithdrawing] = useState(false)
   const [bulkWithdrawError, setBulkWithdrawError] = useState<string | null>(null)
+  const [bulkWithdrawResults, setBulkWithdrawResults] = useState<BulkWithdrawResult[]>([])
+  const bulkWithdrawInFlight = useRef(false)
+  const bulkWithdrawTrigger = useRef<HTMLButtonElement | null>(null)
   const [customerFilter, setCustomerFilter] = useState("All")
   const [popFilter, setPopFilter] = useState("All")
   const permissions = usePermissions()
@@ -126,7 +131,8 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   }
 
   const handleWithdraw = async () => {
-    if (!withdrawTarget) return
+    if (!withdrawTarget || withdrawInFlight.current) return
+    withdrawInFlight.current = true
     setIsWithdrawing(true)
     setWithdrawError(null)
     try {
@@ -137,6 +143,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
     } catch (e) {
       setWithdrawError(e instanceof Error ? e.message : "Failed to withdraw")
     } finally {
+      withdrawInFlight.current = false
       setIsWithdrawing(false)
     }
   }
@@ -223,7 +230,8 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
   }
 
   const handleBulkWithdraw = async () => {
-    if (selectedIds.size === 0) return
+    if (selectedIds.size === 0 || bulkWithdrawInFlight.current) return
+    bulkWithdrawInFlight.current = true
     setIsBulkWithdrawing(true)
     setBulkWithdrawError(null)
     try {
@@ -232,17 +240,22 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
         bulkWithdrawReason || "Bulk withdrawal",
         "dashboard"
       )
-      setBulkWithdrawReason("")
-      setSelectedIds(new Set())
+      setBulkWithdrawResults(result.results)
+      setSelectedIds(new Set(result.results
+        .filter((item) => item.status !== "withdrawn")
+        .map((item) => item.mitigation_id)))
       mutate()
       if (result.failed > 0) {
-        setBulkWithdrawError(`${result.withdrawn} withdrawn, ${result.failed} failed`)
+        setBulkWithdrawError(`${result.withdrawn} completed locally, ${result.failed} failed. Retry the failed mitigations.`)
       } else {
         setBulkWithdrawOpen(false)
+        setBulkWithdrawReason("")
+        setBulkWithdrawResults([])
       }
     } catch (e) {
       setBulkWithdrawError(e instanceof Error ? e.message : "Bulk withdraw failed")
     } finally {
+      bulkWithdrawInFlight.current = false
       setIsBulkWithdrawing(false)
     }
   }
@@ -293,6 +306,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
+              ref={searchInput}
               placeholder="Search IP..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -417,7 +431,13 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
           <Button
             variant="destructive"
             size="sm"
-            onClick={() => { setBulkWithdrawError(null); setBulkWithdrawReason(""); setBulkWithdrawOpen(true) }}
+            onClick={(event) => {
+              bulkWithdrawTrigger.current = event.currentTarget
+              setBulkWithdrawError(null)
+              setBulkWithdrawResults([])
+              setBulkWithdrawReason("")
+              setBulkWithdrawOpen(true)
+            }}
           >
             <Trash2 className="h-4 w-4 mr-1.5" />
             Withdraw All
@@ -610,6 +630,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                                     className="h-8 w-8 text-destructive hover:text-destructive hover:bg-destructive/10"
                                     onClick={(e) => {
                                       e.stopPropagation()
+                                      withdrawTrigger.current = e.currentTarget
                                       setWithdrawTarget(mitigation)
                                     }}
                                     aria-label="Withdraw mitigation"
@@ -662,14 +683,23 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
       )}
 
       {/* Inline Withdraw Dialog */}
-      <AlertDialog open={!!withdrawTarget} onOpenChange={(open) => { if (!open) { setWithdrawTarget(null); setWithdrawReason(""); setWithdrawError(null) } }}>
-        <AlertDialogContent>
+      <AlertDialog open={!!withdrawTarget} onOpenChange={(open) => {
+        if (!open && !withdrawInFlight.current) {
+          setWithdrawTarget(null)
+          setWithdrawReason("")
+          setWithdrawError(null)
+        }
+      }}>
+        <AlertDialogContent onCloseAutoFocus={(event) => {
+          event.preventDefault()
+          const target = withdrawTrigger.current?.isConnected ? withdrawTrigger.current : searchInput.current
+          target?.focus()
+        }}>
           <AlertDialogHeader>
             <AlertDialogTitle>Withdraw Mitigation</AlertDialogTitle>
             <AlertDialogDescription>
-              This will immediately withdraw the FlowSpec rule from all BGP peers.
-              Traffic to <span className="font-mono font-semibold">{withdrawTarget?.victim_ip}</span> will
-              no longer be filtered.
+              Request withdrawal for <span className="font-mono font-semibold">{withdrawTarget?.victim_ip}</span>.
+              Local completion is recorded in the audit log. Router convergence and traffic filtering are not verified here.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="py-4">
@@ -678,35 +708,52 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
               id="withdraw-reason"
               placeholder="e.g., False positive, attack subsided"
               value={withdrawReason}
+              disabled={isWithdrawing}
               onChange={(e) => setWithdrawReason(e.target.value)}
               className="mt-2"
             />
             {withdrawError && (
-              <p className="text-sm text-destructive mt-2">{withdrawError}</p>
+              <div role="alert" className="text-sm text-destructive mt-2">
+                <p>{withdrawError}</p>
+                <p>Cleanup may still be pending; a pending request retains its original recorded reason.</p>
+              </div>
             )}
+            <p role="status" className="text-sm text-muted-foreground mt-2">{isWithdrawing ? "Waiting for local withdrawal completion..." : ""}</p>
           </div>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={isWithdrawing}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
+            <Button
+              type="button"
               onClick={handleWithdraw}
               disabled={isWithdrawing}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {isWithdrawing ? "Withdrawing..." : "Withdraw"}
-            </AlertDialogAction>
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
       {/* Bulk Withdraw Dialog */}
-      <AlertDialog open={bulkWithdrawOpen} onOpenChange={(open) => { if (!open) { setBulkWithdrawOpen(false); setBulkWithdrawReason(""); setBulkWithdrawError(null) } }}>
-        <AlertDialogContent>
+      <AlertDialog open={bulkWithdrawOpen} onOpenChange={(open) => {
+        if (!open && !bulkWithdrawInFlight.current) {
+          setBulkWithdrawOpen(false)
+          setBulkWithdrawReason("")
+          setBulkWithdrawError(null)
+          setBulkWithdrawResults([])
+        }
+      }}>
+        <AlertDialogContent onCloseAutoFocus={(event) => {
+          event.preventDefault()
+          const target = bulkWithdrawTrigger.current?.isConnected ? bulkWithdrawTrigger.current : searchInput.current
+          target?.focus()
+        }}>
           <AlertDialogHeader>
             <AlertDialogTitle>Bulk Withdraw Mitigations</AlertDialogTitle>
             <AlertDialogDescription>
-              This will immediately withdraw <span className="font-semibold">{selectedIds.size}</span> FlowSpec
-              {selectedIds.size === 1 ? " rule" : " rules"} from all BGP peers.
-              Traffic to the selected IPs will no longer be filtered.
+              Request withdrawal of <span className="font-semibold">{selectedIds.size}</span> FlowSpec
+              {selectedIds.size === 1 ? " rule" : " rules"}. Local completion is recorded in the audit log.
+              Router convergence and traffic filtering are not verified here.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="py-4">
@@ -715,22 +762,37 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
               id="bulk-withdraw-reason"
               placeholder="e.g., False positive wave, incident resolved"
               value={bulkWithdrawReason}
+              disabled={isBulkWithdrawing}
               onChange={(e) => setBulkWithdrawReason(e.target.value)}
               className="mt-2"
             />
             {bulkWithdrawError && (
-              <p className="text-sm text-destructive mt-2">{bulkWithdrawError}</p>
+              <div role="alert" className="text-sm text-destructive mt-2">
+                <p>{bulkWithdrawError}</p>
+                <p>Cleanup may still be pending; a pending request retains its original recorded reason.</p>
+              </div>
+            )}
+            <p role="status" className="text-sm text-muted-foreground mt-2">{isBulkWithdrawing ? "Waiting for local withdrawal completion..." : ""}</p>
+            {bulkWithdrawResults.length > 0 && (
+              <ul aria-label="Withdrawal results" className="max-h-48 overflow-y-auto space-y-1 text-sm mt-2">
+                {bulkWithdrawResults.map((item) => (
+                  <li key={item.mitigation_id}>
+                    <span className="font-mono break-all">{item.mitigation_id}</span>: {item.status === "withdrawn" ? "Completed locally" : item.error || "Withdrawal failed"}
+                  </li>
+                ))}
+              </ul>
             )}
           </div>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={isBulkWithdrawing}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
+            <Button
+              type="button"
               onClick={handleBulkWithdraw}
               disabled={isBulkWithdrawing}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {isBulkWithdrawing ? "Withdrawing..." : `Withdraw ${selectedIds.size}`}
-            </AlertDialogAction>
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
