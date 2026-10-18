@@ -261,6 +261,12 @@ jobs:
           denyWarnings: false
           createIssues: false
 
+      - name: Check Rust dependency policy
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --workspace --all-features --locked
+          command: check advisories bans licenses sources
+
       - name: Install bun
         uses: oven-sh/setup-bun@v2
         with:
