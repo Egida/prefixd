@@ -152,6 +152,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Saturate large timeseries day/hour conversions before applying the existing
+  range maximum and bucket minimum, preserving invalid-input defaults.
+
 - Report string-length validation limits in bytes, matching the existing UTF-8
   byte checks; document reason limits without changing accepted input lengths.
 

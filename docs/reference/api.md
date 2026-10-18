@@ -1606,6 +1606,12 @@ Authorization: Bearer <token>
 
 Returns gap-filled time buckets for charting. Supported metrics: `mitigations`, `events`. Range up to 7d, bucket minimum 5m.
 
+Range accepts bare hours, `h` or `d`; bucket accepts bare minutes, `m` or `h`.
+Outer whitespace is ignored. Invalid formats and quantities outside unsigned
+32-bit range use the defaults (24 hours and 60 minutes). Unit conversions saturate
+at the unsigned 32-bit maximum before the 168-hour range cap and 5-minute bucket
+minimum are applied.
+
 **Response:**
 
 ```json

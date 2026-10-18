@@ -3202,6 +3202,64 @@ mod tests {
     use chrono::{DateTime, Utc};
     use uuid::Uuid;
 
+    use super::{parse_duration_hours, parse_duration_minutes};
+
+    #[test]
+    fn test_parse_duration_hours_saturates_conversion() {
+        for (input, expected) in [
+            ("24", Some(24)),
+            ("24h", Some(24)),
+            ("7d", Some(168)),
+            (" 2d ", Some(48)),
+            ("0d", Some(0)),
+            ("178956970d", Some(4_294_967_280)),
+            ("178956971d", Some(u32::MAX)),
+            ("536870912d", Some(u32::MAX)),
+            ("4294967295d", Some(u32::MAX)),
+            ("4294967295h", Some(u32::MAX)),
+            ("4294967295", Some(u32::MAX)),
+            ("4294967296d", None),
+            ("4294967296h", None),
+            ("4294967296", None),
+            ("", None),
+            ("invalid", None),
+            ("1m", None),
+            ("1H", None),
+            ("-1d", None),
+            ("1 d", None),
+        ] {
+            assert_eq!(parse_duration_hours(input), expected, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn test_parse_duration_minutes_saturates_conversion() {
+        for (input, expected) in [
+            ("60", Some(60)),
+            ("5m", Some(5)),
+            ("2h", Some(120)),
+            (" 2h ", Some(120)),
+            ("0h", Some(0)),
+            ("71582788h", Some(4_294_967_280)),
+            ("71582789h", Some(u32::MAX)),
+            ("1073741824h", Some(u32::MAX)),
+            ("4294967295h", Some(u32::MAX)),
+            ("4294967295m", Some(u32::MAX)),
+            ("4294967295", Some(u32::MAX)),
+            ("4294967296h", None),
+            ("4294967296m", None),
+            ("4294967296", None),
+            ("", None),
+            ("invalid", None),
+            ("1d", None),
+            ("1M", None),
+            ("-1h", None),
+            ("1 h", None),
+        ] {
+            assert_eq!(parse_duration_minutes(input), expected, "{input:?}");
+        }
+    }
+
     #[tokio::test]
     async fn confidence_typed_nonfinite_inputs_are_rejected_at_shared_ingestion_boundaries() {
         use crate::bgp::MockAnnouncer;
@@ -3804,7 +3862,7 @@ fn parse_duration_hours(s: &str) -> Option<u32> {
     if let Some(h) = s.strip_suffix('h') {
         h.parse().ok()
     } else if let Some(d) = s.strip_suffix('d') {
-        d.parse::<u32>().ok().map(|d| d * 24)
+        d.parse::<u32>().ok().map(|d| d.saturating_mul(24))
     } else {
         s.parse().ok()
     }
@@ -3815,7 +3873,7 @@ fn parse_duration_minutes(s: &str) -> Option<u32> {
     if let Some(m) = s.strip_suffix('m') {
         m.parse().ok()
     } else if let Some(h) = s.strip_suffix('h') {
-        h.parse::<u32>().ok().map(|h| h * 60)
+        h.parse::<u32>().ok().map(|h| h.saturating_mul(60))
     } else {
         s.parse().ok()
     }
