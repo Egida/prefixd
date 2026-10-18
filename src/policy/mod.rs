@@ -4,6 +4,8 @@ mod escalation;
 pub use correlation::*;
 pub use escalation::*;
 
+use std::net::IpAddr;
+
 use crate::config::{AllowedPorts, IpContext, PlaybookAction, Playbooks};
 
 use crate::domain::{
@@ -31,6 +33,11 @@ impl PolicyEngine {
         event: &AttackEvent,
         context: Option<&IpContext>,
     ) -> Result<MitigationIntent> {
+        let victim_ip: IpAddr = event
+            .victim_ip
+            .parse()
+            .map_err(|_| PrefixdError::InvalidIpAddress(event.victim_ip.clone()))?;
+        let prefix_len = if victim_ip.is_ipv4() { 32 } else { 128 };
         let vector = event.attack_vector();
         let ports = event.top_dst_ports();
         let has_ports = !ports.is_empty();
@@ -52,8 +59,8 @@ impl PolicyEngine {
 
         // Build match criteria
         let match_criteria = MatchCriteria {
-            dst_prefix: format!("{}/32", event.victim_ip),
-            protocol: vector.to_protocol(),
+            dst_prefix: format!("{victim_ip}/{prefix_len}"),
+            protocol: vector.to_protocol_for(victim_ip),
             dst_ports,
         };
 
@@ -205,6 +212,51 @@ mod tests {
                     }],
                 },
             ],
+        }
+    }
+
+    #[test]
+    fn policy_uses_canonical_host_scope_and_family_correct_protocol() {
+        for (vector, v4_protocol, v6_protocol) in [
+            (AttackVector::UdpFlood, 17, 17),
+            (AttackVector::SynFlood, 6, 6),
+            (AttackVector::AckFlood, 6, 6),
+            (AttackVector::IcmpFlood, 1, 58),
+        ] {
+            let mut playbooks = test_playbooks();
+            playbooks.playbooks[0].match_criteria.vector = vector;
+            let engine = PolicyEngine::new(playbooks, "iad1".into(), 120);
+            for (ip, prefix, protocol) in [
+                ("203.0.113.10", "203.0.113.10/32", v4_protocol),
+                ("2001:db8::10", "2001:db8::10/128", v6_protocol),
+                (
+                    "2001:0DB8:0000:0000:0000:0000:0000:0010",
+                    "2001:db8::10/128",
+                    v6_protocol,
+                ),
+            ] {
+                let event = make_event(ip, vector.as_str(), &[]);
+                let intent = engine.evaluate(&event, None).unwrap();
+                assert_eq!(intent.match_criteria.dst_prefix, prefix);
+                assert_eq!(intent.match_criteria.protocol, Some(protocol));
+            }
+        }
+    }
+
+    #[test]
+    fn policy_rejects_invalid_or_prefixed_victims() {
+        let engine = PolicyEngine::new(test_playbooks(), "iad1".into(), 120);
+        for ip in [
+            "invalid",
+            "203.0.113.10/24",
+            "2001:db8::10/32",
+            "fe80::1%eth0",
+        ] {
+            let event = make_event(ip, "udp_flood", &[53]);
+            assert!(matches!(
+                engine.evaluate(&event, None),
+                Err(PrefixdError::InvalidIpAddress(_))
+            ));
         }
     }
 

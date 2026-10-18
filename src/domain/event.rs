@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use std::net::IpAddr;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
@@ -16,12 +17,21 @@ pub enum AttackVector {
 }
 
 impl AttackVector {
+    /// IPv4 protocol mapping retained for existing callers.
     pub fn to_protocol(&self) -> Option<u8> {
         match self {
             Self::UdpFlood => Some(17),
             Self::SynFlood | Self::AckFlood => Some(6),
             Self::IcmpFlood => Some(1),
             Self::Unknown => None,
+        }
+    }
+
+    pub(crate) fn to_protocol_for(self, victim_ip: IpAddr) -> Option<u8> {
+        if matches!(self, Self::IcmpFlood) && victim_ip.is_ipv6() {
+            Some(58)
+        } else {
+            self.to_protocol()
         }
     }
 
@@ -107,7 +117,12 @@ pub struct AttackEvent {
 
 impl AttackEvent {
     pub fn from_input(input: AttackEventInput) -> Self {
-        let protocol = input.vector.to_protocol().map(|p| p as i32);
+        let protocol = input
+            .victim_ip
+            .parse::<IpAddr>()
+            .ok()
+            .and_then(|ip| input.vector.to_protocol_for(ip))
+            .map(i32::from);
         let ports = input.top_dst_ports.clone().unwrap_or_default();
 
         Self {
@@ -134,5 +149,40 @@ impl AttackEvent {
 
     pub fn attack_vector(&self) -> AttackVector {
         self.vector.parse().unwrap_or(AttackVector::Unknown)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_protocol_tracks_victim_address_family() {
+        for (vector, v4_protocol, v6_protocol) in [
+            (AttackVector::UdpFlood, Some(17), Some(17)),
+            (AttackVector::SynFlood, Some(6), Some(6)),
+            (AttackVector::AckFlood, Some(6), Some(6)),
+            (AttackVector::IcmpFlood, Some(1), Some(58)),
+            (AttackVector::Unknown, None, None),
+        ] {
+            assert_eq!(vector.to_protocol(), v4_protocol);
+            for (victim_ip, protocol) in [
+                ("203.0.113.10", v4_protocol),
+                ("2001:db8::10", v6_protocol),
+                ("2001:0DB8:0000:0000:0000:0000:0000:0010", v6_protocol),
+            ] {
+                let input = serde_json::from_value(serde_json::json!({
+                    "timestamp": "2026-10-17T00:00:00Z",
+                    "source": "family-test", "victim_ip": victim_ip, "vector": vector,
+                }))
+                .unwrap();
+                let event = AttackEvent::from_input(input);
+                assert_eq!(
+                    event.protocol,
+                    protocol.map(i32::from),
+                    "{vector} {victim_ip}"
+                );
+            }
+        }
     }
 }

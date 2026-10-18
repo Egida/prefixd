@@ -65,6 +65,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Manual creation uses HTTP 202 for this case; ordinary success/dry-run keep 201.
   The dashboard warns that announcement is unconfirmed and opens the saved intent.
 
+- Preserve host scope for automatic IPv6 mitigations with canonical `/128`
+  destinations, including when prefix guardrails are relaxed. Use ICMPv6 protocol
+  58 in IPv6 event metadata and policy intent; IPv4 retains `/32` and ICMP protocol
+  1, with TCP/UDP behavior unchanged.
+
 - Isolate expiry inventory to the controller's POP before decoding and fail on
   corrupt owned rows instead of silently skipping them. Durable withdrawal
   retries and independent reconciliation stages continue after enumeration fails.
