@@ -1,7 +1,7 @@
 # prefixd
 
 [![Build](https://github.com/lance0/prefixd/actions/workflows/ci.yml/badge.svg)](https://github.com/lance0/prefixd/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/rust-1.85+-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.88+-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 **prefixd** is a BGP FlowSpec policy daemon for automated DDoS mitigation. It receives attack signals from detectors, applies policy-driven playbooks, and announces FlowSpec rules to routers via GoBGP.
@@ -263,7 +263,7 @@ FlowSpec (RFC 5575, RFC 8955) is supported by:
 
 ## Requirements
 
-- **Docker** (recommended) or Rust 1.85+ for building from source
+- **Docker** (recommended) or Rust 1.88+ for building from source
 - **PostgreSQL 14+** for state storage
 - **GoBGP** is included in Docker Compose
 
