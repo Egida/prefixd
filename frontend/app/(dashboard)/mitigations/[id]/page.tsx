@@ -1,6 +1,6 @@
 "use client"
 
-import { use } from "react"
+import { use, useRef, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
 import { DashboardLayout } from "@/components/dashboard/dashboard-layout"
@@ -17,10 +17,8 @@ import { IncidentReportDialog } from "@/components/dashboard/incident-report-dia
 import { withdrawMitigation, getIncidentReport } from "@/lib/api"
 import { copyText } from "@/lib/clipboard"
 import { toast } from "sonner"
-import { useState } from "react"
 import {
   AlertDialog,
-  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -80,6 +78,10 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
   const [withdrawReason, setWithdrawReason] = useState("")
   const [isWithdrawing, setIsWithdrawing] = useState(false)
   const [withdrawError, setWithdrawError] = useState<string | null>(null)
+  const withdrawInFlight = useRef(false)
+  const withdrawCompleted = useRef(false)
+  const withdrawTrigger = useRef<HTMLButtonElement | null>(null)
+  const victimLink = useRef<HTMLAnchorElement | null>(null)
   const [reportMarkdown, setReportMarkdown] = useState<string | null>(null)
   const [showReportDialog, setShowReportDialog] = useState(false)
   const [reportLoading, setReportLoading] = useState(false)
@@ -94,16 +96,20 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
   }
 
   const handleWithdraw = async () => {
-    if (!mitigation) return
+    if (!mitigation || withdrawInFlight.current) return
+    withdrawInFlight.current = true
     setIsWithdrawing(true)
     setWithdrawError(null)
     try {
       await withdrawMitigation(mitigation.mitigation_id, withdrawReason || "Manual withdrawal", "dashboard")
+      withdrawCompleted.current = true
       setShowWithdrawDialog(false)
+      setWithdrawReason("")
       mutate()
     } catch (e) {
       setWithdrawError(e instanceof Error ? e.message : "Failed to withdraw")
     } finally {
+      withdrawInFlight.current = false
       setIsWithdrawing(false)
     }
   }
@@ -165,6 +171,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
             <div className="flex items-center gap-3 mt-1">
               <StatusBadge status={mitigation.status} />
               <Link
+                ref={victimLink}
                 href={`/ip-history?ip=${encodeURIComponent(mitigation.victim_ip)}`}
                 className="text-2xl font-bold font-mono tracking-tight text-primary hover:underline"
               >
@@ -190,8 +197,12 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
             </Button>
             {permissions.canWithdraw && canWithdraw ? (
               <Button
+                ref={withdrawTrigger}
                 variant="destructive"
-                onClick={() => setShowWithdrawDialog(true)}
+                onClick={() => {
+                  withdrawCompleted.current = false
+                  setShowWithdrawDialog(true)
+                }}
                 className="ml-2"
               >
                 <AlertTriangle className="h-4 w-4 mr-2" />
@@ -559,14 +570,23 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
       </div>
 
       {/* Withdraw Confirmation Dialog */}
-      <AlertDialog open={showWithdrawDialog} onOpenChange={setShowWithdrawDialog}>
-        <AlertDialogContent>
+      <AlertDialog open={showWithdrawDialog} onOpenChange={(open) => {
+        if (!open && !withdrawInFlight.current) {
+          setShowWithdrawDialog(false)
+          setWithdrawReason("")
+          setWithdrawError(null)
+        }
+      }}>
+        <AlertDialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" onCloseAutoFocus={(event) => {
+          event.preventDefault()
+          const target = !withdrawCompleted.current && withdrawTrigger.current?.isConnected ? withdrawTrigger.current : victimLink.current
+          target?.focus()
+        }}>
           <AlertDialogHeader>
             <AlertDialogTitle>Withdraw Mitigation</AlertDialogTitle>
             <AlertDialogDescription>
-              This will immediately withdraw the FlowSpec rule from all BGP peers. 
-              Traffic to <span className="font-mono font-semibold">{mitigation?.victim_ip}</span> will 
-              no longer be filtered.
+              Request withdrawal for <span className="font-mono font-semibold">{mitigation?.victim_ip}</span>.
+              Local completion is recorded in the audit log. Router convergence and traffic filtering are not verified here.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <div className="py-4">
@@ -575,22 +595,28 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
               id="reason"
               placeholder="e.g., False positive, attack subsided"
               value={withdrawReason}
+              disabled={isWithdrawing}
               onChange={(e) => setWithdrawReason(e.target.value)}
               className="mt-2"
             />
             {withdrawError && (
-              <p className="text-sm text-destructive mt-2">{withdrawError}</p>
+              <div role="alert" className="text-sm text-destructive mt-2">
+                <p>{withdrawError}</p>
+                <p>Cleanup may still be pending; a pending request retains its original recorded reason.</p>
+              </div>
             )}
+            <p role="status" className="text-sm text-muted-foreground mt-2">{isWithdrawing ? "Waiting for local withdrawal completion..." : ""}</p>
           </div>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={isWithdrawing}>Cancel</AlertDialogCancel>
-            <AlertDialogAction
+            <Button
+              type="button"
               onClick={handleWithdraw}
               disabled={isWithdrawing}
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {isWithdrawing ? "Withdrawing..." : "Withdraw"}
-            </AlertDialogAction>
+            </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

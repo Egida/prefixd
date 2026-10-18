@@ -86,6 +86,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Keep `icmp` as IPv4 protocol 1 and reject cross-family ICMP choices before
   saving intent or calling the speaker.
 
+- Keep withdrawal confirmations open during requests and failures, preserve
+  failed bulk selections and reasons for retry, and report local completion
+  without claiming downstream router convergence.
+
 - Restore dashboard live cache refresh and notification muting by matching the
   server's WebSocket event names. Label ordinary updates and feed resynchronization
   accurately.
