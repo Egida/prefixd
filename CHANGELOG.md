@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Share exact readable-speaker lifecycle checks across Mock, rustbgpd and GoBGP; run pinned isolated GoBGP API/peer/restart qualification in CI and retain backend fixture logs.
+
 - Connect to rustbgpd through an owner-only Unix socket or verified native
   client-certificate mTLS. Unix reconnects validate ownership and permissions;
   certificate and token rotation retain the same speaker target identity.
