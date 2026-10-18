@@ -98,6 +98,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Display confidence fractions consistently as percentages across event, mitigation
+  and correlation views. Preserve zero, distinguish missing and invalid values, and
+  avoid implying that confidence confirms mitigation or router installation.
+
 - Restore immediate dashboard retries after failed GET requests while continuing
   to share requests that are still pending.
 
