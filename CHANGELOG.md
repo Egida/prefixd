@@ -99,6 +99,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on YAML loading and API edits, including numeric overflow.
   Preserve the active correlation configuration after a rejected reload or edit.
 
+- Keep disabled authentication consistently anonymous: reject named login with
+  HTTP 403, ignore retained operator sessions before request tracing, and hide
+  named dashboard controls. Logout still deletes retained sessions. Wait for a
+  known authentication mode before presenting the login form.
+
 - Accept explicit `icmpv6` in manual mitigation requests as IPv6 protocol 58.
   Keep `icmp` as IPv4 protocol 1 and reject cross-family ICMP choices before
   saving intent or calling the speaker.

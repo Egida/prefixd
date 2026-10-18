@@ -3,6 +3,7 @@
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "@/hooks/use-auth"
+import { useHealth } from "@/hooks/use-api"
 import { Button } from "@/components/ui/button"
 import {
   DropdownMenu,
@@ -22,12 +23,13 @@ import { User, LogOut, Shield, Loader2, Bell } from "lucide-react"
 import { NotificationPreferencesPanel } from "@/components/dashboard/notification-preferences"
 
 export function UserMenu() {
-  const { operator, logout } = useAuth()
+  const { operator, logout, isLoading: authLoading } = useAuth()
+  const { data: health, isLoading: healthLoading } = useHealth()
   const router = useRouter()
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [showPrefs, setShowPrefs] = useState(false)
 
-  if (!operator) return null
+  if (authLoading || healthLoading || !health || health.auth_mode === "none" || !operator) return null
 
   const handleLogout = async () => {
     setIsLoggingOut(true)

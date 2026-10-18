@@ -201,9 +201,16 @@ async fn openapi_json() -> impl IntoResponse {
 pub fn create_test_router(state: Arc<AppState>) -> Router {
     use tower_sessions::MemoryStore;
 
-    let session_store = MemoryStore::default();
+    create_test_router_with_session_store(state, MemoryStore::default())
+}
+
+/// Create a test router with a shared store for session and mode-transition checks.
+pub fn create_test_router_with_session_store(
+    state: Arc<AppState>,
+    session_store: tower_sessions::MemoryStore,
+) -> Router {
     let session_layer = tower_sessions::SessionManagerLayer::new(session_store).with_secure(false);
-    let backend = crate::auth::AuthBackend::new(state.repo.clone());
+    let backend = crate::auth::AuthBackend::new(state.repo.clone(), state.settings.http.auth.mode);
     let auth_layer = axum_login::AuthManagerLayerBuilder::new(backend, session_layer).build();
 
     let router = public_routes()

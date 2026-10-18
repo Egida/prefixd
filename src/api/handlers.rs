@@ -2565,14 +2565,20 @@ pub struct LoginResponse {
     request_body = LoginRequest,
     responses(
         (status = 200, description = "Login successful", body = LoginResponse),
-        (status = 401, description = "Invalid credentials")
+        (status = 401, description = "Invalid credentials"),
+        (status = 403, description = "Login is disabled when authentication mode is none")
     )
 )]
 pub async fn login(
+    State(state): State<Arc<AppState>>,
     mut auth_session: crate::auth::AuthSession,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, StatusCode> {
     use crate::auth::Credentials;
+
+    if matches!(state.settings.http.auth.mode, crate::config::AuthMode::None) {
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     // Validate input lengths and username format
     if req.username.len() > MAX_USERNAME_LEN

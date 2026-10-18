@@ -1251,7 +1251,12 @@ Content-Type: application/json
 }
 ```
 
-Sets `session` cookie for subsequent requests.
+Sets a session cookie for subsequent requests.
+
+**Response (401 Unauthorized):** Invalid credentials.
+
+**Response (403 Forbidden):** `http.auth.mode: none` disables named login. The
+request is rejected before operator lookup or the username login throttle.
 
 ### Logout
 
@@ -1261,7 +1266,8 @@ POST /v1/auth/logout
 
 **Response (200 OK)**
 
-Clears session cookie.
+Deletes the stored session and clears its cookie. This endpoint remains available
+in `none` mode so clients can remove a session retained from another mode.
 
 ### Current User
 
@@ -1279,7 +1285,8 @@ GET /v1/auth/me
 }
 ```
 
-**Response (401 Unauthorized):** Not logged in.
+**Response (401 Unauthorized):** Not logged in, or authentication mode is `none`.
+Anonymous access does not create an authenticated operator profile.
 
 ---
 

@@ -34,7 +34,7 @@ async fn test_cli_operator_password_terminal() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let backend = AuthBackend::new(ctx.repo.clone());
+    let backend = AuthBackend::new(ctx.repo.clone(), prefixd::config::AuthMode::Credentials);
     for username in ["pty-admin", "pty-explicit"] {
         let operator = backend
             .authenticate(Credentials {
@@ -357,7 +357,13 @@ async fn test_authenticated_withdrawal_audit_success_and_failure_boundaries() {
         ".".into(),
     )
     .unwrap();
-    let auth = create_auth_layer(context.pool.clone(), context.repo.clone(), false).await;
+    let auth = create_auth_layer(
+        context.pool.clone(),
+        context.repo.clone(),
+        state.settings.http.auth.mode,
+        false,
+    )
+    .await;
     let app = prefixd::api::create_router(state.clone(), auth);
     let response = app
         .clone()

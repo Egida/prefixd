@@ -50,10 +50,16 @@ http:
 
 | Mode | Dashboard | API/CLI | Notes |
 |------|-----------|---------|-------|
-| `none` | No login | No auth | Development only |
+| `none` | Anonymous; login returns 403 | No auth | Development only |
 | `bearer` | N/A | Bearer token | API-only access |
 | `mtls` | N/A | Client certificates | Machine-to-machine |
 | `credentials` | Session login | Session cookie | Recommended |
+
+In `none` mode, requests have anonymous administrator permissions. Named sessions
+are ignored before request tracing, `/v1/auth/me` returns 401, and WebSocket
+connections use the anonymous identity. The dashboard hides named preferences and
+sign-out controls. `/v1/auth/logout` still deletes a retained session and clears
+its cookie. Credential sessions and bearer-mode hybrid sessions are unchanged.
 
 ### LDAP/Active Directory (Placeholder)
 

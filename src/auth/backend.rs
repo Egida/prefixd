@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::LazyLock;
 use uuid::Uuid;
 
+use crate::config::AuthMode;
 use crate::db::RepositoryTrait;
 use crate::domain::Operator;
 
@@ -30,11 +31,12 @@ pub struct Credentials {
 #[derive(Clone)]
 pub struct AuthBackend {
     repo: Arc<dyn RepositoryTrait>,
+    mode: AuthMode,
 }
 
 impl AuthBackend {
-    pub fn new(repo: Arc<dyn RepositoryTrait>) -> Self {
-        Self { repo }
+    pub fn new(repo: Arc<dyn RepositoryTrait>, mode: AuthMode) -> Self {
+        Self { repo, mode }
     }
 }
 
@@ -65,6 +67,10 @@ impl AuthnBackend for AuthBackend {
         &self,
         creds: Self::Credentials,
     ) -> Result<Option<Self::User>, Self::Error> {
+        if matches!(self.mode, AuthMode::None) {
+            return Ok(None);
+        }
+
         // Look up operator by username
         let operator = match self.repo.get_operator_by_username(&creds.username).await {
             Ok(Some(op)) => op,
@@ -114,6 +120,11 @@ impl AuthnBackend for AuthBackend {
     }
 
     async fn get_user(&self, user_id: &UserId<Self>) -> Result<Option<Self::User>, Self::Error> {
+        // Ignore retained named sessions before axum-login records a user identity.
+        if matches!(self.mode, AuthMode::None) {
+            return Ok(None);
+        }
+
         match self.repo.get_operator_by_id(*user_id).await {
             Ok(op) => Ok(op),
             Err(e) => {

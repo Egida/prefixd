@@ -8842,8 +8842,7 @@ async fn test_get_me() {
         .await
         .unwrap();
 
-    // Auth mode is None, but get_me uses auth_session.user directly (no
-    // require_auth). With no session, expect 401.
+    // Anonymous access does not create an authenticated operator session.
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
@@ -9084,5 +9083,449 @@ async fn test_openapi_creation_outcome_is_optional_and_manual_accepted_is_docume
                 "schema={name}"
             );
         }
+    }
+}
+
+mod anonymous_auth {
+    use super::*;
+    use argon2::{Argon2, PasswordHasher, password_hash::SaltString};
+    use axum::Router;
+    use axum_login::AuthnBackend;
+    use prefixd::api::create_test_router_with_session_store;
+    use prefixd::auth::{AuthBackend, Credentials};
+    use prefixd::domain::OperatorRole;
+    use std::io::Write;
+    use std::sync::Mutex;
+    use tower_sessions::{MemoryStore, SessionStore, session::Id};
+    use tracing::instrument::WithSubscriber;
+
+    const PASSWORD: &str = "anonymous-transition-password";
+
+    fn router(mode: AuthMode, repo: Arc<MockRepository>, store: MemoryStore) -> Router {
+        let mut settings = test_settings();
+        // This fixture tests hybrid sessions, independently of host token variables.
+        settings.http.auth.mode = if mode == AuthMode::Bearer {
+            AuthMode::Credentials
+        } else {
+            mode
+        };
+        let mut state = AppState::new(
+            settings,
+            test_inventory(),
+            test_playbooks(),
+            repo,
+            Arc::new(MockAnnouncer::new()),
+            ".".into(),
+        )
+        .unwrap();
+        if mode == AuthMode::Bearer {
+            let state = Arc::get_mut(&mut state).expect("unshared test state");
+            state.settings.http.auth.mode = mode;
+            state.bearer_token = Some("session-control-token".into());
+        }
+        create_test_router_with_session_store(state, store)
+    }
+
+    async fn operator(repo: &MockRepository, username: &str) -> prefixd::domain::Operator {
+        let salt = SaltString::encode_b64(b"anonymous-auth-test").unwrap();
+        let hash = Argon2::default()
+            .hash_password(PASSWORD.as_bytes(), &salt)
+            .unwrap()
+            .to_string();
+        repo.create_operator(username, &hash, OperatorRole::Admin, None)
+            .await
+            .unwrap()
+    }
+
+    async fn request(
+        app: &Router,
+        method: &str,
+        path: &str,
+        cookie: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> axum::response::Response {
+        let mut request = Request::builder().method(method).uri(path);
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
+        }
+        let body = match body {
+            Some(body) => {
+                request = request.header("content-type", "application/json");
+                Body::from(body.to_string())
+            }
+            None => Body::empty(),
+        };
+        app.clone()
+            .oneshot(request.body(body).unwrap())
+            .await
+            .unwrap()
+    }
+
+    async fn login(app: &Router, username: &str) -> String {
+        let response = request(
+            app,
+            "POST",
+            "/v1/auth/login",
+            None,
+            Some(serde_json::json!({"username":username,"password":PASSWORD})),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[derive(Clone, Default)]
+    struct TraceOutput(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for TraceOutput {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceOutput {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl TraceOutput {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+        fn clear(&self) {
+            self.0.lock().unwrap().clear();
+        }
+        fn subscriber(&self) -> tracing::Dispatch {
+            tracing::Dispatch::new(
+                tracing_subscriber::fmt()
+                    .json()
+                    .without_time()
+                    .with_max_level(tracing::Level::DEBUG)
+                    .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+                    .with_writer(self.clone())
+                    .finish(),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn retained_credentials_are_anonymous_until_logout_deletes_the_shared_session() {
+        let repo = Arc::new(MockRepository::new());
+        let operator = operator(&repo, "mode-transition").await;
+        let store = MemoryStore::default();
+        let credentials = router(AuthMode::Credentials, repo.clone(), store.clone());
+        let anonymous = router(AuthMode::None, repo.clone(), store.clone());
+        let cookie = login(&credentials, &operator.username).await;
+        let id: Id = cookie.split_once('=').unwrap().1.parse().unwrap();
+        assert!(store.load(&id).await.unwrap().is_some());
+
+        let output = TraceOutput::default();
+        let dispatch = output.subscriber();
+        let response = request(&credentials, "GET", "/v1/auth/me", Some(&cookie), None)
+            .with_subscriber(dispatch.clone())
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["username"],
+            operator.username
+        );
+        assert!(
+            output.text().contains(&operator.operator_id.to_string()),
+            "credential request must prove tracing capture is active"
+        );
+        output.clear();
+
+        let response = request(&anonymous, "GET", "/v1/auth/me", Some(&cookie), None)
+            .with_subscriber(dispatch.clone())
+            .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!response.headers().contains_key("set-cookie"));
+        assert!(
+            !output.text().contains(&operator.operator_id.to_string()),
+            "anonymous requests must not record retained user.id"
+        );
+        // A mode change ignores the named session; explicit logout still owns deletion.
+        assert!(store.load(&id).await.unwrap().is_some());
+
+        let response = request(&anonymous, "POST", "/v1/mitigations", Some(&cookie), Some(serde_json::json!({
+            "operator_id":"forged-admin", "reason":"anonymous intent", "victim_ip":"203.0.113.10",
+            "protocol":"udp", "dst_ports":[53], "action":"discard", "ttl_seconds":120
+        })))
+            .with_subscriber(dispatch.clone())
+            .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let mitigation_id =
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["mitigation_id"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let response = request(
+            &anonymous,
+            "POST",
+            &format!("/v1/mitigations/{mitigation_id}/withdraw"),
+            Some(&cookie),
+            Some(serde_json::json!({
+                "operator_id":"forged-admin", "reason":"anonymous withdrawal"
+            })),
+        )
+        .with_subscriber(dispatch.clone())
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let audit = repo
+            .list_audit(&prefixd::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let withdrawals: Vec<_> = audit
+            .iter()
+            .filter(|entry| entry.action == "withdraw")
+            .collect();
+        assert_eq!(withdrawals.len(), 1);
+        assert_eq!(withdrawals[0].actor_id.as_deref(), Some("anonymous"));
+        assert_eq!(
+            withdrawals[0].details["reason"],
+            "anonymous: anonymous withdrawal"
+        );
+        assert!(!output.text().contains(&operator.operator_id.to_string()));
+        assert!(!output.text().contains("forged-admin"));
+
+        let response = request(&anonymous, "POST", "/v1/auth/logout", Some(&cookie), None)
+            .with_subscriber(dispatch)
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let removal = response.headers()["set-cookie"].to_str().unwrap();
+        let cookie_name = cookie.split_once('=').unwrap().0;
+        assert!(
+            removal.starts_with(&format!("{cookie_name}=;")),
+            "{removal}"
+        );
+        assert!(
+            store.load(&id).await.unwrap().is_none(),
+            "logout must delete the shared record, not just expire a browser cookie"
+        );
+        assert_eq!(
+            request(&credentials, "GET", "/v1/auth/me", Some(&cookie), None)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(!output.text().contains(&operator.operator_id.to_string()));
+    }
+
+    #[tokio::test]
+    async fn anonymous_login_is_forbidden_before_validation_or_throttling() {
+        let repo = Arc::new(MockRepository::new());
+        let operator = operator(&repo, "disabled-login").await;
+        let store = MemoryStore::default();
+        let anonymous = router(AuthMode::None, repo.clone(), store.clone());
+        for password in ["", "wrong", PASSWORD, "wrong", "wrong", "wrong", "wrong"] {
+            let response = request(
+                &anonymous,
+                "POST",
+                "/v1/auth/login",
+                None,
+                Some(serde_json::json!({
+                    "username":operator.username,"password":password
+                })),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(!response.headers().contains_key("set-cookie"));
+        }
+        assert!(
+            repo.get_operator_by_id(operator.operator_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .last_login_at
+                .is_none()
+        );
+        let backend = AuthBackend::new(repo.clone(), AuthMode::None);
+        assert!(
+            backend
+                .get_user(&operator.operator_id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            backend
+                .authenticate(Credentials {
+                    username: operator.username.clone(),
+                    password: PASSWORD.into()
+                })
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // Disabled-mode attempts must not exhaust the same username's real login throttle.
+        let credentials = router(AuthMode::Credentials, repo, store);
+        let cookie = login(&credentials, &operator.username).await;
+        assert_eq!(
+            request(&credentials, "GET", "/v1/auth/me", Some(&cookie), None)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_and_bearer_hybrid_sessions_keep_named_identity_and_logout() {
+        for (mode, username) in [
+            (AuthMode::Credentials, "credentials-control"),
+            (AuthMode::Bearer, "bearer-session-control"),
+        ] {
+            let repo = Arc::new(MockRepository::new());
+            let operator = operator(&repo, username).await;
+            let store = MemoryStore::default();
+            let app = router(mode, repo, store.clone());
+            assert_eq!(
+                request(&app, "GET", "/v1/auth/me", None, None)
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+            let cookie = login(&app, username).await;
+            let id: Id = cookie.split_once('=').unwrap().1.parse().unwrap();
+            let response = request(&app, "GET", "/v1/auth/me", Some(&cookie), None).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap()["operator_id"],
+                operator.operator_id.to_string()
+            );
+            assert_eq!(
+                request(&app, "GET", "/v1/mitigations", Some(&cookie), None)
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            assert_eq!(
+                request(&app, "POST", "/v1/auth/logout", Some(&cookie), None)
+                    .await
+                    .status(),
+                StatusCode::OK
+            );
+            assert!(store.load(&id).await.unwrap().is_none());
+            assert_eq!(
+                request(&app, "GET", "/v1/auth/me", Some(&cookie), None)
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+    }
+
+    async fn websocket_status(
+        app: Router,
+        cookie: Option<&str>,
+        dispatch: tracing::Dispatch,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        // axum spawns connection tasks; attach the subscriber inside each request.
+        let app = app.layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                next.run(request).with_subscriber(dispatch.clone())
+            },
+        ));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            let cookie = cookie.map(|value| format!("Cookie: {value}\r\n")).unwrap_or_default();
+            stream.write_all(format!("GET /v1/ws/feed HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{cookie}\r\n").as_bytes()).await.unwrap();
+            let mut bytes = Vec::new();
+            while !bytes.ends_with(b"\r\n\r\n") {
+                let byte = stream.read_u8().await.unwrap();
+                bytes.push(byte);
+                assert!(bytes.len() < 16_384, "bounded handshake headers");
+            }
+            String::from_utf8(bytes).unwrap()
+        }).await;
+        server.abort();
+        let _ = server.await;
+        result.unwrap()
+    }
+
+    #[tokio::test]
+    async fn websocket_uses_anonymous_identity_for_a_retained_named_cookie() {
+        let repo = Arc::new(MockRepository::new());
+        let operator = operator(&repo, "websocket-control").await;
+        let store = MemoryStore::default();
+        let credentials = router(AuthMode::Credentials, repo.clone(), store.clone());
+        let cookie = login(&credentials, &operator.username).await;
+        let named_output = TraceOutput::default();
+        let named_dispatch = named_output.subscriber();
+        assert!(
+            websocket_status(credentials.clone(), None, named_dispatch.clone())
+                .await
+                .starts_with("HTTP/1.1 401")
+        );
+        assert!(
+            websocket_status(credentials, Some(&cookie), named_dispatch)
+                .await
+                .starts_with("HTTP/1.1 101")
+        );
+        assert!(
+            named_output.text().contains("websocket-control"),
+            "named WebSocket positive control"
+        );
+        let output = TraceOutput::default();
+        let dispatch = output.subscriber();
+        let anonymous = router(AuthMode::None, repo, store);
+        assert!(
+            websocket_status(anonymous.clone(), Some(&cookie), dispatch.clone())
+                .await
+                .starts_with("HTTP/1.1 101")
+        );
+        assert!(
+            websocket_status(anonymous, None, dispatch)
+                .await
+                .starts_with("HTTP/1.1 101")
+        );
+        let traces = output.text();
+        assert!(traces.contains("WebSocket connection established"));
+        assert!(traces.contains("\"username\":\"anonymous\""));
+        assert!(!traces.contains(&operator.username));
+        assert!(!traces.contains(&operator.operator_id.to_string()));
+    }
+
+    #[tokio::test]
+    async fn openapi_declares_disabled_login_forbidden() {
+        let app = router(
+            AuthMode::None,
+            Arc::new(MockRepository::new()),
+            MemoryStore::default(),
+        );
+        let response = request(&app, "GET", "/openapi.json", None, None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let spec: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(spec["paths"]["/v1/auth/login"]["post"]["responses"]["403"].is_object());
     }
 }
