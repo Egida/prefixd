@@ -539,6 +539,16 @@ correlation:
 | `source_id_prefix` | no | string | Prefix prepended to extracted `source_id` |
 | `transforms` | no | map | Per-field transforms applied post-extraction (see below) |
 
+Untransformed `bps` and `pps` JSON integers retain their exact signed 64-bit
+values, including both endpoints. Fractional values truncate toward zero.
+Floating-point values and transform results must be finite and strictly between
+`-2^63` and `2^63`; otherwise the event gets a per-item mapping error. The floating
+lower endpoint is rejected because the JSON parser can round an integer below
+`i64::MIN` to that same value. Use an untransformed integer for exact `i64::MIN`.
+Transforms use ordinary `f64` arithmetic and can round large integers; they do not
+preserve arbitrary integer precision. Missing, null and nonnumeric rate fields
+remain absent.
+
 **Field transforms.** Each entry in `transforms` maps a field name to a single transform. Only `bps`, `pps`, `confidence` (numeric) and `vector` (string) accept transforms; the daemon rejects the adapter at load time if a transform is attached to a different field or with the wrong shape.
 
 | `transforms.<field>.type` | Applies to | Other keys | Behavior |

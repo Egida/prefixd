@@ -6644,6 +6644,93 @@ async fn test_webhook_single_event_happy_path() {
 }
 
 #[tokio::test]
+async fn test_webhook_numeric_mapping_failure_has_no_mutations_and_allows_corrected_retry() {
+    use prefixd::correlation::WebhookTransform;
+
+    let repo = Arc::new(MockRepository::new());
+    let announcer = Arc::new(MockAnnouncer::new());
+    let mut settings = test_settings_with_correlation(true, 1, 0.5);
+    settings.mode = prefixd::config::OperationMode::Enforced;
+    let state = AppState::new(
+        settings,
+        test_inventory(),
+        test_playbooks(),
+        repo.clone(),
+        announcer.clone(),
+        ".".into(),
+    )
+    .unwrap();
+    let mut adapter = basic_webhook_adapter("numeric-retry");
+    adapter.transforms.insert(
+        "bps".into(),
+        WebhookTransform::UnitConversion {
+            multiplier: f64::MAX,
+        },
+    );
+    state.correlation_config.write().await.webhook_adapters = vec![adapter];
+    let app = create_test_router(state);
+    let rejected = r#"{
+        "id":"numeric-retry", "ip":"203.0.113.10", "vector":"udp_flood",
+        "bps":2, "pps":50000, "score":0.9
+    }"#;
+
+    let (status, result) = post_webhook(&app, "numeric-retry", rejected, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["processed"], 0);
+    assert_eq!(result["failed"], 1);
+    assert_eq!(result["results"][0]["status"], "error");
+    assert!(
+        result["results"][0]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("invalid value for field 'bps'")
+    );
+
+    let params = prefixd::db::ListParams {
+        limit: 10,
+        ..Default::default()
+    };
+    assert!(repo.list_events(&params).await.unwrap().is_empty());
+    assert!(repo.list_audit(&params).await.unwrap().is_empty());
+    assert!(
+        repo.list_signal_groups(&Default::default(), &params)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        repo.list_mitigations(
+            None,
+            None,
+            None,
+            None,
+            &prefixd::db::MitigationListParams {
+                limit: 10,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
+    assert_eq!(announcer.announced_count().await, 0);
+
+    let corrected = r#"{
+        "id":"numeric-retry", "ip":"203.0.113.10", "vector":"udp_flood",
+        "bps":0, "pps":50000, "score":0.9
+    }"#;
+    let (status, result) = post_webhook(&app, "numeric-retry", corrected, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(result["processed"], 1);
+    assert_eq!(result["failed"], 0);
+    let events = repo.list_events(&params).await.unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].bps, Some(0));
+    assert_eq!(events[0].pps, Some(50000));
+    assert_eq!(announcer.announced_count().await, 1);
+}
+
+#[tokio::test]
 async fn test_webhook_name_not_configured_returns_404() {
     let app = setup_app_with_webhooks(vec![basic_webhook_adapter("radware")]).await;
     let body = r#"{"ip":"203.0.113.5"}"#;

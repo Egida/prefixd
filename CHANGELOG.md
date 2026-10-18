@@ -148,6 +148,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve exact untransformed webhook `bps` and `pps` integers and reject
+  nonfinite or out-of-range floating-point results instead of rounding or
+  saturating them. Fractional rates still truncate toward zero; floating-point
+  endpoints are rejected because JSON parsing can lose the original range.
+
 - Reject malformed or empty supplied date filters on event, audit, mitigation and
   signal-group listings, and every invalid mitigation/signal-group status token.
   Return structured `400` errors before listing instead of silently dropping filters.
