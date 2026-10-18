@@ -205,7 +205,7 @@ Messages use snake_case `type` values:
 
 - `mitigation_created` / `mitigation_updated`: desired mitigation state changed
 - `mitigation_expired` / `mitigation_withdrawn`: terminal cleanup completed locally
-- `event_ingested`: event result
+- `event_ingested`: defined event-result shape; ingestion does not currently broadcast it
 - `resync_required`: the client fell behind and must refresh
 
 The feed is a notification channel, not a durable delivery log or enforcement
@@ -401,7 +401,7 @@ Real-time visibility into mitigation state:
 - **WebSocket connection** - `/v1/ws/feed`
 - **Live refresh** - WebSocket messages invalidate cached API state; periodic refresh remains
 - **Connection status** - Visual indicator in UI
-- **Automatic reconnection** - Exponential backoff on disconnect
+- **Automatic reconnection** - Bounded linear backoff with jitter on disconnect
 
 ---
 

@@ -1928,6 +1928,9 @@ Requires session authentication (send session cookie).
 
 **ResyncRequired:** Sent when server detects client may have missed messages. Client should refresh data.
 
+`event_ingested` is defined in the message schema but is not currently broadcast
+by event ingestion. Event lists retain their periodic API refresh.
+
 ---
 
 ## Audit Log
