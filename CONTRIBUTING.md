@@ -227,25 +227,26 @@ cargo tarpaulin --out Html
 
 ### Architecture Decision Records
 
-We document significant design decisions in [docs/adr/](docs/adr/). When making a change that affects the system's architecture (new dependency, new pattern, structural change), add an ADR following the existing format. See [ADR README](docs/adr/README.md) for the index and template.
+We document significant design decisions in [docs/adr/](docs/adr/). When making a change that affects the system's architecture (new dependency, new pattern, structural change), add an ADR following the existing format. See [ADR README](docs/adr/README.md) for the index and existing format.
 
 ---
 
 ## Release Process
 
-Releases are tagged from `main`:
+1. Prepare the release on `main`: update the package version in `Cargo.toml`
+   and `Cargo.lock`, and move the completed entries from `CHANGELOG.md` into
+   the dated release section. Review known limitations in the release notes.
+2. Verify all CI checks on the exact release commit, including both speaker
+   suites and both container builds. Tag that commit as `v<package-version>`
+   and push the tag.
+3. Verify the tag's CI run and versioned images for both `ghcr.io/lance0/prefixd`
+   and `ghcr.io/lance0/prefixd-dashboard`.
+4. Create and verify the GitHub Release separately, using the reviewed notes.
+   Attach any intended release assets explicitly.
 
-```bash
-# Update version in Cargo.toml
-# Update CHANGELOG.md
-# Commit and tag
-git tag v0.14.1
-git push origin v0.14.1
-```
-
-CI builds and publishes:
-- GitHub Release with binaries
-- Docker image to ghcr.io
+CI uploads the Linux daemon binary as an Actions artifact and generates an SBOM
+artifact for version tags. It publishes the controller and dashboard containers;
+it does not create a GitHub Release or attach release binaries.
 
 ---
 

@@ -43,9 +43,9 @@ export function UserMenu() {
     <>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm" className="gap-2">
+          <Button variant="ghost" size="sm" className="h-11 gap-2 sm:h-8" aria-label={`Operator menu for ${operator.username}`}>
             <User className="h-4 w-4" />
-            <span className="hidden sm:inline">{operator.username}</span>
+            <span className="hidden max-w-32 truncate sm:inline">{operator.username}</span>
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-56">

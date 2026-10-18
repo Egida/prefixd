@@ -1,106 +1,131 @@
 "use client"
 
+import { useEffect, useState } from "react"
 import Link from "next/link"
-import { useRouter } from "next/navigation"
 import { ArrowRight } from "lucide-react"
-import { StatusBadge } from "./status-badge"
 import { ActionBadge } from "./action-badge"
-import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
 import type { Mitigation } from "@/lib/api"
 
 interface ActiveMitigationsMiniProps {
   mitigations: Mitigation[]
   limit?: number
+  loading?: boolean
+  error?: boolean
+  hasMore?: boolean
+  onRetry?: () => void
 }
 
-function formatTimeRemaining(expiresAt: string): string {
-  const now = new Date()
-  const expires = new Date(expiresAt)
-  const diffMs = expires.getTime() - now.getTime()
-  
-  if (diffMs <= 0) return "expired"
-  
-  const mins = Math.floor(diffMs / 60000)
-  if (mins < 60) return `${mins}m`
-  
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ${mins % 60}m`
-  
-  const days = Math.floor(hours / 24)
-  return `${days}d ${hours % 24}h`
+export function formatTimeRemaining(expiresAt: string, now: number): string {
+  const diff = Date.parse(expiresAt) - now
+  if (!Number.isFinite(diff)) return "Unavailable"
+  if (diff <= 0) return "Expiry due"
+  const minutes = Math.floor(diff / 60_000)
+  if (minutes === 0) return "<1m"
+  if (minutes < 60) return `${minutes}m`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ${minutes % 60}m`
+  return `${Math.floor(hours / 24)}d ${hours % 24}h`
 }
 
-export function ActiveMitigationsMini({ mitigations, limit = 5 }: ActiveMitigationsMiniProps) {
-  const router = useRouter()
-  const active = mitigations
-    .filter((m) => m.status === "active" || m.status === "escalated")
-    .slice(0, limit)
+export function formatConfidence(value?: number): string {
+  return value !== undefined && Number.isFinite(value) && value >= 0 && value <= 1
+    ? `${Math.round(value * 100)}% confidence`
+    : "Confidence unavailable"
+}
+
+export function formatSourceCount(value?: number): string {
+  return value !== undefined && Number.isInteger(value) && value >= 0
+    ? `${value} ${value === 1 ? "source" : "sources"}`
+    : "Sources unavailable"
+}
+
+function expiryDeadline(value: string): string {
+  const date = new Date(value)
+  return Number.isFinite(date.getTime())
+    ? date.toLocaleString("en-GB", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: "UTC" }) + " UTC"
+    : "Deadline unavailable"
+}
+
+export function ActiveMitigationsMini({ mitigations, limit = 8, loading, error, hasMore, onRetry }: ActiveMitigationsMiniProps) {
+  const [now, setNow] = useState<number | null>(null)
+  useEffect(() => {
+    const update = () => setNow(Date.now())
+    update()
+    const interval = setInterval(update, 15_000)
+    return () => clearInterval(interval)
+  }, [])
+  const loaded = mitigations.filter(m => m.status === "active" || m.status === "escalated")
+  const active = loaded.slice(0, limit)
 
   return (
-    <div className="border border-border bg-card p-4 h-full flex flex-col">
-      <div className="flex items-center justify-between mb-3">
-        <h3 className="text-xs font-mono uppercase text-muted-foreground text-balance">
-          Active Mitigations
-        </h3>
-        <Link
-          href="/mitigations?status=active"
-          className="text-xs text-primary hover:underline flex items-center gap-1"
-        >
-          View all
-          <ArrowRight className="size-3" />
-        </Link>
+    <section aria-labelledby="active-mitigations-heading" className="overflow-hidden rounded-lg border bg-card">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-4">
+        <div>
+          <h2 id="active-mitigations-heading" className="font-semibold text-balance">Active mitigations</h2>
+          <p className="mt-1 text-[13px] text-muted-foreground text-pretty">Saved intent. Router installation is unobserved.</p>
+        </div>
+        <Link href="/mitigations?status=active" className="inline-flex items-center gap-1.5 rounded-sm text-[13px] font-medium text-primary hover:underline">View all<ArrowRight className="size-3.5" aria-hidden="true" /></Link>
       </div>
-      
-      {active.length === 0 ? (
-        <div className="flex-1 flex items-center justify-center text-muted-foreground text-xs">
-          No active mitigations
+
+      {error ? (
+        <div role="alert" className="space-y-3 p-6">
+          <p className="font-medium">Unable to load mitigations</p>
+          <p className="text-muted-foreground text-pretty">Active intent could not be refreshed. This does not mean there are no rules.</p>
+          {onRetry ? <Button variant="outline" size="sm" onClick={onRetry}>Retry mitigations</Button> : null}
+        </div>
+      ) : loading ? (
+        <div role="status" aria-label="Loading active mitigations" className="divide-y">
+          {[0, 1, 2].map(row => <div key={row} className="flex gap-6 p-5"><Skeleton className="h-10 w-1/3" /><Skeleton className="h-10 flex-1" /><Skeleton className="h-10 w-20" /></div>)}
+        </div>
+      ) : active.length === 0 ? (
+        <div className="space-y-2 p-6">
+          <p className="font-medium">No active mitigations</p>
+          <p className="text-muted-foreground text-pretty">New mitigation intent will appear here.</p>
+          <Link href="/events" className="inline-block rounded-sm text-primary hover:underline">Review incoming events</Link>
         </div>
       ) : (
-        <div className="space-y-0 flex-1">
-          {active.map((m, index) => (
-            <div
-              key={m.mitigation_id}
-              role="button"
-              tabIndex={0}
-              onClick={() => router.push(`/mitigations/${m.mitigation_id}`)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault()
-                  router.push(`/mitigations/${m.mitigation_id}`)
-                }
-              }}
-              className={cn(
-                "flex items-center justify-between py-2 hover:bg-secondary/50 px-2 -mx-2 rounded-sm transition-colors",
-                index !== active.length - 1 && "border-b border-border/50"
-              )}
-            >
-              <div className="flex items-center gap-3 min-w-0">
-                <StatusBadge status={m.status} size="sm" />
-                <div className="min-w-0">
-                  <Link
-                    href={`/ip-history?ip=${encodeURIComponent(m.victim_ip)}`}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                    }}
-                    className="font-mono text-xs text-primary hover:underline truncate block"
-                  >
-                    {m.victim_ip}
-                  </Link>
-                  <div className="text-[10px] text-muted-foreground">
-                    {m.vector.replace(/_/g, " ")}
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-center gap-2 flex-shrink-0">
-                <ActionBadge actionType={m.action_type} rateBps={m.rate_bps} size="sm" />
-                <span className="text-[10px] font-mono text-muted-foreground tabular-nums w-12 text-right">
-                  {formatTimeRemaining(m.expires_at)}
-                </span>
-              </div>
-            </div>
-          ))}
-        </div>
+        <>
+          <table className="w-full text-left text-[13px]">
+            <thead className="sr-only xl:not-sr-only">
+              <tr className="border-b bg-muted/40 text-xs text-muted-foreground">
+                <th scope="col" className="px-4 py-2.5 font-medium">Target</th>
+                <th scope="col" className="px-4 py-2.5 font-medium">Action</th>
+                <th scope="col" className="px-4 py-2.5 font-medium">Signal & reason</th>
+                <th scope="col" className="px-4 py-2.5 font-medium">Router installation</th>
+                <th scope="col" className="px-4 py-2.5 font-medium">Expires</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y">
+              {active.map(m => (
+                <tr key={m.mitigation_id} className="grid grid-cols-2 gap-y-3 py-4 hover:bg-muted/30 xl:table-row xl:py-0">
+                  <td className="col-span-2 px-4 align-top xl:w-1/5 xl:py-4">
+                    <Link href={`/mitigations/${m.mitigation_id}`} className="break-all rounded-sm font-mono font-medium text-primary hover:underline">{m.dst_prefix}</Link>
+                    <div className="mt-1 text-xs text-muted-foreground">{m.pop} · {m.status}</div>
+                  </td>
+                  <td className="px-4 align-top xl:py-4"><span className="mb-1 block text-xs text-muted-foreground xl:hidden">Action</span><ActionBadge actionType={m.action_type} rateBps={m.rate_bps} /></td>
+                  <td className="col-span-2 row-start-2 px-4 align-top xl:w-1/3 xl:py-4">
+                    <div className="font-medium">{m.vector === "unknown" ? "Unclassified signal" : m.vector.replace(/_/g, " ")}</div>
+                    <p className="mt-1 line-clamp-2 text-muted-foreground text-pretty">{m.reason.trim() || "Reason unavailable"}</p>
+                    <div className="mt-1 text-xs text-muted-foreground tabular-nums">{formatSourceCount(m.correlation?.source_count)} · {formatConfidence(m.correlation?.derived_confidence)}</div>
+                  </td>
+                  <td className="px-4 align-top xl:py-4"><span className="mb-1 block text-xs text-muted-foreground xl:hidden">Router installation</span><span className="text-muted-foreground">Unobserved</span></td>
+                  <td className="col-span-2 px-4 align-top xl:py-4">
+                    <span className="mb-1 block text-xs text-muted-foreground xl:hidden">Expires</span>
+                    <div className="font-mono font-medium">{now === null ? "Calculating…" : formatTimeRemaining(m.expires_at, now)}</div>
+                    <time dateTime={m.expires_at} className="mt-1 block whitespace-nowrap text-xs text-muted-foreground tabular-nums">{expiryDeadline(m.expires_at)}</time>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="flex flex-wrap justify-between gap-2 border-t px-4 py-3 text-xs text-muted-foreground">
+            <span className="tabular-nums">Showing {active.length} of {loaded.length} loaded{hasMore ? " · more available" : ""}</span>
+            <span>Expiry needs the running controller. Sessions do not confirm rule installation.</span>
+          </div>
+        </>
       )}
-    </div>
+    </section>
   )
 }

@@ -82,6 +82,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handwritten lint exemptions in those crates. Narrow ignored request-actor
   suppressions to their fields.
 
+- Put active mitigation intent, signal evidence, expiry and honest router-observation
+  limits first in the operator workspace. Refresh the light/dark theme, Geist
+  typography and navigation; preserve user zoom and remove decorative pulses,
+  hardcoded quota caps and sampled action totals presented as global counts.
+
+- Refresh the security support policy, authentication and audit guidance, and
+  release checklist to match the maintained release series and CI artifacts.
+
 - Refresh the dashboard toolchain to Bun 1.4.3, native Node.js 26.12.0 tests,
   React 19.3.1 and current Radix and test dependencies. Next.js remains at 16.4.2.
 - Enforce TypeScript errors in production dashboard builds and add a standalone
@@ -97,6 +105,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   binaries. Current stable tests and lints remain required.
 
 ### Fixed
+
+- Restore immediate dashboard retries after failed GET requests while continuing
+  to share requests that are still pending.
 
 - Reject non-finite correlation confidence thresholds and source/default weights
   on YAML loading and API edits, including numeric overflow.

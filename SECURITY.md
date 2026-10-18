@@ -2,11 +2,9 @@
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 0.10.x  | :white_check_mark: |
-| 0.9.x   | :white_check_mark: |
-| < 0.9   | :x:                |
+Security fixes target the latest released minor series. Upgrade older series
+to the [latest release](https://github.com/lance0/prefixd/releases/latest);
+older series do not receive backports.
 
 ## Reporting a Vulnerability
 
@@ -43,30 +41,44 @@ We consider security research conducted in accordance with this policy to be:
 
 When deploying prefixd:
 
-1. **Use strong API tokens** - Generate with `openssl rand -hex 32`
+1. **Configure authentication** - Use operator credentials, a strong bearer token
+   (for example, `openssl rand -hex 32`), or native client-certificate mTLS.
 2. **Enable TLS** - Never expose HTTP API without encryption
 3. **Network isolation** - Place prefixd on a management network
 4. **Least privilege** - Use operator roles appropriately (admin/operator/viewer)
 5. **Safelist infrastructure** - Add router loopbacks and critical IPs to safelist
-6. **Monitor audit logs** - Review `/var/log/prefixd/audit.jsonl` regularly
+6. **Review the audit trail** - Use the dashboard Audit Log or `GET /v1/audit`
+   with operator or administrator access. Production audit entries are stored
+   in PostgreSQL, not a JSONL file.
 7. **Keep updated** - Watch for security advisories
 
 ## Known Security Considerations
 
 ### BGP FlowSpec Risks
 
-FlowSpec rules can drop traffic. Guardrails are in place to prevent:
-- Overly broad prefixes (only /32 IPv4, /128 IPv6 allowed)
-- Infrastructure disruption (safelist protection)
-- Runaway rules (quotas, mandatory TTL)
+FlowSpec rules can drop traffic. The default guardrails restrict destinations
+to /32 IPv4 and /128 IPv6 hosts, require a TTL, check the safelist and limit rule
+counts and ports. Prefix bounds, TTL requirements and quotas are configurable;
+review the [running configuration](docs/reference/configuration.md) before
+enabling announcements.
+
+Expiry requires a running controller and reconciliation. The separate BGP
+speaker can retain advertisements after prefixd stops; a TTL is not a speaker
+lease. See [controller and speaker failures](docs/adr/003-fail-open-ttl.md).
 
 ### Authentication Modes
 
-| Mode | Security Level | Use Case |
-|------|---------------|----------|
-| `none` | ⚠️ Insecure | Development only |
-| `bearer` | ✅ Secure | Production API/CLI |
-| `mtls` | ✅ Most Secure | Zero-trust environments |
+| Mode | Behavior |
+|------|----------|
+| `none` | Bypasses authentication and role checks. Use only in an isolated development or test environment. |
+| `credentials` | Operator passwords and PostgreSQL-backed sessions with viewer, operator and administrator roles. |
+| `bearer` | A shared token grants operator-level API access. Password-authenticated sessions retain their own roles. |
+| `mtls` | Requires native TLS and verified client certificates; accepted clients receive administrator access. Forwarded certificate headers do not authenticate a client. |
+
+Use TLS for credentials, session cookies and bearer tokens. See the
+[authentication reference](docs/reference/configuration.md#authentication) and
+[security model](docs/explanation/architecture.md#security-model) for deployment
+details.
 
 ### Dependencies
 
