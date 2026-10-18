@@ -1,14 +1,16 @@
+import type { EventResponse } from "@/lib/api"
+
 export type WsMessageType =
-  | "MitigationCreated"
-  | "MitigationUpdated"
-  | "MitigationExpired"
-  | "MitigationWithdrawn"
-  | "EventIngested"
-  | "ResyncRequired"
+  | "mitigation_created"
+  | "mitigation_updated"
+  | "mitigation_expired"
+  | "mitigation_withdrawn"
+  | "event_ingested"
+  | "resync_required"
 
 export interface WsMessage {
   type: WsMessageType
-  // MitigationCreated/Updated
+  // mitigation_created / mitigation_updated
   mitigation?: {
     mitigation_id: string
     status: string
@@ -21,20 +23,10 @@ export interface WsMessage {
     expires_at: string
     scope_hash: string
   }
-  // MitigationExpired/Withdrawn
+  // mitigation_expired / mitigation_withdrawn
   mitigation_id?: string
-  // EventIngested
-  event?: {
-    event_id: string
-    external_event_id: string | null
-    victim_ip: string
-    vector: string
-    confidence: number | null
-    source: string
-    ingested_at: string
-  }
-  // ResyncRequired
-  reason?: string
+  // event_ingested
+  event?: EventResponse
 }
 
 export type ConnectionState = "connecting" | "connected" | "disconnected" | "error"

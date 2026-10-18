@@ -72,6 +72,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Restore dashboard live cache refresh and notification muting by matching the
+  server's WebSocket event names. Label ordinary updates and feed resynchronization
+  accurately.
+
 - Load saved standalone `correlation.yaml` at startup so correlation editor
   changes survive restart. Reject invalid or unreadable files instead of silently
   reverting to inline settings.
