@@ -477,7 +477,7 @@ const MAX_PASSWORD_LEN: usize = 256;
 fn validate_string_len(value: &str, field: &str, max: usize) -> Result<(), PrefixdError> {
     if value.len() > max {
         Err(PrefixdError::InvalidRequest(format!(
-            "{} exceeds maximum length of {} characters",
+            "{} exceeds maximum length of {} bytes",
             field, max
         )))
     } else {

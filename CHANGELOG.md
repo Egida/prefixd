@@ -152,6 +152,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Report string-length validation limits in bytes, matching the existing UTF-8
+  byte checks; document reason limits without changing accepted input lengths.
+
 - Admit new mitigations atomically against shared PostgreSQL customer, POP and
   global quotas. Competing controllers cannot consume the same last slot; quota
   rejection or a bounded database admission failure sends no announcement from that

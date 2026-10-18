@@ -427,6 +427,13 @@ through `POST /v1/events`, which applies playbooks.
 | `ttl_seconds` | integer | yes | Requested time-to-live; subject to configured minimum and maximum |
 | `expires_at_cap` | RFC 3339 timestamp | no | Initial creation's absolute expiry ceiling, for maintenance recreation |
 
+Reasons on manual creation, single/bulk withdrawal and safelist additions accept
+up to 1,024 UTF-8 bytes, including an empty string. Manual creation and withdrawal
+require a string `reason`; safelist additions also accept an omitted or `null`
+reason. Authorized requests with an overlong reason return `400`; a missing or
+non-string required reason returns `422`. Withdrawal records add the authenticated
+actor prefix after checking the submitted reason's byte length.
+
 Policing rates must round-trip exactly through the speaker's `f32` bytes/second
 encoding. Rates of 1, 7, 8 and 9 bits/second are supported, including fractional
 bytes/second. Zero, missing rates and values such as 16,777,217 bits/second or
