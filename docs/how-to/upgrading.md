@@ -206,6 +206,12 @@ ledger or an active-active controller protocol.
 
 ## Docker Compose Upgrade
 
+These commands update a deployment already using the profiles and named volumes
+below. An earlier stack with the `prefixd` service and `./configs` bind mount is
+outside this procedure: its configuration is not imported, and its container
+name conflicts with the new controller. Keep that deployment intact; do not run
+these commands against it.
+
 Select exactly one profile and its matching controller service:
 
 | Backend | Profile | Controller service | Main configuration |
