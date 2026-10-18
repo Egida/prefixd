@@ -95,6 +95,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Restore immediate dashboard retries after failed GET requests while continuing
+  to share requests that are still pending.
+
 - Reject non-finite correlation confidence thresholds and source/default weights
   on YAML loading and API edits, including numeric overflow.
   Preserve the active correlation configuration after a rejected reload or edit.
