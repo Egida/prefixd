@@ -234,6 +234,8 @@ async fn connect_owner_socket(path: &std::path::Path) -> std::io::Result<tokio::
     Ok(stream)
 }
 
+use super::RUSTBGPD_MAX_PORTS_PER_LIST as MAX_PORTS_PER_LIST;
+
 /// Components in strictly ascending type order; the daemon does not reorder them.
 fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)> {
     let prefix: ipnet::IpNet = nlri
@@ -262,7 +264,7 @@ fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)
         (5, ports),
         (6, crate::domain::canonical_ports(&nlri.src_ports)),
     ] {
-        if ports.len() > 8 {
+        if ports.len() > MAX_PORTS_PER_LIST {
             return Err(invalid("at most eight ports per list are supported"));
         }
         if !ports.is_empty() {
@@ -805,6 +807,32 @@ impl PeerObserver for RustBgpdAnnouncer {
 mod tests {
     use super::*;
     use crate::domain::ActionType;
+
+    #[test]
+    fn default_max_ports_guardrail_matches_the_encoder_cap() {
+        let guardrails: crate::config::GuardrailsConfig = crate::config::parse_yaml("{}").unwrap();
+        assert_eq!(guardrails.max_ports, MAX_PORTS_PER_LIST);
+        let at_cap = FlowSpecNlri {
+            dst_prefix: "192.0.2.1/32".into(),
+            protocol: Some(17),
+            dst_ports: (1..=8).collect(),
+            src_ports: (11..=18).collect(),
+            ..Default::default()
+        };
+        encode_match(&at_cap).unwrap();
+        for over in [
+            FlowSpecNlri {
+                dst_ports: (1..=9).collect(),
+                ..at_cap.clone()
+            },
+            FlowSpecNlri {
+                src_ports: (11..=19).collect(),
+                ..at_cap.clone()
+            },
+        ] {
+            assert!(encode_match(&over).is_err());
+        }
+    }
 
     #[tokio::test]
     async fn match_identity_uses_the_same_canonicalization_as_add_and_delete() {

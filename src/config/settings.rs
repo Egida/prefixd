@@ -281,16 +281,53 @@ pub struct GuardrailsConfig {
     /// Maximum prefix length for IPv6 (default: 128)
     #[serde(default)]
     pub dst_prefix_maxlen_v6: Option<u8>,
+    /// Cap on each port list (destination and source) separately. The default
+    /// equals the rustbgpd encoder's per-list cap.
     #[serde(default = "default_max_ports")]
     pub max_ports: usize,
+    /// Reserved (ADR 028): parsed so configurations load, has no effect.
     #[serde(default)]
     pub allow_src_prefix_match: bool,
+    /// Reserved (ADR 028): parsed so configurations load, has no effect.
     #[serde(default)]
     pub allow_tcp_flags_match: bool,
+    /// Admits rules with a non-first fragment match.
     #[serde(default)]
     pub allow_fragment_match: bool,
+    /// Admits rules with a packet-length match.
     #[serde(default)]
     pub allow_packet_length_match: bool,
+}
+
+impl GuardrailsConfig {
+    /// A rustbgpd `max_ports` above the encoder's per-list cap would save intent
+    /// the encoder never announces. GoBGP has no per-list cap.
+    pub fn validate_for_backend(&self, backend: BgpMode) -> Result<()> {
+        let cap = crate::bgp::RUSTBGPD_MAX_PORTS_PER_LIST;
+        anyhow::ensure!(
+            backend != BgpMode::Rustbgpd || self.max_ports <= cap,
+            "guardrails.max_ports is {} but the rustbgpd backend encodes at most {cap} ports per list; set guardrails.max_ports to {cap} or less",
+            self.max_ports
+        );
+        Ok(())
+    }
+
+    /// Reserved flags set to true; startup warns once for each.
+    pub fn reserved_flags_set(&self) -> Vec<&'static str> {
+        [
+            (
+                "guardrails.allow_src_prefix_match",
+                self.allow_src_prefix_match,
+            ),
+            (
+                "guardrails.allow_tcp_flags_match",
+                self.allow_tcp_flags_match,
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(key, set)| set.then_some(key))
+        .collect()
+    }
 }
 
 fn default_true() -> bool {
@@ -646,6 +683,9 @@ impl Settings {
         let deprecations = settings.deprecations(&content);
         settings.http.validate_auth_transport()?;
         settings.blackhole.validate()?;
+        settings
+            .guardrails
+            .validate_for_backend(settings.bgp.mode)?;
         let correlation_errors = settings.correlation.validate();
         if !correlation_errors.is_empty() {
             return Err(anyhow::anyhow!(
@@ -916,6 +956,72 @@ observability:
             assert!(!json.contains(leaf), "{key} must not round-trip: {json}");
         }
         assert!(load_yaml(MINIMAL_SETTINGS_YAML).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn rustbgpd_refuses_max_ports_above_the_encoder_cap_at_load() {
+        let shipped = include_str!("../../configs/prefixd.yaml");
+        assert_eq!(shipped.matches("max_ports: 8\n").count(), 1);
+        // The shipped rustbgpd config loads at the cap and is refused one above it.
+        load_yaml(shipped).unwrap();
+        let error = load_yaml(&shipped.replace("max_ports: 8\n", "max_ports: 9\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("guardrails.max_ports is 9")
+                && error.contains("encodes at most 8 ports per list"),
+            "{error}"
+        );
+        // GoBGP and the mock have no per-list cap.
+        let parse = |yaml: &str| crate::config::parse_yaml::<GuardrailsConfig>(yaml).unwrap();
+        for (backend, max_ports, accepted) in [
+            (BgpMode::Rustbgpd, 8, true),
+            (BgpMode::Rustbgpd, 9, false),
+            (BgpMode::Gobgp, 64, true),
+            (BgpMode::Sidecar, 64, true),
+            (BgpMode::Mock, 64, true),
+        ] {
+            let result = parse(&format!("max_ports: {max_ports}\n")).validate_for_backend(backend);
+            assert_eq!(result.is_ok(), accepted, "{backend:?} {max_ports}");
+        }
+    }
+
+    #[test]
+    fn reserved_guardrail_flags_are_reported_for_the_startup_warning() {
+        let parse = |yaml: &str| crate::config::parse_yaml::<GuardrailsConfig>(yaml).unwrap();
+        assert_eq!(
+            parse("allow_src_prefix_match: true\nallow_tcp_flags_match: true\n")
+                .reserved_flags_set(),
+            [
+                "guardrails.allow_src_prefix_match",
+                "guardrails.allow_tcp_flags_match"
+            ]
+        );
+        assert_eq!(
+            parse("allow_tcp_flags_match: true\n").reserved_flags_set(),
+            ["guardrails.allow_tcp_flags_match"]
+        );
+        // Controls: unset, false, and the enforced opt-ins never warn.
+        for yaml in [
+            "{}",
+            "allow_src_prefix_match: false\nallow_tcp_flags_match: false\n",
+            "allow_fragment_match: true\nallow_packet_length_match: true\n",
+        ] {
+            assert!(parse(yaml).reserved_flags_set().is_empty(), "{yaml}");
+        }
+        // Shipped configurations neither warn nor opt in to the enforced flags.
+        for shipped in [
+            include_str!("../../configs/prefixd.yaml"),
+            include_str!("../../configs/prefixd-gobgp.yaml"),
+            include_str!("testdata/v0.19.1-prefixd.yaml"),
+        ] {
+            let guardrails = crate::config::parse_yaml::<Settings>(shipped)
+                .unwrap()
+                .guardrails;
+            assert!(guardrails.reserved_flags_set().is_empty());
+            assert!(!guardrails.allow_fragment_match && !guardrails.allow_packet_length_match);
+            assert_eq!(guardrails.max_ports, 8);
+        }
     }
 
     #[test]
