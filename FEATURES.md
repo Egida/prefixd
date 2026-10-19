@@ -512,6 +512,7 @@ pending. See the [audit API](docs/reference/api.md#audit-log).
 | Endpoint | Access | Meaning |
 | --- | --- | --- |
 | `GET /v1/health` | Public | Lightweight liveness, package version and auth mode |
+| `GET /v1/ready` | Public | `200` only while this controller holds its POP's fence and is not draining; use for load balancers and detector routing |
 | `GET /v1/health/detail` | Mode-aware authentication | Controller uptime, database/status counts, selected backend/capabilities, peer observation and separate daemon metadata |
 
 Top-level uptime belongs to the controller. `speaker.daemon` separately reports
@@ -555,7 +556,9 @@ independent speaker may retain existing routes, but the controller does not
 continue safely without PostgreSQL.
 
 Bindings are startup consistency checks, not interprocess fencing or DNS-alias
-detection. Pending withdrawals retain their original speaker target.
+detection. Pending withdrawals retain their original speaker target. A separate
+PostgreSQL advisory-lock fence keeps a second controller for the same POP and
+target in standby when both share the database.
 
 ---
 

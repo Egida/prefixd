@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- A second controller for the same POP and speaker target that shares the
+  database now starts in standby instead of mutating the speaker. The
+  database connection must be direct or through a session-mode pooler:
+  PgBouncer transaction pooling breaks the session advisory lock. Point load
+  balancers and detector routing at `GET /v1/ready`, not `GET /v1/health`.
+  `--adopt-legacy-speaker` and `--retire-dry-run-intent` now refuse while a
+  controller for the POP holds the fence; stop it first. See
+  [controller fence and rolling deploys](docs/how-to/upgrading.md#controller-fence-and-rolling-deploys).
+
 ### Added
 
 - The rustbgpd adapter can inject, delete and read back unicast blackhole
@@ -25,6 +36,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   enforced modes. No API, playbook or detector path creates a blackhole yet,
   so the block changes no behavior; omitting it keeps every existing
   configuration valid. Older binaries ignore the block.
+
+- Fence duplicate controllers with a PostgreSQL session advisory lock (ADR
+  027). Each controller derives an owner from its POP and registered speaker
+  target and takes the lock on a dedicated connection before connecting to the
+  speaker. Without it the controller stays in standby: no scheduler, expiry,
+  reconciliation, announcement or withdrawal; `POST`, `PUT` and `DELETE`
+  requests on authenticated API routes return `503`; `GET /v1/health` stays
+  `ok`; `GET /v1/health/detail` reports `"status": "standby"`; and the new
+  `prefixd_controller_fence_active` gauge is `0`. Standby retries every 5
+  seconds. The holder checks its fence session every 2 seconds and, on a
+  failed check, stops starting speaker mutations at once, enters standby and
+  reacquires on a new connection. Rolling deploys wait in standby and take over
+  when the old process exits.
+
+- Add public `GET /v1/ready`: `200` with `{"status":"ready"}` while the
+  controller holds its fence, otherwise `503` with `{"status":"standby"}`,
+  or `{"status":"draining"}` from the moment a shutdown signal arrives. The
+  fence stays held through the drain. Set the load balancer's readiness
+  interval shorter than `shutdown.drain_timeout_seconds`.
+
+- Fence the `--adopt-legacy-speaker` and `--retire-dry-run-intent` one-shot
+  modes: each takes the controller's fence once, refuses while another process
+  holds it, and releases it on exit.
+
+- `scripts/prefixd-fastnetmon.sh` retries a ban `POST /v1/events` with the same
+  event ID on a connection error or `503`, up to `BAN_POST_ATTEMPTS` (default 3)
+  attempts `BAN_POST_DELAY_SECONDS` (default 1) apart. It never retries a `4xx`.
 
 ### Changed
 

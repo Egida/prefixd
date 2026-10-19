@@ -51,8 +51,9 @@ pub use signals::{
 
 mod health;
 pub use health::{
-    __path_health, __path_health_detail, ComponentHealth, DaemonHealthObservation, HealthResponse,
-    PublicHealthResponse, SpeakerHealth, health, health_detail,
+    __path_health, __path_health_detail, __path_ready, ComponentHealth, DaemonHealthObservation,
+    HealthResponse, PublicHealthResponse, ReadinessResponse, ReadinessStatus, SpeakerHealth,
+    health, health_detail, ready,
 };
 
 use axum::{
@@ -2248,6 +2249,19 @@ pub async fn ingest_events_batch(
             results,
         }),
     ))
+}
+
+/// A standby controller (ADR 027) refuses every state-changing API request with
+/// `503`; reads stay available. `api_routes` applies this to its routes.
+pub async fn require_active_controller(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if !request.method().is_safe() && !state.fence.is_active() {
+        return AppError(PrefixdError::Standby).into_response();
+    }
+    next.run(request).await
 }
 
 // Error handling

@@ -1523,6 +1523,28 @@ running controller's package version; `auth_mode` reflects its configured mode.
 | `version` | Controller (prefixd) version |
 | `auth_mode` | Authentication mode: `none`, `bearer`, `credentials`, `mtls` |
 
+### Readiness (Public)
+
+```http
+GET /v1/ready
+```
+
+Public readiness for load balancers and detector routing. No authentication is
+required, and it does not query the database or speaker. The response is
+`{"status": "<status>"}`; the first matching row applies:
+
+| Status | HTTP | Meaning |
+|--------|------|---------|
+| `standby` | 503 | Another controller holds this POP's fence ([ADR 027](../adr/027-blackhole-mitigations.md)) |
+| `draining` | 503 | A shutdown signal arrived; the controller still holds the fence until it exits |
+| `ready` | 200 | This controller holds the fence and accepts mutations |
+
+Standby and draining controllers refuse detector events, so route detector
+events and operator writes only to a ready controller. Draining begins before
+any other shutdown step, so set the load balancer's readiness check interval
+shorter than `shutdown.drain_timeout_seconds`. `GET /v1/health` stays liveness:
+it returns `200` for standby and draining controllers too.
+
 ### Health Detail (Authenticated)
 
 ```http
@@ -1576,6 +1598,7 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
 |--------|---------|
 | `healthy` | Database and supported observations succeeded; observed daemon is ready |
 | `degraded` | Database or supported observation failed, or observed daemon is not ready |
+| `standby` | Another controller holds this POP's fence; this one mutates nothing (overrides the other values) |
 
 `speaker` is additive metadata: backend identity plus observation availability.
 Older daemons may omit it. Capabilities do not report recent read success or
@@ -2192,6 +2215,9 @@ prefixd_mitigations_active{customer="acme",pop="iad1"} 5
 prefixd_http_requests_total{method="POST",route="/v1/events",status_class="2xx"} 1543
 ```
 
+`prefixd_controller_fence_active` is `1` while this controller holds its POP's
+fence and `0` in standby. Alert when no controller for a POP reports `1`.
+
 See [FEATURES.md](../../FEATURES.md#prometheus-metrics) for full metric list.
 
 ---
@@ -2255,7 +2281,31 @@ Some handlers intentionally return status-only errors (no JSON body), especially
 | 422 | Guardrail rejection |
 | 429 | Too many requests (includes `retry_after_seconds`) |
 | 500 | Internal server error |
-| 503 | Service unavailable |
+| 503 | Service unavailable, including a standby controller |
+
+### Standby controller
+
+A controller that does not hold its POP's fence
+([ADR 027](../adr/027-blackhole-mitigations.md)) is in standby. Every `POST`,
+`PUT` and `DELETE` on the authenticated API routes, including event and signal
+ingestion, mitigation creation, withdrawal and acknowledgement, safelist,
+configuration and operator changes, returns `503` before authentication or
+validation:
+
+```json
+{
+  "error": "controller is in standby: another controller holds this POP's fence; retry against the active controller"
+}
+```
+
+`GET` requests, login, logout, `GET /v1/health` and `/metrics` keep working,
+`GET /v1/ready` returns `503` and `GET /v1/health/detail` reports
+`"status": "standby"`. A withdrawal admitted
+just before the controller lost its fence can also return `503`; its persisted
+withdrawal intent stays pending for the active controller. A creation admitted
+then reports an unconfirmed announcement. Retry against the active controller.
+See
+[controller fence and rolling deploys](../how-to/upgrading.md#controller-fence-and-rolling-deploys).
 
 ---
 
