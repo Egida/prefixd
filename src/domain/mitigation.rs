@@ -98,15 +98,77 @@ impl std::str::FromStr for ActionType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Unknown keys fail closed: ignoring a match key would widen the rule (ADR 028).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MatchCriteria {
     pub dst_prefix: String,
     pub protocol: Option<u8>,
     pub dst_ports: Vec<u16>,
+    /// UDP source ports (RFC 8955 type 6), an equality set stored sorted and
+    /// deduplicated. Empty means absent.
+    #[serde(
+        default,
+        with = "canonical_src_ports",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub src_ports: Vec<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment: Option<FragmentMatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub packet_length: Option<PacketLengthRange>,
+}
+
+/// Sorted, deduplicated ports: the one form source ports are stored, compared and hashed in.
+pub fn canonical_ports(ports: &[u16]) -> Vec<u16> {
+    let mut ports = ports.to_vec();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+/// Serde adapter: source ports are canonical whenever they are read or written.
+pub(super) mod canonical_src_ports {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(ports: &[u16], serializer: S) -> Result<S::Ok, S::Error> {
+        super::canonical_ports(ports).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u16>, D::Error> {
+        Ok(super::canonical_ports(&Vec::deserialize(deserializer)?))
+    }
+}
+
+/// Fragment match (RFC 8955 type 12). Only non-first fragments (IsF) are matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FragmentMatch {
+    NonFirst,
+}
+
+impl FragmentMatch {
+    /// The RFC 8955 bitmask, encoded with the match bit set. Never the IPv6-reserved 0x01.
+    pub fn bitmask(self) -> u8 {
+        match self {
+            Self::NonFirst => 0x02,
+        }
+    }
+}
+
+/// One inclusive total-IP-length range (RFC 8955 type 10); both bounds are required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PacketLengthRange {
+    pub min: u16,
+    pub max: u16,
 }
 
 impl MatchCriteria {
     pub fn compute_scope_hash(&self) -> String {
+        if let Some(hash) = super::FlowSpecNlri::from(self).extended_identity() {
+            return hash;
+        }
         let mut hasher = Sha256::new();
         hasher.update(self.dst_prefix.as_bytes());
         if let Some(proto) = self.protocol {
