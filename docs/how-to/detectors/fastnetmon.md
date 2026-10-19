@@ -190,7 +190,18 @@ accepted rather than allowing uncapped blackholes.
 
 ## Vector Detection
 
-On ban, the script infers the attack vector from the attack details FastNetMon writes to stdin:
+On ban, the script first reads FastNetMon's own `Attack protocol:` line, the
+protocol with the most packets toward the victim:
+
+| `Attack protocol:` | prefixd Vector |
+|--------------------|----------------|
+| `udp`              | `udp_flood` (or `udp_amplification`, below) |
+| `icmp`             | `icmp_flood`   |
+| `tcp`              | `syn_flood` with a `syn` token, else `ack_flood` with an `ack` token, else `unknown` |
+
+Background SYN counters or TCP ACK samples in the dump therefore cannot turn a
+UDP flood into a TCP rule. Only when the line is missing or says `unknown` does
+the script infer the vector from tokens in the attack details:
 
 | Detail token                       | prefixd Vector |
 |------------------------------------|----------------|
@@ -205,6 +216,46 @@ Rules that keep the mapping honest:
 - Lines reporting a **zero metric** (`outgoing udp traffic: 0 mbps` or `incoming tcp syn pps: 0 packets per second`) are ignored — FastNetMon lists every protocol it tracks, and idle counters must not select a vector.
 - TCP flag tokens are matched before `udp` for mixed floods.
 - Protocol tokens are bounded by non-alphanumeric characters, including underscores: `tcp_ack` matches ACK, while `packets` and `Attack_type: udp_flood` do not.
+
+### UDP amplification
+
+When the vector is `udp_flood`, the script also reads the sampled packets
+FastNetMon writes under `Attack traffic dump`, one line per packet:
+
+```text
+2026-10-19 14:02:00.000000 198.51.100.10:123 > 203.0.113.10:40000 protocol: udp frag: 0  packets: 1 size: 486 bytes ttl: 54 sample ratio: 1024
+```
+
+It sums sampled UDP packets per source port, weighted by `packets`, and keeps
+each port whose share of sampled UDP packets is at least
+`PREFIXD_SRC_PORT_MIN_SHARE` (default `0.2`), ranked by share, at most 64.
+If any port qualifies, the event is sent as `udp_amplification` with those
+ports in `top_src_ports`; prefixd then keeps only ports in its
+[reflector-port library](../../reference/configuration.md#amplification).
+Otherwise the event stays `udp_flood`, as it does for a dump with no UDP
+lines, lines that do not parse, or an invalid `PREFIXD_SRC_PORT_MIN_SHARE`.
+TCP and ICMP attacks are never sent as amplification. IPv6 dumps work the
+same way; the port follows the last colon of the source address.
+
+The dump holds at most `ban_details_records_count` packets (20 in FastNetMon's
+shipped `fastnetmon.conf`, 50 in its code default), so shares are coarse
+samples, not a ranked attack summary. Without a `udp_amplification` playbook,
+or when no port is in the library, prefixd handles the event as `udp_flood`.
+The default library includes 53: a source-port rule containing it also drops
+the victim's replies from external DNS resolvers while it is live.
+
+```bash
+# Optional: the share of sampled UDP packets a source port needs (above 0, at most 1)
+PREFIXD_SRC_PORT_MIN_SHARE="0.2"
+```
+
+### Native JSON endpoint
+
+`POST /v1/signals/fastnetmon` takes FastNetMon's JSON callback directly. When
+the attack is UDP-dominant and the payload carries `packet_dump_detailed`,
+prefixd applies the same rule with `amplification.min_src_port_share` and keeps
+only library ports. See the
+[API reference](../../reference/api.md#fastnetmon-webhook).
 
 ## Testing
 
@@ -246,16 +297,11 @@ Add `set -x` at the top of the script for verbose output.
 
 ## Advanced: Custom Vector Mapping
 
-Edit the script's vector detection section to add custom mappings:
-
-```bash
-# Add DNS amplification detection
-if [[ "$RAW_LOWER" == *"port 53"* ]] && [[ "$RAW_LOWER" == *"udp"* ]]; then
-    VECTOR="dns_amplification"
-fi
-```
-
-Note: Custom vectors require matching playbook rules in prefixd.
+Edit the script's vector detection section to change the mapping. The vector
+must be one prefixd accepts (`udp_flood`, `udp_amplification`, `syn_flood`,
+`ack_flood`, `icmp_flood` or `unknown`) and needs a matching playbook. Use
+`udp_amplification` with `top_src_ports` for reflection attacks rather than a
+per-protocol name; the script already does this from the packet dump.
 
 ## Security Considerations
 
