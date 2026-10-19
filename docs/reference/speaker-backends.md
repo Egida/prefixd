@@ -21,8 +21,26 @@ failure fails the pass and increments the run error counter; it never becomes
 an empty inventory. Unsupported peer observation skips peer metric updates;
 a failed observation also retains the last successful metric values.
 
+`blackhole()` optionally exposes `BlackholeSpeaker` for unicast RTBH host routes
+([ADR 027](../adr/027-blackhole-mitigations.md)): upsert, idempotent delete and
+complete read-back of retained local intent for both families. Only rustbgpd
+provides it. It injects with unleased `AddPath` (ORIGIN IGP, empty AS_PATH,
+`path_id` 0, BLACKHOLE `65535:666` plus the route's communities), deletes with
+`DeletePath`, where `NOT_FOUND` means absent, and reads
+`ListReceivedRoutes(neighbor 0.0.0.0)` for each unicast family to the last page.
+The read returns prefixd-shaped blackholes separately from unrecognized local
+routes. An unrecognized route is well formed but not prefixd-shaped, for
+example another tool's injection, a nonzero `path_id`, a missing BLACKHOLE or
+extra path attributes. It carries its prefix and a reason, so callers can report
+it without touching it. `ABORTED` mid-walk, a changed page version, any other
+error or a malformed row fails the whole read. A malformed row has a non-local
+peer, an unparseable prefix, next hop or large community, host bits or a
+family mismatch. GoBGP returns `None`, which is unsupported rather than empty.
+Nothing in the controller calls the capability yet.
+
 Health detail adds `speaker.backend` and availability booleans under
-`speaker.capabilities`: `rule_reader`, `peer_observer` and `daemon_health`. The legacy `gobgp`
+`speaker.capabilities`: `rule_reader`, `peer_observer`, `daemon_health`,
+`blackhole` and `blackhole_lease`. `blackhole_lease` is false for every backend. The legacy `gobgp`
 component reports `unsupported` without an error when peer observation is absent,
 `error` when it fails, and `connected` when it succeeds (even with zero peers).
 `bgp_sessions` remains the same peer-name/state map. Missing optional observation

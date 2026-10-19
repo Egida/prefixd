@@ -49,6 +49,129 @@ async fn live_rustbgpd_controller_roundtrip() {
 
 #[tokio::test]
 #[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
+async fn live_rustbgpd_blackhole_inject_read_delete_and_restart_loss() {
+    use prefixd::bgp::BlackholeRoute;
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    let capabilities = (&speaker as &dyn FlowSpecAnnouncer).capabilities();
+    assert!(capabilities.blackhole && !capabilities.blackhole_lease);
+    let blackhole = speaker.blackhole().unwrap();
+    let empty = prefixd::bgp::BlackholeInventory::default();
+    assert_eq!(blackhole.list_blackholes().await.unwrap(), empty);
+    let route = |prefix: &str, next_hop: &str, extra: u32| {
+        BlackholeRoute::new(
+            prefix.parse().unwrap(),
+            next_hop.parse().unwrap(),
+            vec![(64512 << 16) | extra],
+            vec![[64512, 666, extra]],
+        )
+        .unwrap()
+    };
+    let routes = [
+        route("192.0.2.240/32", "192.0.2.66", 1),
+        route("2001:db8::240/128", "2001:db8::66", 1),
+    ];
+    for expected in &routes {
+        blackhole.announce_blackhole(expected).await.unwrap();
+        // Retained local intent: the exact prefix, next hop and communities.
+        assert!(
+            blackhole
+                .list_blackholes()
+                .await
+                .unwrap()
+                .routes
+                .contains(expected)
+        );
+        let next_hop = if expected.prefix().addr().is_ipv4() {
+            "192.0.2.67"
+        } else {
+            "2001:db8::67"
+        };
+        let replaced = route(&expected.prefix().to_string(), next_hop, 2);
+        blackhole.announce_blackhole(&replaced).await.unwrap();
+        let listed = blackhole.list_blackholes().await.unwrap();
+        assert_eq!(
+            listed
+                .routes
+                .iter()
+                .filter(|r| r.prefix() == expected.prefix())
+                .collect::<Vec<_>>(),
+            [&replaced]
+        );
+        blackhole
+            .withdraw_blackhole(&expected.prefix())
+            .await
+            .unwrap();
+        assert_eq!(blackhole.list_blackholes().await.unwrap(), empty);
+        // The daemon reports NOT_FOUND for the absent path.
+        blackhole
+            .withdraw_blackhole(&expected.prefix())
+            .await
+            .unwrap();
+    }
+
+    // More routes than one page, so the walk follows the daemon's own tokens.
+    let many: Vec<_> = (0..130)
+        .map(|host| route(&format!("198.51.100.{host}/32"), "192.0.2.66", 1))
+        .collect();
+    for route in &many {
+        blackhole.announce_blackhole(route).await.unwrap();
+    }
+    let listed = blackhole.list_blackholes().await.unwrap();
+    assert_eq!(listed.routes.len(), many.len());
+    assert!(many.iter().all(|route| listed.routes.contains(route)));
+    for route in &many {
+        blackhole.withdraw_blackhole(&route.prefix()).await.unwrap();
+    }
+
+    // Injected paths are process-local: a restart loses them, and the read says so.
+    for expected in &routes {
+        blackhole.announce_blackhole(expected).await.unwrap();
+    }
+    // Another tool's local injections are reported as unrecognized, never an error.
+    for (prefix, path_id, communities) in [
+        ("192.0.2.250", 0, vec![]),
+        ("192.0.2.240", 7, vec![prefixd::bgp::BLACKHOLE_COMMUNITY]),
+    ] {
+        fixture
+            .add_raw_path(prefixd::bgp::rustbgpd_pb::AddPathRequest {
+                prefix: prefix.into(),
+                prefix_length: 32,
+                next_hop: "192.0.2.66".into(),
+                communities,
+                path_id,
+                ..Default::default()
+            })
+            .await;
+    }
+    let listed = blackhole.list_blackholes().await.unwrap();
+    assert_eq!(listed.routes.len(), 2);
+    assert!(routes.iter().all(|route| listed.routes.contains(route)));
+    let mut foreign: Vec<_> = listed
+        .unrecognized
+        .iter()
+        .map(|row| (row.prefix.to_string(), row.reason))
+        .collect();
+    foreign.sort();
+    assert_eq!(
+        foreign,
+        [
+            ("192.0.2.240/32".to_string(), "nonzero path_id"),
+            (
+                "192.0.2.250/32".to_string(),
+                "missing BLACKHOLE or non-canonical communities"
+            ),
+        ]
+    );
+    fixture.container.stop_with_timeout(Some(0)).await.unwrap();
+    assert!(blackhole.list_blackholes().await.is_err());
+    fixture.container.start().await.unwrap();
+    fixture.ready().await;
+    assert_eq!(blackhole.list_blackholes().await.unwrap(), empty);
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
 async fn faithful_policing_and_historical_action_withdrawal() {
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;
