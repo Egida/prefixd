@@ -87,7 +87,7 @@ jobs:
           persist-credentials: false
 
       - name: Install protobuf compiler
-        run: apt-get update && apt-get install -y --no-install-recommends protobuf-compiler
+        run: apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libprotobuf-dev
 
       - name: Build release binaries
         run: cargo build --locked --release --bins
@@ -103,7 +103,7 @@ jobs:
           mkdir -p staging dist
           cp target/release/prefixd target/release/prefixdctl LICENSE staging/
           test "$(staging/prefixdctl --version)" = "prefixdctl $VERSION"
-          staging/prefixd --help > /dev/null
+          test "$(staging/prefixd --version)" = "prefixd $VERSION"
           # Version-less name, so releases/latest/download/ URLs stay stable.
           tar -C staging -czf dist/prefixd-linux-amd64.tar.gz prefixd prefixdctl LICENSE
           cp prefixd-sbom.cdx.json dist/
