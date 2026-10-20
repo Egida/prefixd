@@ -25,13 +25,16 @@ pub enum MitigationRoute {
 impl MitigationRoute {
     pub fn new(action_type: ActionType, criteria: &MatchCriteria, params: &ActionParams) -> Self {
         match action_type {
-            ActionType::Police | ActionType::Discard => Self::FlowSpec(FlowSpecRule::new(
-                FlowSpecNlri::from(criteria),
-                FlowSpecAction {
-                    action_type,
-                    rate_bps: params.rate_bps,
-                },
-            )),
+            ActionType::Police | ActionType::Discard => Self::FlowSpec(
+                FlowSpecRule::new(
+                    FlowSpecNlri::from(criteria),
+                    FlowSpecAction {
+                        action_type,
+                        rate_bps: params.rate_bps,
+                    },
+                )
+                .with_owner(params.injection_owner.clone()),
+            ),
             ActionType::Blackhole => Self::Blackhole {
                 prefix: criteria.dst_prefix.clone(),
             },
@@ -219,6 +222,15 @@ impl WithdrawalRequest {
             ));
         }
         Ok(route)
+    }
+
+    /// The persisted blackhole route, with its recorded owner; `None` for
+    /// FlowSpec or unreadable intent.
+    pub fn blackhole_rule(&self) -> Option<super::BlackholeRule> {
+        match self.persisted_route() {
+            Ok(PersistedRoute::Blackhole(rule)) => Some(rule),
+            _ => None,
+        }
     }
 
     /// The ownership key this pending deletion blocks, for either kind.
@@ -438,7 +450,7 @@ async fn finish_withdrawal_request(
                 announcer.withdraw(rule).await?
             }
             PersistedRoute::Blackhole(rule) => {
-                rule.require_unleased()?;
+                // The recorded owner, never the current configuration or an override.
                 announcer
                     .blackhole()
                     .ok_or_else(|| {
@@ -447,7 +459,7 @@ async fn finish_withdrawal_request(
                                 .into(),
                         )
                     })?
-                    .withdraw_blackhole(&rule.prefix)
+                    .withdraw_blackhole(&rule.prefix, &rule.owner)
                     .await?
             }
         }

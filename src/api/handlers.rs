@@ -609,6 +609,28 @@ async fn persist_new_mitigation(
     mitigation: &mut Mitigation,
     actor: &CreationActor,
 ) -> crate::error::Result<Option<AnnouncementOutcome>> {
+    // Leased FlowSpec (ADR 027): new enforced rules are recorded under the
+    // controller's owner and added only through AddLeasedFlowSpec.
+    if !state.is_dry_run()
+        && mitigation.action_type != ActionType::Blackhole
+        && state
+            .settings
+            .bgp
+            .rustbgpd
+            .as_ref()
+            .is_some_and(|config| config.leased_flowspec)
+    {
+        mitigation.action_params.injection_owner = state
+            .lease
+            .as_ref()
+            .ok_or_else(|| {
+                PrefixdError::Config(
+                    "bgp.rustbgpd.leased_flowspec needs the controller's injection lease".into(),
+                )
+            })?
+            .owner()
+            .into();
+    }
     // Fail closed before persistence: only a FlowSpec rule can be announced here,
     // and only with components the selected speaker encodes, in dry-run too.
     let rule = mitigation_rule(mitigation)?;
@@ -649,10 +671,41 @@ async fn persist_new_mitigation(
             "mitigation expired during persistence; announcement skipped");
         return Ok(Some(AnnouncementOutcome::Unconfirmed));
     }
-    if let Err(error) = state.announcer.announce(&rule).await {
-        tracing::warn!(mitigation_id = %mitigation.mitigation_id, error = %error,
-            "mitigation intent retained after unconfirmed BGP announcement");
-        return Ok(Some(AnnouncementOutcome::Unconfirmed));
+    match crate::domain::announce_flowspec(state.announcer.as_ref(), &rule, state.lease.as_deref())
+        .await
+    {
+        Ok(()) => {}
+        // Another owner, or none, holds the key and the daemon changed nothing.
+        // As for blackholes (ADR 027): retire the new row locally with an audit
+        // entry and no delete, since a delete under this row's owner would be
+        // refused for as long as the other rule exists.
+        Err(PrefixdError::InjectionOwnerMismatch(reason)) => {
+            tracing::warn!(mitigation_id = %mitigation.mitigation_id, reason,
+                "untracked local rule at the FlowSpec key; retiring the new row");
+            let binding = state.verified_speaker_binding()?;
+            let request = crate::domain::request_withdrawal(
+                state.repo.as_ref(),
+                mitigation,
+                false,
+                "system",
+                "admission",
+                crate::guardrails::UNTRACKED_AT_ADMISSION.into(),
+                false,
+                binding,
+            )
+            .await?;
+            crate::domain::complete_local_withdrawal(state.repo.as_ref(), &request, binding)
+                .await?;
+            return Err(PrefixdError::Conflict(format!(
+                "untracked local FlowSpec rule for {}; nothing was added",
+                rule.nlri.dst_prefix
+            )));
+        }
+        Err(error) => {
+            tracing::warn!(mitigation_id = %mitigation.mitigation_id, error = %error,
+                "mitigation intent retained after unconfirmed BGP announcement");
+            return Ok(Some(AnnouncementOutcome::Unconfirmed));
+        }
     }
     crate::observability::metrics::ANNOUNCEMENTS_TOTAL
         .with_label_values(&["announced"])
@@ -1865,7 +1918,7 @@ pub async fn get_mitigation(
         (status = 202, description = "Intent created; announcement unconfirmed for this request", body = MitigationResponse),
         (status = 400, description = "Invalid input, including an unsupported action/rate, protocol/address-family mismatch, a match component the selected speaker cannot encode, or a blackhole whose confirm_victim_ip differs from victim_ip or that carries match fields"),
         (status = 403, description = "A blackhole requires the Admin role; bearer tokens map to Operator"),
-        (status = 409, description = "Conflicting owner, pending withdrawal, or an untracked local blackhole route at the prefix"),
+        (status = 409, description = "Conflicting owner, pending withdrawal, an untracked local blackhole route at the prefix, or a FlowSpec match held at the speaker by another injection owner or by none"),
         (status = 422, description = "Guardrail rejection, including ADR 028 match invariants, the fragment and packet-length opt-ins, max_ports per port list, disabled blackholes and blackhole victim, TTL and quota checks"),
     )
 )]
@@ -2094,6 +2147,7 @@ async fn admit_detector_blackhole(
         &CreationActor::Detector(event.source.clone()),
         state.announcer.as_ref(),
         binding,
+        state.lease.as_deref(),
     )
     .await
     .inspect_err(|error| {
@@ -2180,6 +2234,7 @@ async fn create_blackhole(
         &CreationActor::Operator(operator_id),
         state.announcer.as_ref(),
         binding,
+        state.lease.as_deref(),
     )
     .await
     {
@@ -3555,6 +3610,275 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK, "{withdrawn}");
             assert!(speaker.routes().await.is_empty());
+        }
+
+        /// With the lease, a detector ban adds under the controller's owner and
+        /// authenticated health reports the lease instead of `detector_unleased`.
+        #[tokio::test]
+        async fn enforced_detector_blackhole_uses_the_lease_and_health_reports_it() {
+            use crate::bgp::InjectionLeases;
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let owner = "prefixd.test1.0123456789abcdef";
+            // The startup probe confirms the capability.
+            speaker.live_lease(owner).await.unwrap();
+            let mut state =
+                detector_state(OperationMode::Enforced, repo.clone(), speaker.clone()).await;
+            Arc::get_mut(&mut state).unwrap().settings.blackhole.leased = true;
+            let lease = Arc::new(crate::domain::LeaseKeeper::new(owner.into(), 60));
+            let state = state.with_lease(lease.clone()).unwrap();
+            let app = crate::api::create_test_router(state);
+            let (status, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(status, StatusCode::OK, "{health}");
+            assert_eq!(health["speaker"]["detector_unleased"], false);
+            assert_eq!(health["speaker"]["capabilities"]["blackhole_lease"], true);
+            assert_eq!(health["speaker"]["lease"]["state"], "none");
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("fastnetmon", "203.0.113.10"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(speaker.adds.load(SeqCst), 0);
+            assert_eq!(speaker.leased_adds.load(SeqCst), 1);
+            assert_eq!(speaker.routes().await[0].owner(), owner);
+            lease.renew_once(speaker.as_ref()).await;
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            let reported = &health["speaker"]["lease"];
+            assert_eq!(reported["state"], "live", "{health}");
+            assert_eq!(reported["owner"], owner);
+            assert_eq!(reported["lease_seconds"], 60);
+            assert_eq!(reported["last_renewal_result"], "success");
+            assert!(reported["generation"]["sequence"].is_u64());
+        }
+
+        /// With leased FlowSpec, a detector rule is recorded under the
+        /// controller's owner and added only through `AddLeasedFlowSpec`; a
+        /// failed leased add stays unconfirmed and never becomes `AddFlowSpec`.
+        #[tokio::test]
+        async fn leased_flowspec_admission_records_the_owner_and_never_falls_back() {
+            use crate::bgp::FlowSpecReader;
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let owner = "prefixd.test1.0123456789abcdef";
+            let mut state =
+                detector_state(OperationMode::Enforced, repo.clone(), speaker.clone()).await;
+            Arc::get_mut(&mut state).unwrap().settings.bgp.rustbgpd =
+                Some(crate::config::RustBgpdConfig {
+                    leased_flowspec: true,
+                    ..Default::default()
+                });
+            *state.playbooks.write().await = crate::config::parse_yaml(
+                "playbooks:\n  - name: drop\n    match: {vector: udp_flood}\n    steps:\n      - {action: discard, ttl_seconds: 600}\n",
+            )
+            .unwrap();
+            let lease = Arc::new(crate::domain::LeaseKeeper::new(owner.into(), 60));
+            let state = state.with_lease(lease.clone()).unwrap();
+            let app = crate::api::create_test_router(state);
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("fastnetmon", "203.0.113.10"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1);
+            assert_eq!(speaker.flowspec_adds.load(SeqCst), 0);
+            let id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+            let stored = repo.get_mitigation(id).await.unwrap().unwrap();
+            assert_eq!(stored.action_params.injection_owner, owner);
+            assert_eq!(speaker.inner.list_active().await.unwrap()[0].owner, owner);
+            assert!(lease.generation().is_some());
+
+            speaker.fail_adds.store(true, SeqCst);
+            let (status, body) = send(
+                &app,
+                "/v1/events",
+                None,
+                fastnetmon_ban("fastnetmon", "203.0.113.11"),
+            )
+            .await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(body["announcement_outcome"], "unconfirmed", "{body}");
+            assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 2);
+            assert_eq!(
+                speaker.flowspec_adds.load(SeqCst),
+                0,
+                "no AddFlowSpec fallback"
+            );
+            assert_eq!(speaker.inner.list_active().await.unwrap().len(), 1);
+        }
+
+        /// The discard playbook for leased FlowSpec admission tests.
+        const DISCARD_PLAYBOOK: &str = "playbooks:\n  - name: drop\n    match: {vector: udp_flood}\n    steps:\n      - {action: discard, ttl_seconds: 600}\n";
+
+        /// An enforced detector state with `leased_flowspec` set as given and,
+        /// when set, the controller's lease.
+        async fn flowspec_state(
+            repo: Arc<MockRepository>,
+            speaker: Arc<FaultyBlackholes>,
+            leased: Option<Arc<crate::domain::LeaseKeeper>>,
+        ) -> Arc<AppState> {
+            let mut state = detector_state(OperationMode::Enforced, repo, speaker).await;
+            Arc::get_mut(&mut state).unwrap().settings.bgp.rustbgpd =
+                Some(crate::config::RustBgpdConfig {
+                    leased_flowspec: leased.is_some(),
+                    ..Default::default()
+                });
+            *state.playbooks.write().await = crate::config::parse_yaml(DISCARD_PLAYBOOK).unwrap();
+            match leased {
+                Some(lease) => state.with_lease(lease).unwrap(),
+                None => state,
+            }
+        }
+
+        /// Turning `leased_flowspec` on changes no existing rule: the same event
+        /// extends the unleased row with the same identity and stored bytes,
+        /// sends no add of either kind, reconciles without an ownership error,
+        /// and deletes with no owner.
+        #[tokio::test]
+        async fn enabling_leased_flowspec_keeps_existing_rules_unleased_and_identical() {
+            use crate::bgp::FlowSpecReader;
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let repo = Arc::new(MockRepository::new());
+            let speaker = Arc::new(FaultyBlackholes::default());
+            let app = crate::api::create_test_router(
+                flowspec_state(repo.clone(), speaker.clone(), None).await,
+            );
+            let ban = fastnetmon_ban("fastnetmon", "203.0.113.10");
+            let (status, body) = send(&app, "/v1/events", None, ban.clone()).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            let id: uuid::Uuid = body["mitigation_id"].as_str().unwrap().parse().unwrap();
+            let before = repo.get_mitigation(id).await.unwrap().unwrap();
+            assert_eq!(speaker.flowspec_adds.load(SeqCst), 1);
+
+            let lease = Arc::new(crate::domain::LeaseKeeper::new(
+                "prefixd.test1.0123456789abcdef".into(),
+                60,
+            ));
+            let state = flowspec_state(repo.clone(), speaker.clone(), Some(lease.clone())).await;
+            let app = crate::api::create_test_router(state.clone());
+            let mut again = ban;
+            again["event_id"] = uuid::Uuid::new_v4().to_string().into();
+            let (status, body) = send(&app, "/v1/events", None, again).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(body["status"], "extended", "{body}");
+            assert_eq!(body["mitigation_id"], id.to_string());
+            let after = repo.get_mitigation(id).await.unwrap().unwrap();
+            assert_eq!(after.scope_hash, before.scope_hash);
+            assert_eq!(
+                serde_json::to_string(&after.action_params).unwrap(),
+                serde_json::to_string(&before.action_params).unwrap()
+            );
+            assert!(after.action_params.injection_owner.is_empty());
+            assert_eq!(
+                crate::domain::mitigation_rule(&after).unwrap().nlri_hash(),
+                crate::domain::mitigation_rule(&before).unwrap().nlri_hash()
+            );
+
+            let reconciler =
+                crate::scheduler::ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
+                    .with_lease(lease.clone());
+            lease.request_readd();
+            reconciler.reconcile().await.unwrap();
+            assert_eq!(speaker.flowspec_adds.load(SeqCst), 1, "no conversion");
+            assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 0);
+            let rules = speaker.inner.list_active().await.unwrap();
+            assert_eq!(rules.len(), 1);
+            assert!(rules[0].owner.is_empty());
+
+            let request = crate::domain::request_withdrawal(
+                repo.as_ref(),
+                &after,
+                false,
+                "operator",
+                "alice",
+                "attack over".into(),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            crate::domain::execute_withdrawal(
+                repo.as_ref(),
+                speaker.as_ref(),
+                false,
+                &request,
+                None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(*speaker.flowspec_delete_owners.lock().unwrap(), [""]);
+            assert!(speaker.inner.list_active().await.unwrap().is_empty());
+        }
+
+        /// A leased add refused because no owner holds the key changes nothing
+        /// at the speaker: the new row is retired locally with an audit entry,
+        /// the event gets 409 as for blackholes, the unowned rule is never
+        /// deleted, and no withdrawal is left pending under the lease.
+        #[tokio::test]
+        async fn leased_flowspec_ownership_refusal_retires_the_row_and_touches_nothing() {
+            use crate::bgp::FlowSpecReader;
+            let _metrics = METRICS_TEST_LOCK.lock().await;
+            let speaker = Arc::new(FaultyBlackholes::default());
+            // An unowned rule at the key that no row of this ledger holds.
+            let elsewhere = Arc::new(MockRepository::new());
+            let app = crate::api::create_test_router(
+                flowspec_state(elsewhere, speaker.clone(), None).await,
+            );
+            let ban = fastnetmon_ban("fastnetmon", "203.0.113.10");
+            let (status, _) = send(&app, "/v1/events", None, ban.clone()).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            let unowned = speaker.inner.list_active().await.unwrap();
+
+            let repo = Arc::new(MockRepository::new());
+            let lease = Arc::new(crate::domain::LeaseKeeper::new(
+                "prefixd.test1.0123456789abcdef".into(),
+                60,
+            ));
+            let app = crate::api::create_test_router(
+                flowspec_state(repo.clone(), speaker.clone(), Some(lease)).await,
+            );
+            let mut again = ban;
+            again["event_id"] = uuid::Uuid::new_v4().to_string().into();
+            let (status, body) = send(&app, "/v1/events", None, again).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{body}");
+            assert_eq!(speaker.leased_flowspec_adds.load(SeqCst), 1);
+            assert_eq!(
+                speaker.flowspec_adds.load(SeqCst),
+                1,
+                "no AddFlowSpec fallback"
+            );
+            assert!(speaker.flowspec_delete_owners.lock().unwrap().is_empty());
+            let rules = speaker.inner.list_active().await.unwrap();
+            assert_eq!(rules.len(), 1);
+            assert_eq!(rules[0].nlri_hash(), unowned[0].nlri_hash());
+            assert!(rules[0].owner.is_empty(), "the unowned rule is untouched");
+            assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+            let rows = repo
+                .list_mitigations(
+                    None,
+                    None,
+                    None,
+                    None,
+                    &crate::db::MitigationListParams {
+                        limit: 10,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].status, crate::domain::MitigationStatus::Withdrawn);
+            assert_eq!(
+                rows[0].action_params.injection_owner,
+                "prefixd.test1.0123456789abcdef"
+            );
         }
 
         /// The enforced gate on playbook save and reload: refused without the lease or

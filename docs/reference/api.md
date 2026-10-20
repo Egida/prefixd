@@ -267,7 +267,7 @@ add reports `"announcement_outcome": "unconfirmed"` as above.
 |--------|--------|
 | 400 | Invalid request body |
 | 401 | Authentication required |
-| 409 | Duplicate event, or in enforced mode the rule is owned by a dry-run mitigation (when every rule is refused before admission, the event is not stored); for a blackhole, a pending withdrawal or an untracked local route at the prefix |
+| 409 | Duplicate event, or in enforced mode the rule is owned by a dry-run mitigation (when every rule is refused before admission, the event is not stored); for a blackhole, a pending withdrawal or an untracked local route at the prefix; for a FlowSpec rule, another injection owner, or none, holding its match at the speaker |
 | 422 | Missing required field, including `protocol` for `"discard"` or `"police"`; guardrail rejection (safelist, quotas, new mitigation rate, prefix length, blackhole source allowlist and victim checks, etc.) |
 | 429 | Rate limited |
 
@@ -659,7 +659,7 @@ TTL while the controller is stopped.
 | 400 | Invalid request (bad IP, invalid protocol or protocol/address-family mismatch, missing/zero/inexact police rate, discard with a rate, a match component the speaker cannot encode, blackhole confirmation mismatch or match fields, etc.) |
 | 401 | Authentication required |
 | 403 | A blackhole was requested without the Admin role, including every bearer token |
-| 409 | Scope already has an active canonical owner or pending withdrawal, or an untracked local route holds a blackhole's prefix |
+| 409 | Scope already has an active canonical owner or pending withdrawal, or an untracked local route holds a blackhole's prefix, or another injection owner, or none, holds a FlowSpec rule's match |
 | 422 | Guardrail rejection (safelist, quotas, new mitigation rate, prefix length, amplification match invariants and opt-ins, blackhole disabled, victim, TTL and quota checks, etc.) |
 
 Canonical ownership ignores equivalent IPv6 spelling and duplicate destination
@@ -704,9 +704,12 @@ than FlowSpec:
 
 Dry-run saves and audits the blackhole and sends nothing. Enforced mode saves
 it, rechecks the safelist and adds the route; the same `201`/`202`
-`announcement_outcome` rules apply as above. A manual blackhole is unleased: it
-stays on the speaker if prefixd stops, until prefixd returns and expires it or
-an Admin deletes it on the speaker. The response carries the saved route:
+`announcement_outcome` rules apply as above. Without `blackhole.leased`, a
+manual blackhole is unleased: it stays on the speaker if prefixd stops, until
+prefixd returns and expires it or an Admin deletes it on the speaker. With
+[leased blackholes](configuration.md#leased-blackholes) the speaker removes it
+within one lease, and a route held by another injection owner, or by none,
+returns `409` with nothing added. The response carries the saved route:
 
 ```json
 {
@@ -1874,6 +1877,14 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
       }
     },
     "detector_unleased": false,
+    "lease": {
+      "owner": "prefixd.iad1.3f9c2a7b1e04d5c6",
+      "lease_seconds": 60,
+      "state": "live",
+      "generation": {"incarnation": 1311768467294899695, "sequence": 4},
+      "last_renewal_at": "2026-10-18T12:00:00Z",
+      "last_renewal_result": "success"
+    },
     "daemon": {
       "status": "observed",
       "version": "<rustbgpd-version>",
@@ -1903,7 +1914,14 @@ absent. No API path creates these components yet. `detector_unleased` is true
 when enforced detector blackholes run without the injection lease
 (`blackhole.enabled`, a nonempty `blackhole.detector_sources` and
 `blackhole_lease` false): if prefixd stops while the speaker runs, they stay
-announced until prefixd returns or an operator withdraws them. Health performs no rule inventory probe.
+announced until prefixd returns or an operator withdraws them. `lease` is
+present only with `blackhole.leased`: `state` is `none` (no generation held
+yet), `live`, `renewal_failing` (the last renewal failed but the lease may
+still be live), `expired` (the speaker refused the generation, or no
+renewal succeeded for a whole lease) or `not_renewing` (dry-run, which never
+renews). `generation` is held in memory and
+changes after a speaker restart. `last_renewal_result` is `success`,
+`not_live` or `error`. Health performs no rule inventory probe.
 
 Top-level `version` and `uptime_seconds` describe prefixd. `speaker.daemon`
 independently reports authenticated speaker process metadata: `observed`, `error`
@@ -2541,6 +2559,15 @@ run without the rustbgpd injection lease, matching health detail's
 `speaker.detector_unleased`. The shipped
 [availability alerts](../how-to/grafana.md#availability-alerts) use these
 gauges.
+
+With [leased blackholes](configuration.md#leased-blackholes),
+`prefixd_injection_lease_renewals_total{result}` counts renewals by `success`,
+`not_live` (the speaker refused the generation, which triggers a full
+re-add) and `error`. `prefixd_injection_lease_state{state}` is `1` for the
+current state (`none`, `live`, `renewal_failing`, `expired` or
+`not_renewing`) and `0` for
+the others, matching health detail's `speaker.lease.state` after each
+renewal. Both series exist with zero values in every deployment.
 
 Series labelled `action_type` (`prefixd_mitigations_active`,
 `prefixd_mitigations_created_total`, `prefixd_mitigations_expired_total` and

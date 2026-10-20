@@ -11,9 +11,9 @@ use crate::config::{
 };
 use crate::db::RepositoryTrait;
 use crate::domain::{
-    ActionType, AttackVector, BlackholeAnnouncement, BlackholeRule, Mitigation, MitigationIntent,
-    MitigationRoute, VerifiedSpeakerBinding, announce_blackhole, find_mitigation_owner,
-    refuse_untracked_route,
+    ActionType, AttackVector, BlackholeAnnouncement, BlackholeRule, LeaseKeeper, Mitigation,
+    MitigationIntent, MitigationRoute, VerifiedSpeakerBinding, announce_blackhole,
+    complete_local_withdrawal, find_mitigation_owner, refuse_untracked_route, request_withdrawal,
 };
 use crate::error::{GuardrailError, PrefixdError, Result};
 use crate::observability::CreationActor;
@@ -51,6 +51,208 @@ pub async fn check_blackhole_startup(
         return Err(PrefixdError::Config(format!(
             "blackhole.leased requires the rustbgpd injection lease, which the {} speaker does not provide",
             speaker.backend()
+        )));
+    }
+    Ok(())
+}
+
+/// Owners recorded on this POP's live blackhole rows and pending blackhole
+/// withdrawals, by identity: the ledger's leased intent.
+async fn ledger_owners(repo: &dyn RepositoryTrait, pop: &str) -> Result<Vec<(String, String)>> {
+    let mut owners = Vec::new();
+    for mitigation in repo.active_mitigations_for_pop(pop).await? {
+        // A row without a frozen route has no recorded owner; reconciliation reports it.
+        if mitigation.action_type == ActionType::Blackhole
+            && let Ok(rule) = crate::domain::blackhole_rule(&mitigation)
+        {
+            owners.push((rule.identity(), rule.owner));
+        }
+    }
+    for request in repo.pending_withdrawals(Some(pop)).await? {
+        if let Some(rule) = request.blackhole_rule() {
+            owners.push((rule.identity(), rule.owner));
+        }
+    }
+    Ok(owners)
+}
+
+/// A pending withdrawal whose recorded route cannot be read might hold leased
+/// intent: refuse rather than validate the lease settings without it.
+fn readable(request: &crate::domain::WithdrawalRequest) -> Result<()> {
+    request.ownership_key().map(drop).map_err(|error| {
+        PrefixdError::Config(format!(
+            "pending withdrawal {} (mitigation {}) at POP {} has an unreadable recorded rule ({error}), \
+             so its injection owner is unknown; repair or complete it before changing lease settings",
+            request.operation_id, request.mitigation_id, request.pop
+        ))
+    })
+}
+
+/// rustbgpd's cap on keys one injection owner may hold, unicast and FlowSpec
+/// together (rustbgpd ADR-0141 §7). A leased add past it is refused.
+pub const MAX_KEYS_PER_OWNER: u32 = 16_384;
+
+/// Whether `route` exactly matches the frozen route, owner included, of a
+/// terminal, enforced-origin blackhole row of `pop`: a route prefixd left
+/// behind, which reconciliation's orphan cleanup deletes. Same match as
+/// `ReconciliationLoop::withdraw_orphan`, over the newest 100 rows per victim.
+async fn is_terminal_leftover(
+    repo: &dyn RepositoryTrait,
+    pop: &str,
+    route: &crate::bgp::BlackholeRoute,
+) -> Result<bool> {
+    Ok(repo
+        .list_mitigations_by_ip(&route.prefix().addr().to_string(), 100)
+        .await?
+        .iter()
+        .any(|row| {
+            row.action_type == ActionType::Blackhole
+                && matches!(
+                    row.status,
+                    crate::domain::MitigationStatus::Withdrawn
+                        | crate::domain::MitigationStatus::Expired
+                )
+                && !row.is_dry_run_origin()
+                && row.pop == pop
+                && crate::domain::blackhole_rule(row)
+                    .is_ok_and(|rule| rule.route().is_ok_and(|frozen| frozen == *route))
+        }))
+}
+
+/// FlowSpec counterpart of `ledger_owners`: (identity, recorded owner).
+async fn flowspec_ledger_owners(
+    repo: &dyn RepositoryTrait,
+    pop: &str,
+) -> Result<Vec<(String, String)>> {
+    let mut owners = Vec::new();
+    for mitigation in repo.active_mitigations_for_pop(pop).await? {
+        if let MitigationRoute::FlowSpec(rule) = MitigationRoute::of(&mitigation) {
+            owners.push((rule.nlri_hash(), rule.owner));
+        }
+    }
+    for request in repo.pending_withdrawals(Some(pop)).await? {
+        if let Ok(rule) = request.flowspec_rule() {
+            owners.push((rule.nlri_hash(), rule.owner));
+        }
+    }
+    Ok(owners)
+}
+
+/// Lease refusals at startup (ADR 027, "Owner and lease"). Leased intent that
+/// is live or awaiting withdrawal needs its lease setting (`blackhole.leased`
+/// or `bgp.rustbgpd.leased_flowspec`), or nothing renews it. Leased FlowSpec
+/// needs the speaker's lease. With a lease on, the speaker must not hold live
+/// routes or rules under this controller's owner that the ledger neither
+/// desires nor is withdrawing: that is a second controller with the same POP
+/// against this speaker.
+pub async fn check_lease_startup(
+    settings: &Settings,
+    speaker: &dyn FlowSpecAnnouncer,
+    repo: &dyn RepositoryTrait,
+    owner: &str,
+) -> Result<()> {
+    let (config, pop) = (&settings.blackhole, settings.pop.as_str());
+    let leased_flowspec = settings
+        .bgp
+        .rustbgpd
+        .as_ref()
+        .is_some_and(|rustbgpd| rustbgpd.leased_flowspec);
+    // Every leased key counts against one owner's cap, so the quotas of the
+    // leased kinds must fit under it.
+    let blackholes_leased = config.enabled && config.leased;
+    let keys = u32::from(leased_flowspec) * settings.quotas.max_active_per_pop
+        + u32::from(blackholes_leased) * config.max_active_per_pop;
+    if keys > MAX_KEYS_PER_OWNER {
+        return Err(PrefixdError::Config(format!(
+            "leased intent at POP {pop} can reach {keys} keys (quotas.max_active_per_pop for leased \
+             FlowSpec plus blackhole.max_active_per_pop for leased blackholes), above rustbgpd's \
+             {MAX_KEYS_PER_OWNER} keys per injection owner; lower the quotas"
+        )));
+    }
+    // Where leased intent can exist, an unreadable pending withdrawal fails
+    // closed: its owner might make the settings below unsafe to change.
+    if speaker.injection_leases().is_some() || blackholes_leased || leased_flowspec {
+        for request in repo.pending_withdrawals(Some(pop)).await? {
+            readable(&request)?;
+        }
+    }
+    let ledger = ledger_owners(repo, pop).await?;
+    let leased = ledger.iter().filter(|(_, owner)| !owner.is_empty()).count();
+    if leased > 0 && !(config.enabled && config.leased) {
+        return Err(PrefixdError::Config(format!(
+            "{leased} leased blackhole(s) at POP {pop} are active or awaiting withdrawal; \
+             keep blackhole.enabled and blackhole.leased until they are withdrawn or expire"
+        )));
+    }
+    let flowspec_ledger = flowspec_ledger_owners(repo, pop).await?;
+    let leased_rules = flowspec_ledger
+        .iter()
+        .filter(|(_, owner)| !owner.is_empty())
+        .count();
+    if leased_rules > 0 && !leased_flowspec {
+        return Err(PrefixdError::Config(format!(
+            "{leased_rules} leased FlowSpec rule(s) at POP {pop} are active or awaiting withdrawal; \
+             keep bgp.rustbgpd.leased_flowspec until they are withdrawn or expire"
+        )));
+    }
+    let lease = speaker.capabilities().blackhole_lease;
+    if leased_flowspec && !lease {
+        return Err(PrefixdError::Config(format!(
+            "bgp.rustbgpd.leased_flowspec requires the rustbgpd injection lease (0.79.0 or later), \
+             which the {} speaker does not provide",
+            speaker.backend()
+        )));
+    }
+    if leased_flowspec && let Some(reader) = speaker.reader() {
+        // A failed read refuses startup; it is never an empty speaker.
+        let unexplained: Vec<_> = reader
+            .list_active()
+            .await?
+            .into_iter()
+            .filter(|rule| {
+                rule.owner == owner
+                    && !flowspec_ledger.iter().any(|(identity, recorded)| {
+                        recorded == owner && *identity == rule.nlri_hash()
+                    })
+            })
+            .map(|rule| rule.nlri.dst_prefix)
+            .collect();
+        if !unexplained.is_empty() {
+            return Err(PrefixdError::Config(format!(
+                "the speaker holds FlowSpec rules under injection owner {owner} that this \
+                 controller's ledger neither desires nor is withdrawing (for {}); another \
+                 controller with POP {pop} may be using this speaker. Stop it, or let its lease expire",
+                unexplained.join(", ")
+            )));
+        }
+    }
+    if !(config.enabled && config.leased && lease) {
+        return Ok(());
+    }
+    let Some(blackholes) = speaker.blackhole() else {
+        return Ok(());
+    };
+    // A failed read refuses startup; it is never an empty speaker.
+    let mut unexplained = Vec::new();
+    for route in blackholes.list_blackholes().await?.routes {
+        if route.owner() != owner
+            || ledger.iter().any(|(identity, recorded)| {
+                recorded == owner
+                    && *identity == crate::domain::blackhole_identity(&route.prefix().to_string())
+            })
+            // Our own leftover of a terminal row: reconciliation deletes it.
+            || is_terminal_leftover(repo, pop, &route).await?
+        {
+            continue;
+        }
+        unexplained.push(route.prefix().to_string());
+    }
+    if !unexplained.is_empty() {
+        return Err(PrefixdError::Config(format!(
+            "the speaker holds routes under injection owner {owner} that this controller's ledger \
+             neither desires nor is withdrawing ({}); another controller with POP {pop} may be \
+             using this speaker. Stop it, or let its lease expire",
+            unexplained.join(", ")
         )));
     }
     Ok(())
@@ -223,6 +425,7 @@ pub async fn admit_blackhole(
     actor: &CreationActor,
     announcer: &dyn FlowSpecAnnouncer,
     binding: Option<&VerifiedSpeakerBinding>,
+    lease: Option<&LeaseKeeper>,
 ) -> Result<BlackholeAdmission> {
     let config = &settings.blackhole;
     if !config.enabled {
@@ -260,7 +463,7 @@ pub async fn admit_blackhole(
             "blackhole route already has an active owner".into(),
         ));
     }
-    intent.action_params.blackhole = Some(BlackholeRule::from_config(config, prefix)?);
+    let mut rule = BlackholeRule::from_config(config, prefix)?;
     let enforced = settings.mode == OperationMode::Enforced;
     if enforced {
         let speaker = announcer.blackhole().ok_or_else(|| {
@@ -269,8 +472,19 @@ pub async fn admit_blackhole(
                 announcer.backend()
             ))
         })?;
-        refuse_untracked_route(speaker, prefix).await?;
+        if config.leased {
+            // The daemon checks ownership atomically in the add, so no pre-read.
+            rule.owner = lease
+                .ok_or_else(|| {
+                    PrefixdError::Config("blackhole.leased needs the controller's lease".into())
+                })?
+                .owner()
+                .into();
+        } else {
+            refuse_untracked_route(speaker, prefix).await?;
+        }
     }
+    intent.action_params.blackhole = Some(rule);
     let mut mitigation = Mitigation::from_intent(intent, victim, vector);
     mitigation.signal_group_id = signal_group_id;
     mitigation.activate();
@@ -284,7 +498,7 @@ pub async fn admit_blackhole(
         });
     }
     Ok(
-        match announce_blackhole(repo, announcer, &mitigation, binding).await {
+        match announce_blackhole(repo, announcer, &mitigation, binding, lease).await {
             Ok(BlackholeAnnouncement::Announced) => BlackholeAdmission {
                 mitigation,
                 unconfirmed: false,
@@ -293,6 +507,27 @@ pub async fn admit_blackhole(
                 mitigation: *mitigation,
                 unconfirmed: true,
             },
+            // Another owner, or none, holds the key: nothing was added. Retire the
+            // row locally with an audit entry and no delete; never retry unleased.
+            Err(PrefixdError::InjectionOwnerMismatch(reason)) => {
+                tracing::warn!(mitigation_id = %mitigation.mitigation_id, reason,
+                    "untracked local route at the blackhole prefix; retiring the new row");
+                let request = request_withdrawal(
+                    repo,
+                    &mitigation,
+                    false,
+                    "system",
+                    "admission",
+                    UNTRACKED_AT_ADMISSION.into(),
+                    false,
+                    binding,
+                )
+                .await?;
+                complete_local_withdrawal(repo, &request, binding).await?;
+                return Err(PrefixdError::Conflict(format!(
+                    "untracked local route for {prefix}; nothing was added"
+                )));
+            }
             Err(error) => {
                 tracing::warn!(mitigation_id = %mitigation.mitigation_id, error = %error,
                     "blackhole intent retained after unconfirmed announcement");
@@ -304,6 +539,9 @@ pub async fn admit_blackhole(
         },
     )
 }
+
+/// Audit reason for a new row retired because the speaker refused its add.
+pub const UNTRACKED_AT_ADMISSION: &str = "untracked local route at admission";
 
 /// Extends a blackhole to at most `now + max_ttl_seconds`, whatever TTL the
 /// extending event asks for.
@@ -328,7 +566,7 @@ pub fn extend_blackhole(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bgp::FaultyBlackholes;
+    use crate::bgp::{BlackholeSpeaker, FaultyBlackholes, InjectionLeases};
     use crate::config::{Customer, PolicyProfile};
     use crate::db::MockRepository;
     use crate::domain::{ActionParams, MatchCriteria, MitigationStatus};
@@ -394,6 +632,7 @@ mod tests {
             None,
             &actor(),
             &speaker,
+            None,
             None,
         )
         .await
@@ -490,6 +729,7 @@ mod tests {
             None,
             &actor(),
             speaker,
+            None,
             None,
         )
         .await
@@ -1063,11 +1303,464 @@ mod tests {
         assert_eq!(speaker.adds.load(SeqCst), 1);
         mitigation.action_params.blackhole.as_mut().unwrap().owner =
             "prefixd.pop-a.0123456789abcdef".into();
-        let error = announce_blackhole(&repo, &speaker, &mitigation, None)
+        let error = announce_blackhole(&repo, &speaker, &mitigation, None, None)
             .await
             .unwrap_err()
             .to_string();
         assert!(error.contains("leased"), "{error}");
         assert_eq!(speaker.adds.load(SeqCst), 1);
+        assert_eq!(speaker.leased_adds.load(SeqCst), 0);
+    }
+
+    const OWNER: &str = "prefixd.pop-a.0123456789abcdef";
+
+    async fn admit_leased(
+        repo: &MockRepository,
+        speaker: &FaultyBlackholes,
+        lease: Option<&LeaseKeeper>,
+        prefix: &str,
+    ) -> Result<BlackholeAdmission> {
+        let mut settings = enforced();
+        settings.blackhole.leased = true;
+        admit_blackhole(
+            repo,
+            &settings,
+            &inventory(&["203.0.113.0/24", "2001:db8::/48"]),
+            intent(prefix),
+            AttackVector::Unknown,
+            None,
+            &actor(),
+            speaker,
+            None,
+            lease,
+        )
+        .await
+    }
+
+    /// Leased admission snapshots the owner, adds only through `AddLeasedPath`
+    /// and adopts the returned generation; a failed leased add stays
+    /// unconfirmed and is never retried through `AddPath`.
+    #[tokio::test]
+    async fn leased_admission_records_the_owner_and_never_falls_back() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        let lease = LeaseKeeper::new(OWNER.into(), 60);
+        let admission = admit_leased(&repo, &speaker, Some(&lease), "203.0.113.10/32")
+            .await
+            .unwrap();
+        assert!(!admission.unconfirmed);
+        let rule = crate::domain::blackhole_rule(&admission.mitigation).unwrap();
+        assert_eq!(rule.owner, OWNER);
+        assert!(speaker.routes().await.contains(&rule.route().unwrap()));
+        assert_eq!(speaker.routes().await[0].owner(), OWNER);
+        assert_eq!(
+            (speaker.adds.load(SeqCst), speaker.leased_adds.load(SeqCst)),
+            (0, 1)
+        );
+        assert!(lease.generation().is_some());
+        assert_eq!(*speaker.lease_seconds.lock().unwrap(), [60]);
+
+        // An older daemon answers UNIMPLEMENTED: nothing is installed, the row
+        // stays unconfirmed, and no plain AddPath is sent.
+        speaker.fail_adds.store(true, SeqCst);
+        let admission = admit_leased(&repo, &speaker, Some(&lease), "203.0.113.11/32")
+            .await
+            .unwrap();
+        assert!(admission.unconfirmed);
+        assert!(
+            repo.get_mitigation(admission.mitigation.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_active()
+        );
+        assert_eq!(
+            (speaker.adds.load(SeqCst), speaker.leased_adds.load(SeqCst)),
+            (0, 2)
+        );
+        assert_eq!(speaker.routes().await.len(), 1);
+        speaker.fail_adds.store(false, SeqCst);
+
+        // The lease is configured but this controller has none: refuse, send nothing.
+        let error = admit_leased(&repo, &speaker, None, "203.0.113.12/32")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("lease"), "{error}");
+        assert_eq!(speaker.leased_adds.load(SeqCst), 2);
+
+        // Every delete passes the owner recorded in rule_json, never the configuration.
+        let request = crate::domain::request_withdrawal(
+            &repo,
+            &repo
+                .get_mitigation(admission.mitigation.mitigation_id)
+                .await
+                .unwrap()
+                .unwrap(),
+            false,
+            "operator",
+            "alice",
+            "attack over".into(),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(request.blackhole_rule().unwrap().owner, OWNER);
+        crate::domain::execute_withdrawal(&repo, &speaker, false, &request, None)
+            .await
+            .unwrap();
+        assert_eq!(*speaker.delete_owners.lock().unwrap(), [OWNER]);
+    }
+
+    /// A key another owner, or no owner, holds refuses the leased add. The new
+    /// row is retired locally with an audit entry and no delete, and the
+    /// request gets the untracked-route 409.
+    #[tokio::test]
+    async fn leased_add_on_an_untracked_key_retires_the_row_without_a_delete() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        let lease = LeaseKeeper::new(OWNER.into(), 60);
+        let untracked = crate::bgp::BlackholeRoute::new(
+            "203.0.113.20/32".parse().unwrap(),
+            "192.0.2.99".parse().unwrap(),
+            vec![],
+            vec![],
+        )
+        .unwrap();
+        speaker.inner.announce_blackhole(&untracked).await.unwrap();
+        let error = admit_leased(&repo, &speaker, Some(&lease), "203.0.113.20/32")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, PrefixdError::Conflict(_)), "{error}");
+        assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
+        assert_eq!(repo.count_active_global().await.unwrap(), 0);
+        let retired = repo
+            .list_mitigations_by_ip("203.0.113.20", 10)
+            .await
+            .unwrap();
+        assert_eq!(retired.len(), 1);
+        assert_eq!(
+            retired[0].status,
+            crate::domain::MitigationStatus::Withdrawn
+        );
+        assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+        let audit = repo
+            .list_audit(&crate::db::ListParams {
+                limit: 100,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert!(
+            audit.iter().any(|entry| entry.action == "withdraw"
+                && entry.details["reason"] == UNTRACKED_AT_ADMISSION)
+        );
+        // The untracked route is untouched, and nothing was retried unleased.
+        assert_eq!(speaker.routes().await, [untracked]);
+        assert_eq!(speaker.deletes.load(SeqCst), 0);
+        assert_eq!(speaker.adds.load(SeqCst), 0);
+    }
+
+    fn lease_settings(config: &BlackholeConfig) -> Settings {
+        let mut settings = enforced();
+        settings.blackhole = config.clone();
+        settings
+    }
+
+    /// Startup refuses to drop the lease under outstanding leased intent, and
+    /// refuses routes under this owner that the ledger cannot explain.
+    #[tokio::test]
+    async fn lease_startup_refuses_disabling_and_unexplained_owner_routes() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        speaker.inner.live_lease(OWNER).await.unwrap();
+        let mut config = enforced().blackhole;
+        config.leased = true;
+        check_lease_startup(&lease_settings(&config), &speaker, &repo, OWNER)
+            .await
+            .unwrap();
+        let lease = LeaseKeeper::new(OWNER.into(), 60);
+        let admission = admit_leased(&repo, &speaker, Some(&lease), "203.0.113.10/32")
+            .await
+            .unwrap();
+        // Desired intent explains the route; another owner's and unowned rows are not ours.
+        let route = |prefix: &str| {
+            crate::bgp::BlackholeRoute::new(
+                prefix.parse().unwrap(),
+                "192.0.2.99".parse().unwrap(),
+                vec![],
+                vec![],
+            )
+            .unwrap()
+        };
+        speaker
+            .inner
+            .announce_leased_blackhole(&route("203.0.113.30/32").with_owner("other.owner"), 60)
+            .await
+            .unwrap();
+        speaker
+            .inner
+            .announce_blackhole(&route("203.0.113.31/32"))
+            .await
+            .unwrap();
+        check_lease_startup(&lease_settings(&config), &speaker, &repo, OWNER)
+            .await
+            .unwrap();
+        for disabled in [
+            BlackholeConfig {
+                leased: false,
+                ..config.clone()
+            },
+            BlackholeConfig {
+                enabled: false,
+                ..config.clone()
+            },
+        ] {
+            let error = check_lease_startup(&lease_settings(&disabled), &speaker, &repo, OWNER)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("blackhole.leased"), "{error}");
+        }
+        // Still refused while the withdrawal is pending.
+        let request = crate::domain::request_withdrawal(
+            &repo,
+            &admission.mitigation,
+            false,
+            "operator",
+            "alice",
+            "attack over".into(),
+            true,
+            None,
+        )
+        .await
+        .unwrap();
+        let disabled = BlackholeConfig {
+            leased: false,
+            ..config.clone()
+        };
+        assert!(
+            check_lease_startup(&lease_settings(&disabled), &speaker, &repo, OWNER)
+                .await
+                .is_err()
+        );
+        crate::domain::execute_withdrawal(&repo, &speaker, false, &request, None)
+            .await
+            .unwrap();
+        check_lease_startup(&lease_settings(&disabled), &speaker, &repo, OWNER)
+            .await
+            .unwrap();
+        // Our own leftover of a terminal row is an orphan for reconciliation,
+        // not a collision: a withdrawal completed locally left the route.
+        let leftover = admit_leased(&repo, &speaker, Some(&lease), "203.0.113.41/32")
+            .await
+            .unwrap()
+            .mitigation;
+        let request = crate::domain::request_withdrawal(
+            &repo,
+            &leftover,
+            false,
+            "system",
+            "test",
+            "local only".into(),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        crate::domain::complete_local_withdrawal(&repo, &request, None)
+            .await
+            .unwrap();
+        assert!(
+            speaker
+                .routes()
+                .await
+                .iter()
+                .any(|route| route.prefix().to_string() == "203.0.113.41/32")
+        );
+        check_lease_startup(&lease_settings(&config), &speaker, &repo, OWNER)
+            .await
+            .unwrap();
+        // A route under this owner that no row desires or withdraws: a collision.
+        speaker
+            .inner
+            .announce_leased_blackhole(&route("203.0.113.40/32").with_owner(OWNER), 60)
+            .await
+            .unwrap();
+        let error = check_lease_startup(&lease_settings(&config), &speaker, &repo, OWNER)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("203.0.113.40/32"), "{error}");
+        // A failed read refuses rather than looking empty.
+        speaker.inner.expire_lease(OWNER).await;
+        speaker.fail_reads.store(true, SeqCst);
+        assert!(
+            check_lease_startup(&lease_settings(&config), &speaker, &repo, OWNER)
+                .await
+                .is_err()
+        );
+    }
+
+    /// Leased FlowSpec: refused without the speaker's lease, refused when
+    /// disabled under outstanding leased rules, and refused for an owned rule
+    /// the ledger cannot explain.
+    #[tokio::test]
+    async fn leased_flowspec_startup_refusals() {
+        use crate::bgp::{FlowSpecReader, FlowSpecWriter};
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        let mut settings = enforced();
+        settings.bgp.rustbgpd = Some(crate::config::RustBgpdConfig {
+            leased_flowspec: true,
+            ..Default::default()
+        });
+        // An older daemon: the probe never confirmed the lease.
+        let error = check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("0.79.0"), "{error}");
+        speaker.inner.live_lease(OWNER).await.unwrap();
+        check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap();
+        let mut row = Mitigation::from_intent(
+            MitigationIntent {
+                match_criteria: MatchCriteria {
+                    dst_prefix: "203.0.113.10/32".into(),
+                    protocol: Some(17),
+                    ..Default::default()
+                },
+                action_type: ActionType::Discard,
+                ..intent("203.0.113.10/32")
+            },
+            "203.0.113.10".into(),
+            AttackVector::UdpFlood,
+        );
+        row.action_params.injection_owner = OWNER.into();
+        row.activate();
+        repo.insert_mitigation(&row).await.unwrap();
+        let rule = crate::domain::mitigation_rule(&row).unwrap();
+        speaker.announce_leased(&rule, 60).await.unwrap();
+        check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap();
+        let mut disabled = settings.clone();
+        disabled.bgp.rustbgpd = Some(Default::default());
+        let error = check_lease_startup(&disabled, &speaker, &repo, OWNER)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("leased_flowspec"), "{error}");
+        // An owned rule no row desires or withdraws: a second controller.
+        let mut stray = rule.clone();
+        stray.nlri.dst_prefix = "203.0.113.20/32".into();
+        speaker.announce_leased(&stray, 60).await.unwrap();
+        assert_eq!(speaker.list_active().await.unwrap().len(), 2);
+        let error = check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("203.0.113.20/32"), "{error}");
+    }
+
+    /// Leasing refuses quotas that could exceed rustbgpd's per-owner key cap.
+    #[tokio::test]
+    async fn lease_startup_refuses_quotas_above_the_owner_key_cap() {
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        speaker.inner.live_lease(OWNER).await.unwrap();
+        let mut settings = enforced();
+        settings.blackhole.leased = true;
+        settings.bgp.rustbgpd = Some(crate::config::RustBgpdConfig {
+            leased_flowspec: true,
+            ..Default::default()
+        });
+        settings.quotas.max_active_per_pop =
+            MAX_KEYS_PER_OWNER - settings.blackhole.max_active_per_pop;
+        check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap();
+        settings.quotas.max_active_per_pop += 1;
+        let error = check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("16384"), "{error}");
+        // Only the leased kinds count.
+        settings.bgp.rustbgpd = Some(Default::default());
+        check_lease_startup(&settings, &speaker, &repo, OWNER)
+            .await
+            .unwrap();
+    }
+
+    /// An unreadable pending withdrawal might hold leased intent, so lease
+    /// startup refuses with or without the setting instead of failing open.
+    #[tokio::test]
+    async fn an_unreadable_pending_withdrawal_refuses_lease_startup() {
+        let repo = MockRepository::new();
+        let speaker = FaultyBlackholes::default();
+        speaker.inner.live_lease(OWNER).await.unwrap();
+        let mut row = Mitigation::from_intent(
+            MitigationIntent {
+                match_criteria: MatchCriteria {
+                    dst_prefix: "203.0.113.10/32".into(),
+                    protocol: Some(17),
+                    ..Default::default()
+                },
+                action_type: ActionType::Discard,
+                ..intent("203.0.113.10/32")
+            },
+            "203.0.113.10".into(),
+            AttackVector::UdpFlood,
+        );
+        row.action_params.injection_owner = OWNER.into();
+        row.activate();
+        repo.insert_mitigation(&row).await.unwrap();
+        let mut request = crate::domain::WithdrawalRequest::new(
+            &row,
+            false,
+            "operator",
+            "alice",
+            "attack over".into(),
+            true,
+        )
+        .unwrap();
+        request.rule_json = "{not json".into();
+        repo.begin_withdrawal(&request).await.unwrap();
+        let settings = enforced();
+        for leased_flowspec in [false, true] {
+            let mut settings = settings.clone();
+            settings.bgp.rustbgpd = Some(crate::config::RustBgpdConfig {
+                leased_flowspec,
+                ..Default::default()
+            });
+            let error = check_lease_startup(&settings, &speaker, &repo, OWNER)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("unreadable"), "{error}");
+        }
+        // A backend that cannot hold leased intent skips the readability check
+        // (the live leased row still refuses, for its own reason).
+        let other = crate::bgp::GoBgpAnnouncer::new("http://127.0.0.1:1".into());
+        let error = check_lease_startup(&settings, &other, &repo, OWNER)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!error.contains("unreadable"), "{error}");
     }
 }
