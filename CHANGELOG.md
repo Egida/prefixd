@@ -275,8 +275,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Qualify rustbgpd 0.79.0: Compose and the interop lab pin it; CI tests 0.76.0
-  (minimum), 0.77.0, 0.78.0 and 0.79.0. prefixd keeps its vendored controller
-  proto; every field it reads or writes is unchanged in 0.79.0.
+  (minimum), 0.77.0, 0.78.0 and 0.79.0. Every controller field prefixd reads or
+  writes is unchanged in 0.79.0.
 
 - rustbgpd 0.79.0 changes for operators: it validates a blackhole route
   against RPKI when prefixd adds it, so an export policy that drops
@@ -286,6 +286,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   overlap, so update your own rustbgpd dashboards and alerts with the
   upgrade. A rustbgpd config with an `[event_history]` section no longer
   loads.
+
+- The rustbgpd controller stubs are now generated from the unmodified
+  `rustbgpd.proto` asset of the rustbgpd v0.79.0 release, pinned by its
+  published sha256, instead of an unversioned copy. `just proto`, part of
+  `just gate` and CI lint, checks the file offline. Requests are byte-for-byte
+  unchanged: prefixd sets none of the newer fields, and 0.76.0 remains the
+  minimum daemon.
 
 - `POST /v1/safelist` now withdraws every live blackhole on this POP whose
   victim falls inside the new entry, under the lifecycle mutex, with the
