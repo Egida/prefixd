@@ -102,8 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `prefixd_blackhole_export_peers{disposition}`,
   `prefixd_blackhole_unexported{reason}` and
   `prefixd_blackhole_export_read_errors`, and the shipped alerts add
-  `PrefixdBlackholeNotExported`. An export policy that drops RPKI-Invalid
-  routes shows as reason `export_policy`. `committed` means the peer's
+  `PrefixdBlackholeNotExported`. A speaker export policy that denies the
+  route shows as reason `export_policy`. `committed` means the peer's
   Adj-RIB-Out, not router receipt or enforcement. A failed or partial read is
   reported as unknown export, never as no peers. The reads mutate nothing,
   and FlowSpec rules have no export evidence. See
@@ -344,10 +344,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the minimum and the only version CI tests. Every controller field prefixd
   reads or writes is unchanged in 0.79.0.
 
-- rustbgpd 0.79.0 changes for operators: it validates a blackhole route
-  against RPKI when prefixd adds it, so an export policy that drops
-  RPKI-Invalid routes now drops a `/32` or `/128` blackhole at once instead
-  of after the next VRP change. Its Prometheus series rename the `afi_safi`
+- rustbgpd 0.79.0 changes for operators: it validates an injected route
+  against RPKI when it is added, but prefixd's blackholes carry no AS_PATH,
+  so rustbgpd rates them NotFound and its own Invalid export filters pass
+  them. A router that validates them rates them Invalid with the speaker's AS
+  as origin; see the
+  [RPKI blackhole receipt](docs/reference/qualification/blackhole-rpki-frr-2026-10-20.md).
+  Its Prometheus series rename the `afi_safi`
   and `scope` labels to `family` (plus `stage` on max-prefix series) with no
   overlap, so update your own rustbgpd dashboards and alerts with the
   upgrade. A rustbgpd config with an `[event_history]` section no longer
@@ -356,8 +359,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The rustbgpd controller stubs are now generated from the unmodified
   `rustbgpd.proto` asset of the rustbgpd v0.79.0 release, pinned by its
   published sha256, instead of an unversioned copy. `just proto`, part of
-  `just gate` and CI lint, checks the file offline. Requests are byte-for-byte
-  unchanged: prefixd sets none of the newer fields.
+  `just gate` and CI lint, checks the file offline.
+
+- Blackholes adopt rustbgpd 0.79.0's unicast injection contract. `DeletePath`
+  sets `allow_missing`, so `NOT_PRESENT` completes a withdrawal that a retry,
+  a controller restart or a speaker restart already overtook, with its
+  original actor, reason and operation ID; `NOT_FOUND` from the speaker is now
+  an error instead of absence. Each accepted `AddPath` or `AddLeasedPath`
+  logs the speaker's outcome (`created`, `replaced`, `unchanged`, or `unknown`
+  when none is reported) and, unless it is `unchanged`, writes an `announce`
+  audit entry with it, so a leased re-add of routes the speaker still holds,
+  as after a controller restart or on each retry of a partial re-add, adds no
+  audit entries. A `replaced` outcome on an unleased admission is logged as an
+  error. `0.0.0.0` and `::`, which rustbgpd now reads as next-hop self, stay
+  refused as blackhole next hops.
 
 - `POST /v1/safelist` now withdraws every live blackhole on this POP whose
   victim falls inside the new entry, under the lifecycle mutex, with the

@@ -778,7 +778,7 @@ the controller's snapshot and never calls the speaker.
 | `peers` | One row per Established peer. `disposition` is `committed` (in that peer's Adj-RIB-Out, not proof of receipt, installation or enforcement), `withheld` or `pending`; `reason` and `explain_code` are rustbgpd's bounded codes and `detail` its unstable text |
 | `not_established_peers` | Configured peers without an Established session, which are sent nothing. `null` when the session read failed or is unsupported |
 | `counts` | Peer rows by disposition |
-| `warning` | Present when an observed blackhole is committed to no Established peer: a bounded `reason` (`no_established_peer`, `export_policy`, `family_suppressed`, `family_not_negotiated`, `not_selected`, `outbound_prefix_limit`, `exact_export_rejected`, `export_rule`, `pending`, `mixed` or `other`) and a `message`. `export_policy` names the RPKI-Invalid export filter case. With `status` `error`, it is the last complete read's warning, kept so a transient read error does not clear degraded health |
+| `warning` | Present when an observed blackhole is committed to no Established peer: a bounded `reason` (`no_established_peer`, `export_policy`, `family_suppressed`, `family_not_negotiated`, `not_selected`, `outbound_prefix_limit`, `exact_export_rejected`, `export_rule`, `pending`, `mixed` or `other`) and a `message`. `export_policy` means a speaker export policy denied the route. With `status` `error`, it is the last complete read's warning, kept so a transient read error does not clear degraded health |
 | `error` | The read error when `status` is `error` |
 
 ### Withdraw Mitigation
@@ -2572,6 +2572,16 @@ by an active quota write `reject_rule` entries targeting their event, with
 `scope`, `scope_hash`, `action_type`, `quota_type`, `current`, `max` and
 `reason`. These also cover refusals within a partially admitted event.
 Audit write failures are logged; admitted rules remain visible in the response.
+
+Every blackhole add the speaker accepts, at admission and on repair or leased
+re-add, writes an `announce` entry targeting the mitigation, with
+`actor_type: "system"`, `actor_id: "speaker"` and `details` `prefix`,
+`next_hop`, `owner` and `outcome`. `outcome` is what the speaker reported
+against its previous local route at the key: `created`, `replaced`, or
+`unknown` when it reported none. An `unchanged` add, a re-add of a route the
+speaker still held, changed nothing and is logged without an entry. It is
+local acceptance only, not export or router enforcement. A failed add writes
+no entry, and a failed audit write is logged without failing the add.
 
 `prefixd_event_rule_quota_rejections_total{quota_type,rule_kind,action_type}`
 counts each event rule refused by an active quota. `rule_kind` is
