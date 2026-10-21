@@ -50,7 +50,8 @@ import {
 import { PageHeader } from "@/components/dashboard/page-header"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Tag } from "@/components/dashboard/status-pill"
-import { MISSING, formatUtc } from "@/lib/format"
+import { MISSING } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 
 function formatUptime(seconds: number): string {
   const days = Math.floor(seconds / 86400)
@@ -103,6 +104,7 @@ const TABS = ["status", "safelist", "users"] as const
 const TABS_WITHOUT_USERS = ["status", "safelist"] as const
 
 export default function AdminPage() {
+  const { formatTime, timeZone } = useTimeFormat()
   const { mutate } = useSWRConfig()
   const { operator } = useAuth()
   const permissions = usePermissions()
@@ -435,7 +437,7 @@ export default function AdminPage() {
                         <th className="h-9 px-2 text-left text-xs font-medium text-muted-foreground">Prefix</th>
                         <th className="h-9 px-2 text-left text-xs font-medium text-muted-foreground">Reason</th>
                         <th className="h-9 px-2 text-left text-xs font-medium text-muted-foreground">Added by</th>
-                        <th className="h-9 px-2 text-left text-xs font-medium text-muted-foreground">Added (UTC)</th>
+                        <th className="h-9 px-2 text-left text-xs font-medium text-muted-foreground">Added ({timeZone})</th>
                         <th className="w-10"></th>
                       </tr>
                     </thead>
@@ -446,7 +448,7 @@ export default function AdminPage() {
                           <td className="py-2 px-2 text-muted-foreground truncate max-w-48">{entry.reason || MISSING}</td>
                           <td className="py-2 px-2 text-muted-foreground">{entry.added_by}</td>
                           <td className="py-2 px-2 text-muted-foreground text-xs tabular-nums">
-                            <time dateTime={entry.added_at}>{formatUtc(entry.added_at)}</time>
+                            <time dateTime={entry.added_at}>{formatTime(entry.added_at)}</time>
                           </td>
                           <td className="py-2 px-2">
                             <AlertDialog>
@@ -607,10 +609,10 @@ export default function AdminPage() {
                               <Tag>{op.role}</Tag>
                             </td>
                             <td className="py-2 px-2 text-muted-foreground text-xs tabular-nums">
-                              <time dateTime={op.created_at}>{formatUtc(op.created_at)}</time>
+                              <time dateTime={op.created_at}>{formatTime(op.created_at)}</time>
                             </td>
                             <td className="py-2 px-2 text-muted-foreground text-xs tabular-nums">
-                              {op.last_login_at ? <time dateTime={op.last_login_at}>{formatUtc(op.last_login_at)}</time> : MISSING}
+                              {op.last_login_at ? <time dateTime={op.last_login_at}>{formatTime(op.last_login_at)}</time> : MISSING}
                             </td>
                             <td className="py-2 px-2 flex gap-1">
                               <Button

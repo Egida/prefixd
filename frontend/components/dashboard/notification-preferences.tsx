@@ -121,6 +121,7 @@ export function NotificationPreferencesPanel() {
           <CardTitle>Quiet hours (UTC)</CardTitle>
           <p className="text-xs text-muted-foreground">
             During quiet hours, only critical events (created or extended) show toasts.
+            These hours stay in UTC regardless of your display timezone.
           </p>
         </CardHeader>
         <CardContent>

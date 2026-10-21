@@ -6,7 +6,7 @@ import { toast } from "sonner"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { PageHeader } from "@/components/dashboard/page-header"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
-import { formatUtc } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -23,6 +23,7 @@ import { PlaybookYamlEditor } from "@/components/dashboard/playbook-yaml-editor"
 const TABS = ["settings", "playbooks", "alerting"] as const
 
 export default function ConfigPage() {
+  const { formatTime } = useTimeFormat()
   const [activeTab, setActiveTab] = useTabParam(TABS)
   const { data: settingsData, error: settingsError, mutate: mutateSettings } = useConfigSettings()
   const { data: playbooksData, error: playbooksError, mutate: mutatePlaybooks } = useConfigPlaybooks()
@@ -126,7 +127,7 @@ export default function ConfigPage() {
               <CardHeader className="flex flex-wrap items-center justify-between gap-2">
                 <CardTitle className="font-mono">prefixd.yaml</CardTitle>
                 <span className="text-xs text-muted-foreground tabular-nums">
-                  Loaded {formatUtc(settingsData.loaded_at)}
+                  Loaded {formatTime(settingsData.loaded_at)}
                 </span>
               </CardHeader>
               <CardContent>
@@ -153,7 +154,7 @@ export default function ConfigPage() {
             <>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs text-muted-foreground tabular-nums">
-                  Loaded {formatUtc(playbooksData.loaded_at)}
+                  Loaded {formatTime(playbooksData.loaded_at)}
                 </span>
                 <div role="group" aria-label="Playbook editor view" className="flex items-center gap-1 rounded-md border p-0.5">
                   {(["form", "yaml"] as const).map((view) => (

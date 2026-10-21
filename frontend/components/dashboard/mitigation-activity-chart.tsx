@@ -7,7 +7,7 @@ import { AreaChart, Area, XAxis, YAxis, CartesianGrid } from "recharts"
 import { ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart"
 import { EmptyState, ErrorState } from "@/components/dashboard/states"
 import { useTimeseries } from "@/hooks/use-api"
-import { formatUtc, formatUtcTick } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 import { cn } from "@/lib/utils"
 
 const RANGE_OPTIONS = [
@@ -31,6 +31,7 @@ const chartConfig = {
 const TICK = { fontSize: 12 }
 
 export function MitigationActivityChart() {
+  const { formatTime, formatTick, timeZone, dateKey } = useTimeFormat()
   const [rangeIdx, setRangeIdx] = useState(2) // default 24h
   const selectedRange = RANGE_OPTIONS[rangeIdx]
   const { data: mitigationData, error: mitigationError, mutate: retryMitigations } = useTimeseries("mitigations", selectedRange.range, selectedRange.bucket)
@@ -60,7 +61,7 @@ export function MitigationActivityChart() {
       .sort((a, b) => new Date(a.bucket).getTime() - new Date(b.bucket).getTime())
   }, [mitigationData, eventData])
 
-  const multiDay = selectedRange.range === "7d"
+  const multiDay = selectedRange.range === "7d" || (chartData.length > 1 && dateKey(chartData[0].bucket) !== dateKey(chartData[chartData.length - 1].bucket))
 
   const isLoading = !mitigationData || !eventData
   const hasError = Boolean(mitigationError || eventError)
@@ -68,7 +69,7 @@ export function MitigationActivityChart() {
   return (
     <section aria-label="Activity chart" className="min-w-0">
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-sm font-semibold text-balance">Activity <span className="text-muted-foreground">({selectedRange.label})</span></h2>
+        <h2 className="text-sm font-semibold text-balance">Activity <span className="text-muted-foreground">({selectedRange.label}) · {timeZone}</span></h2>
         <div role="group" className="flex rounded-md bg-muted p-0.5" aria-label="Activity range">
           {RANGE_OPTIONS.map((opt, i) => (
             <button key={opt.label} onClick={() => setRangeIdx(i)} aria-pressed={i === rangeIdx}
@@ -111,7 +112,7 @@ export function MitigationActivityChart() {
                 tickLine={false}
                 axisLine={false}
                 tick={TICK}
-                tickFormatter={(value: string) => formatUtcTick(value, multiDay)}
+                tickFormatter={(value: string) => formatTick(value, multiDay)}
                 interval="preserveStartEnd"
                 minTickGap={16}
                 padding={{ left: 8, right: 8 }}
@@ -119,7 +120,7 @@ export function MitigationActivityChart() {
               <YAxis tickLine={false} axisLine={false} tick={TICK} allowDecimals={false} />
               <ChartTooltip
                 isAnimationActive={false}
-                content={<ChartTooltipContent labelFormatter={(value) => formatUtc(String(value))} />}
+                content={<ChartTooltipContent labelFormatter={(value) => formatTime(String(value))} />}
               />
               <Area type="monotone" dataKey="mitigations" stroke="var(--color-chart-1)" fill="var(--color-chart-1)" fillOpacity={0.08} strokeWidth={1.5} isAnimationActive={false} />
               <Area type="monotone" dataKey="events" stroke="var(--color-chart-2)" fill="var(--color-chart-2)" fillOpacity={0.04} strokeWidth={1.5} isAnimationActive={false} />

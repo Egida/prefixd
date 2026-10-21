@@ -19,6 +19,12 @@ prefixd ── loopback gRPC ── speaker (AS 65010, 10.0.0.1) ── eBGP ─
 | rustbgpd | `interop/frr-rustbgpd.clab.yml` | `ghcr.io/lance0/rustbgpd:0.79.0`, digest-pinned |
 | GoBGP | `interop/frr-gobgp.clab.yml` | `jauderho/gobgp` digest that CI pins as 4.10.0 |
 
+CI runs `flowspec` and `amplification` with both speakers, plus `blackhole` with
+rustbgpd. Each job keeps the existing 30-minute timeout and
+uploads any generated receipt even after failure. Artifact names include the
+scenario, speaker and workflow attempt; failed scenarios are not retried by the
+lab runner. The jobs retain the existing path filters and nightly schedule.
+
 Both speakers negotiate IPv4 and IPv6 FlowSpec with FRR; rustbgpd also
 negotiates IPv4 and IPv6 unicast for the blackhole scenario below. After each step,
 `interop/flowspec_frr.py` waits up to 60 s for FRR's IPv4 and IPv6 tables to

@@ -7,12 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Choose a dashboard display timezone in Preferences. The browser-local choice
+  updates absolute times, charts and tooltips; UTC remains the default, and API
+  timestamps, exports, TTLs and notification quiet hours stay unchanged.
+- Count unleased blackhole admissions that replace an untracked local route
+  with `prefixd_blackhole_replaced_total{pop}` and alert with
+  `PrefixdBlackholeReplaced`. The alert latches historical replacement
+  evidence until the process counter resets; admission and leased ownership
+  behavior are unchanged.
+
+### Changed
+
+- Run the FRR blackhole scenario with rustbgpd and amplification scenarios with
+  both speakers in Interop CI alongside FlowSpec, retaining separate receipts
+  for each speaker, scenario and workflow attempt, including failed runs.
+
 ### Fixed
 
 - Retained blackhole export evidence is explicitly historical after controller
   ownership is lost, including after ownership returns until a fresh complete
   read. Detail preserves historical peer rows and their timestamp on a failed
   refresh; health and the interface no longer present them as current export.
+- Rotate blackhole export reads between reconciliation passes so the shared
+  observation budget does not repeatedly leave the same mitigations unread.
 - Blackhole export-policy warnings now direct operators to the speaker's export
   policy without guessing that RPKI validation caused the denial.
 

@@ -63,6 +63,8 @@ pub struct ReconciliationLoop {
     /// source's cache drains to empty between ticks (Prometheus would
     /// otherwise keep the last non-zero value forever).
     last_cache_sources: tokio::sync::Mutex<std::collections::HashSet<String>>,
+    /// Rotate export reads so the fixed pass budget cannot always cut off the same rows.
+    export_cursor: std::sync::atomic::AtomicUsize,
 }
 
 impl ReconciliationLoop {
@@ -83,6 +85,7 @@ impl ReconciliationLoop {
             speaker_binding: None,
             lease: None,
             last_cache_sources: tokio::sync::Mutex::new(std::collections::HashSet::new()),
+            export_cursor: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1290,7 +1293,7 @@ impl ReconciliationLoop {
         use crate::observability::metrics::{
             BLACKHOLE_EXPORT_PEERS, BLACKHOLE_EXPORT_READ_ERRORS, BLACKHOLE_UNEXPORTED,
         };
-        let (Some(state), Some(observer), Some(blackholes)) =
+        let (Some(state), Some(observer), Some(mut blackholes)) =
             (&self.state, self.announcer.export_observer(), blackholes)
         else {
             return;
@@ -1298,6 +1301,16 @@ impl ReconciliationLoop {
         let Some(epoch) = state.fence.with_observation_epoch(|epoch| epoch) else {
             return;
         };
+        // Repository order is unspecified. Move the head one place per pass,
+        // not past the last attempted read: a timed-out read has not completed.
+        blackholes.sort_unstable_by_key(|(id, _)| *id);
+        if !blackholes.is_empty() {
+            let start = self
+                .export_cursor
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                % blackholes.len();
+            blackholes.rotate_left(start);
+        }
         let sessions = match sessions {
             Some(Ok(peers)) => Some(peers.as_slice()),
             _ => None,
@@ -2865,6 +2878,184 @@ mod tests {
             assert!(speaker.routes().await.is_empty());
             assert_eq!(speaker.adds.load(SeqCst), 0);
         }
+    }
+
+    struct SlowExportSpeaker {
+        enabled: std::sync::atomic::AtomicBool,
+        completed: std::sync::Mutex<Vec<ipnet::IpNet>>,
+    }
+
+    impl FlowSpecAnnouncer for SlowExportSpeaker {
+        fn backend(&self) -> &'static str {
+            "mock"
+        }
+
+        fn export_observer(&self) -> Option<&dyn crate::bgp::ExportObserver> {
+            self.enabled.load(SeqCst).then_some(self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for SlowExportSpeaker {
+        async fn announce(&self, _: &FlowSpecRule) -> Result<()> {
+            panic!("export observation must not announce")
+        }
+
+        async fn withdraw(&self, _: &FlowSpecRule) -> Result<()> {
+            panic!("export observation must not withdraw")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::bgp::ExportObserver for SlowExportSpeaker {
+        async fn blackhole_exports(
+            &self,
+            prefix: &ipnet::IpNet,
+        ) -> Result<Option<Vec<crate::bgp::PeerExport>>> {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            // Record only completed reads: timeout may poll a future once even
+            // when the pass deadline has already elapsed.
+            self.completed.lock().unwrap().push(*prefix);
+            Ok(Some(vec![crate::bgp::PeerExport {
+                peer_address: "192.0.2.10".into(),
+                disposition: crate::bgp::ExportDisposition::Committed,
+                reason: String::new(),
+                explain_code: String::new(),
+                detail: String::new(),
+                advertised_path_id: 0,
+            }]))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn blackhole_export_reads_rotate_under_the_pass_budget() {
+        use crate::domain::ExportObservation;
+        use crate::observability::metrics::{
+            BLACKHOLE_EXPORT_PEERS, BLACKHOLE_EXPORT_READ_ERRORS, BLACKHOLE_UNEXPORTED,
+        };
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let speaker = Arc::new(SlowExportSpeaker {
+            enabled: std::sync::atomic::AtomicBool::new(true),
+            completed: std::sync::Mutex::new(vec![]),
+        });
+        let reconciler = blackhole_reconciler(
+            Arc::new(MockRepository::new()),
+            speaker.clone(),
+            live_config(),
+            false,
+        );
+        let store = &reconciler.state.as_ref().unwrap().export_evidence;
+        let candidates: Vec<_> = [
+            "192.0.2.1/32",
+            "192.0.2.2/32",
+            "2001:db8::1/128",
+            "2001:db8::2/128",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, prefix)| {
+            (
+                uuid::Uuid::from_u128(index as u128 + 1),
+                prefix.parse::<ipnet::IpNet>().unwrap(),
+            )
+        })
+        .collect();
+
+        // Only the first six-second read fits in each ten-second pass. Four
+        // candidates also catch a cursor that advances past the timed-out read.
+        for (pass, candidate) in candidates.iter().enumerate() {
+            let mut unordered = candidates.clone();
+            unordered.rotate_left((pass + 2) % candidates.len());
+            if pass % 2 == 0 {
+                unordered.reverse();
+            }
+            let started = tokio::time::Instant::now();
+            reconciler
+                .observe_blackhole_exports(Some(unordered), None)
+                .await;
+            assert!(started.elapsed() >= EXPORT_OBSERVATION_BUDGET);
+            // Tokio timers round wakeups to millisecond boundaries.
+            assert!(started.elapsed() <= EXPORT_OBSERVATION_BUDGET + Duration::from_millis(1));
+            let observed: Vec<_> = candidates
+                .iter()
+                .filter(|(id, _)| {
+                    store.get(*id, Some(0)).unwrap().status == ExportObservation::Observed
+                })
+                .copied()
+                .collect();
+            assert_eq!(observed, vec![*candidate], "pass {pass}");
+            let summary = store.summary(Some(0));
+            assert_eq!((summary.blackholes, summary.errors), (4, 3));
+            assert_eq!(summary.counts.committed, 1);
+        }
+        let expected: Vec<_> = candidates.iter().map(|(_, prefix)| *prefix).collect();
+        assert_eq!(*speaker.completed.lock().unwrap(), expected);
+
+        // Unknown inventory and unsupported observation retain the complete
+        // snapshot and cursor; an authoritative empty inventory clears it.
+        let previous = store.summary(Some(0));
+        let previous_rows: Vec<_> = candidates
+            .iter()
+            .map(|(id, _)| store.get(*id, Some(0)))
+            .collect();
+        reconciler.observe_blackhole_exports(None, None).await;
+        assert_eq!(reconciler.export_cursor.load(SeqCst), candidates.len());
+        speaker.enabled.store(false, SeqCst);
+        reconciler
+            .observe_blackhole_exports(Some(candidates.clone()), None)
+            .await;
+        assert_eq!(reconciler.export_cursor.load(SeqCst), candidates.len());
+        reconciler
+            .observe_blackhole_exports(Some(vec![]), None)
+            .await;
+        assert_eq!(reconciler.export_cursor.load(SeqCst), candidates.len());
+        assert_eq!(store.summary(Some(0)), previous);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|(id, _)| store.get(*id, Some(0)))
+                .collect::<Vec<_>>(),
+            previous_rows
+        );
+        assert_eq!(BLACKHOLE_EXPORT_READ_ERRORS.get(), 3.0);
+        assert_eq!(
+            BLACKHOLE_EXPORT_PEERS
+                .with_label_values(&["committed"])
+                .get(),
+            1.0
+        );
+        speaker.enabled.store(true, SeqCst);
+        reconciler
+            .observe_blackhole_exports(Some(vec![]), None)
+            .await;
+        assert_eq!(store.summary(Some(0)).blackholes, 0);
+        assert_eq!(reconciler.export_cursor.load(SeqCst), candidates.len());
+        assert!(
+            candidates
+                .iter()
+                .all(|(id, _)| store.get(*id, Some(0)).is_none())
+        );
+        assert_eq!(BLACKHOLE_EXPORT_READ_ERRORS.get(), 0.0);
+        for disposition in crate::bgp::ExportDisposition::ALL {
+            assert_eq!(
+                BLACKHOLE_EXPORT_PEERS
+                    .with_label_values(&[disposition.as_str()])
+                    .get(),
+                0.0
+            );
+        }
+        for reason in crate::domain::UNEXPORTED_REASONS {
+            assert_eq!(BLACKHOLE_UNEXPORTED.with_label_values(&[reason]).get(), 0.0);
+        }
+        assert_eq!(*speaker.completed.lock().unwrap(), expected);
+        reconciler
+            .observe_blackhole_exports(Some(candidates.clone()), None)
+            .await;
+        assert_eq!(
+            speaker.completed.lock().unwrap().last(),
+            Some(&candidates[0].1)
+        );
+        assert_eq!(speaker.completed.lock().unwrap().len(), 5);
     }
 
     struct PausedExportRead {

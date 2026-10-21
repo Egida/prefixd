@@ -14,7 +14,8 @@ import { OriginTag, StatusPill, Tag } from "@/components/dashboard/status-pill"
 import { Field, FieldList } from "@/components/dashboard/field"
 import { ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { formatBps, formatTimeRemaining, formatUtc } from "@/lib/format"
+import { formatBps, formatTimeRemaining } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 import { FlowSpecPreview, describeMatch, formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
 import { IncidentReportDialog } from "@/components/dashboard/incident-report-dialog"
 import { withdrawMitigation, getIncidentReport, isNotFound, type Mitigation } from "@/lib/api"
@@ -78,6 +79,7 @@ function BlackholeRouteCard({ mitigation }: { mitigation: Mitigation }) {
 }
 
 export default function MitigationDetailPage({ params }: { params: Promise<{ id: string }> }) {
+  const { formatTime } = useTimeFormat()
   const { id } = use(params)
   const permissions = usePermissions()
   const [now, setNow] = useState(() => Date.now())
@@ -224,10 +226,10 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
               <span className="text-muted-foreground">POP <span className="font-mono text-foreground">{mitigation.pop}</span></span>
               <span className="text-muted-foreground tabular-nums">
                 {mitigation.withdrawn_at
-                  ? <>Withdrawn <time dateTime={mitigation.withdrawn_at}>{formatUtc(mitigation.withdrawn_at, now)}</time></>
+                  ? <>Withdrawn <time dateTime={mitigation.withdrawn_at}>{formatTime(mitigation.withdrawn_at, now)}</time></>
                   : expired
-                    ? <>Expired <time dateTime={mitigation.expires_at}>{formatUtc(mitigation.expires_at, now)}</time></>
-                    : <>Expires in <span className="font-medium text-foreground">{formatTimeRemaining(mitigation.expires_at, now)}</span> · <time dateTime={mitigation.expires_at}>{formatUtc(mitigation.expires_at, now)}</time></>}
+                    ? <>Expired <time dateTime={mitigation.expires_at}>{formatTime(mitigation.expires_at, now)}</time></>
+                    : <>Expires in <span className="font-medium text-foreground">{formatTimeRemaining(mitigation.expires_at, now)}</span> · <time dateTime={mitigation.expires_at}>{formatTime(mitigation.expires_at, now)}</time></>}
               </span>
             </>
           }
@@ -345,7 +347,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                   <li className="relative">
                     <span aria-hidden="true" className="absolute -left-[21px] top-1.5 size-2.5 rounded-full bg-muted-foreground" />
                     <p className="text-sm font-medium">Created</p>
-                    <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">{formatUtc(mitigation.created_at, now)}</p>
+                    <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">{formatTime(mitigation.created_at, now)}</p>
                     <p className="mt-1 text-xs text-muted-foreground">
                       Triggered by event{" "}
                       <Link
@@ -361,7 +363,7 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                     <li className="relative">
                       <span aria-hidden="true" className="absolute -left-[21px] top-1.5 size-2.5 rounded-full bg-muted-foreground" />
                       <p className="text-sm font-medium">Updated</p>
-                      <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">{formatUtc(mitigation.updated_at, now)}</p>
+                      <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">{formatTime(mitigation.updated_at, now)}</p>
                       <p className="mt-1 text-xs text-muted-foreground">
                         Rule set to {mitigation.action_type}{mitigation.rate_bps ? ` (${formatBps(mitigation.rate_bps)})` : ""}
                       </p>
@@ -372,13 +374,13 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                     <li className="relative">
                       <span aria-hidden="true" className="absolute -left-[21px] top-1.5 size-2.5 rounded-full bg-muted-foreground" />
                       <p className="text-sm font-medium">Withdrawn</p>
-                      <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">{formatUtc(mitigation.withdrawn_at, now)}</p>
+                      <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">{formatTime(mitigation.withdrawn_at, now)}</p>
                     </li>
                   ) : (
                     <li className="relative">
                       <span aria-hidden="true" className={expired ? "absolute -left-[21px] top-1.5 size-2.5 rounded-full bg-muted-foreground" : "absolute -left-[21px] top-1.5 size-2.5 rounded-full border-2 border-muted-foreground bg-card"} />
                       <p className="text-sm font-medium">{expired ? "Expired" : "Expires"}</p>
-                      <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">{formatUtc(mitigation.expires_at, now)}</p>
+                      <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">{formatTime(mitigation.expires_at, now)}</p>
                     </li>
                   )}
                 </ol>

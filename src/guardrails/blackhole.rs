@@ -508,6 +508,9 @@ pub async fn admit_blackhole(
                     .as_ref()
                     .is_some_and(|rule| rule.owner.is_empty());
                 if unleased && outcome == AddOutcome::Replaced {
+                    crate::observability::metrics::BLACKHOLE_REPLACED
+                        .with_label_values(&[&mitigation.pop])
+                        .inc();
                     tracing::error!(mitigation_id = %mitigation.mitigation_id, %prefix,
                         "blackhole add replaced an untracked local route at the prefix");
                 }
@@ -796,11 +799,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacement_counter_only_counts_unleased_replaced_admissions() {
+        let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+            .lock()
+            .await;
+        let counter = crate::observability::metrics::BLACKHOLE_REPLACED
+            .with_label_values(&["replacement-counter"]);
+        let owned = inventory(&["203.0.113.0/24"]);
+        let lease_owner = "prefixd.replacement-counter.0123456789abcdef";
+        for (name, leased, outcome) in [
+            ("unleased created", false, Some(AddOutcome::Created)),
+            ("unleased unchanged", false, Some(AddOutcome::Unchanged)),
+            ("unleased replaced", false, Some(AddOutcome::Replaced)),
+            ("leased created", true, Some(AddOutcome::Created)),
+            ("leased unchanged", true, Some(AddOutcome::Unchanged)),
+            ("leased replaced", true, Some(AddOutcome::Replaced)),
+            ("unleased error", false, None),
+            ("leased error", true, None),
+        ] {
+            let before = counter.get();
+            let repo = MockRepository::new();
+            let speaker = FaultyBlackholes::default();
+            let mut settings = enforced();
+            settings.pop = "replacement-counter".into();
+            settings.blackhole.leased = leased;
+            let mut candidate = intent("203.0.113.10/32");
+            candidate.pop.clone_from(&settings.pop);
+            let lease = LeaseKeeper::new(lease_owner.into(), 60);
+            if matches!(outcome, Some(AddOutcome::Unchanged | AddOutcome::Replaced)) {
+                let mut raced = BlackholeRule::from_config(
+                    &settings.blackhole,
+                    "203.0.113.10/32".parse().unwrap(),
+                )
+                .unwrap();
+                if leased {
+                    raced.owner = lease_owner.into();
+                }
+                if outcome == Some(AddOutcome::Replaced) {
+                    raced.next_hop = "192.0.2.99".parse().unwrap();
+                }
+                *speaker.before_add.lock().unwrap() = Some(raced.route().unwrap());
+            }
+            speaker.fail_adds.store(outcome.is_none(), SeqCst);
+            let admission = admit_blackhole(
+                &repo,
+                &settings,
+                &owned,
+                candidate,
+                AttackVector::Unknown,
+                None,
+                &actor(),
+                &speaker,
+                None,
+                leased.then_some(&lease),
+            )
+            .await
+            .unwrap();
+            assert_eq!(admission.unconfirmed, outcome.is_none(), "{name}");
+            let increment = if !leased && outcome == Some(AddOutcome::Replaced) {
+                1.0
+            } else {
+                0.0
+            };
+            assert_eq!(counter.get(), before + increment, "{name}");
+            assert_eq!(repo.count_active_global().await.unwrap(), 1, "{name}");
+            let expected_audit = match outcome {
+                Some(AddOutcome::Created) => vec!["created"],
+                Some(AddOutcome::Replaced) => vec!["replaced"],
+                _ => vec![],
+            };
+            assert_eq!(
+                announce_outcomes(&repo, &admission.mitigation).await,
+                expected_audit,
+                "{name}"
+            );
+            let expected_routes = if outcome.is_some() {
+                vec![
+                    crate::domain::blackhole_rule(&admission.mitigation)
+                        .unwrap()
+                        .route()
+                        .unwrap(),
+                ]
+            } else {
+                vec![]
+            };
+            assert_eq!(speaker.routes().await, expected_routes, "{name}");
+            assert_eq!(speaker.adds.load(SeqCst), usize::from(!leased), "{name}");
+            assert_eq!(
+                speaker.leased_adds.load(SeqCst),
+                usize::from(leased),
+                "{name}"
+            );
+            assert_eq!(speaker.deletes.load(SeqCst), 0, "{name}");
+        }
+    }
+
+    #[tokio::test]
     async fn untracked_local_route_returns_409_before_persistence_or_add() {
         use crate::bgp::{BlackholeRoute, BlackholeSpeaker, UnrecognizedRoute};
         let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
             .lock()
             .await;
+        let replacements =
+            crate::observability::metrics::BLACKHOLE_REPLACED.with_label_values(&["pop-a"]);
+        let before = replacements.get();
         let prefix: ipnet::IpNet = "203.0.113.10/32".parse().unwrap();
         for case in [
             "recognized",
@@ -824,6 +926,7 @@ mod tests {
                         reason: case,
                     });
             }
+            let existing = speaker.routes().await;
             let error = admit_enforced(&repo, &speaker, intent("203.0.113.10/32"))
                 .await
                 .unwrap_err();
@@ -834,6 +937,8 @@ mod tests {
             assert_eq!(error.status_code(), axum::http::StatusCode::CONFLICT);
             assert_eq!(repo.count_active_global().await.unwrap(), 0, "{case}");
             assert_eq!(speaker.adds.load(SeqCst), 0, "{case}");
+            assert_eq!(speaker.routes().await, existing, "{case}");
+            assert_eq!(replacements.get(), before, "{case}");
             // Negative control: another prefix is admitted and added.
             admit_enforced(&repo, &speaker, intent("203.0.113.12/32"))
                 .await
@@ -851,6 +956,7 @@ mod tests {
         );
         assert_eq!(repo.count_active_global().await.unwrap(), 0);
         assert_eq!(speaker.adds.load(SeqCst), 0);
+        assert_eq!(replacements.get(), before);
     }
 
     #[tokio::test]
@@ -1517,6 +1623,9 @@ mod tests {
         let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
             .lock()
             .await;
+        let replacements =
+            crate::observability::metrics::BLACKHOLE_REPLACED.with_label_values(&["pop-a"]);
+        let before = replacements.get();
         let repo = MockRepository::new();
         let speaker = FaultyBlackholes::default();
         let lease = LeaseKeeper::new(OWNER.into(), 60);
@@ -1559,6 +1668,7 @@ mod tests {
         assert_eq!(speaker.routes().await, [untracked]);
         assert_eq!(speaker.deletes.load(SeqCst), 0);
         assert_eq!(speaker.adds.load(SeqCst), 0);
+        assert_eq!(replacements.get(), before);
     }
 
     fn lease_settings(config: &BlackholeConfig) -> Settings {

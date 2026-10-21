@@ -37,7 +37,8 @@ import { FlowSpecRuleDialog } from "@/components/dashboard/flowspec-rule-dialog"
 import { describeMatch } from "@/components/dashboard/flowspec-preview"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { formatRelative, formatTimeRemaining, formatUtc } from "@/lib/format"
+import { formatRelative, formatTimeRemaining } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 
 type SortField = "status" | "victim_ip" | "vector" | "customer_id" | "created_at" | "expires_at"
 
@@ -55,6 +56,7 @@ interface MitigationsContentLiveProps {
 }
 
 export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: MitigationsContentLiveProps = {}) {
+  const { formatTime } = useTimeFormat()
   const router = useRouter()
   const [statusFilters, setStatusFilters] = useState<string[]>(initialSearch ? [] : ["active"])
   const [searchQuery, setSearchQuery] = useState(initialSearch ?? "")
@@ -399,6 +401,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
             }}
             disabled={filteredMitigations.length === 0}
             aria-label="Export CSV"
+            title="CSV timestamps remain UTC"
           >
             <Download className="size-4" aria-hidden="true" />
           </Button>
@@ -580,7 +583,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                       <TableCell className="hidden text-muted-foreground md:table-cell">{vector}</TableCell>
                       <TableCell className="hidden max-w-56 whitespace-normal break-words text-muted-foreground md:table-cell">{match}</TableCell>
                       <TableCell className="hidden text-muted-foreground tabular-nums md:table-cell">
-                        <time dateTime={mitigation.created_at} title={formatUtc(mitigation.created_at, now)}>
+                        <time dateTime={mitigation.created_at} title={formatTime(mitigation.created_at, now)}>
                           {formatRelative(mitigation.created_at, now)}
                         </time>
                       </TableCell>
@@ -591,7 +594,7 @@ export function MitigationsContentLive({ initialSearch, initialMitigateOpen }: M
                         >
                           {live ? <><span className="md:hidden">Expires in </span>{formatTimeRemaining(mitigation.expires_at, now)}</> : formatRelative(mitigation.expires_at, now)}
                         </time>
-                        <span className="block whitespace-nowrap text-xs text-muted-foreground">{formatUtc(mitigation.expires_at, now)}</span>
+                        <span className="block whitespace-nowrap text-xs text-muted-foreground">{formatTime(mitigation.expires_at, now)}</span>
                       </TableCell>
                       <TableCell className="order-6 col-start-2 justify-self-end p-0 md:px-3 md:py-1">
                         <div className="flex items-center justify-end gap-1">

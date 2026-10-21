@@ -473,6 +473,13 @@ administrator config API for destination settings, secrets and event filters.
 
 ### Next.js Web UI
 
+Open **Preferences** from the operator menu or the gear button to choose the
+display timezone. UTC is the default. This setting is saved in this browser
+across accounts; it is not an account setting. Absolute times, chart labels and
+tooltips use the selected zone, with UTC offsets to distinguish repeated DST
+hours. API timestamps, CSV/incident reports, relative durations, expiry and
+notification quiet hours remain unchanged. Notification quiet hours use UTC.
+
 Real-time visibility into mitigation state:
 
 - **Overview** - Active mitigations, BGP session status, quota usage, 24h activity chart
