@@ -1295,6 +1295,9 @@ impl ReconciliationLoop {
         else {
             return;
         };
+        let Some(epoch) = state.fence.with_observation_epoch(|epoch| epoch) else {
+            return;
+        };
         let sessions = match sessions {
             Some(Ok(peers)) => Some(peers.as_slice()),
             _ => None,
@@ -1320,7 +1323,7 @@ impl ReconciliationLoop {
                 // error does not clear degraded health or the unexported alert.
                 evidence.warning = state
                     .export_evidence
-                    .get(id)
+                    .get(id, Some(epoch))
                     .and_then(|previous| previous.warning);
             }
             if let Some(warning) = &evidence.warning {
@@ -1329,24 +1332,29 @@ impl ReconciliationLoop {
             }
             routes.insert(id, (prefix.to_string(), evidence));
         }
-        state.export_evidence.replace(now, routes);
-        let summary = state.export_evidence.summary();
-        for disposition in crate::bgp::ExportDisposition::ALL {
-            BLACKHOLE_EXPORT_PEERS
-                .with_label_values(&[disposition.as_str()])
-                .set(summary.counts.get(disposition) as f64);
-        }
-        for reason in UNEXPORTED_REASONS {
-            let count = summary
-                .unexported
-                .iter()
-                .filter(|route| route.warning.reason == reason)
-                .count();
-            BLACKHOLE_UNEXPORTED
-                .with_label_values(&[reason])
-                .set(count as f64);
-        }
-        BLACKHOLE_EXPORT_READ_ERRORS.set(summary.errors as f64);
+        state.fence.with_observation_epoch(|current| {
+            if current != Some(epoch) {
+                return;
+            }
+            state.export_evidence.replace(now, epoch, routes);
+            let summary = state.export_evidence.summary(current);
+            for disposition in crate::bgp::ExportDisposition::ALL {
+                BLACKHOLE_EXPORT_PEERS
+                    .with_label_values(&[disposition.as_str()])
+                    .set(summary.counts.get(disposition) as f64);
+            }
+            for reason in UNEXPORTED_REASONS {
+                let count = summary
+                    .unexported
+                    .iter()
+                    .filter(|route| route.warning.reason == reason)
+                    .count();
+                BLACKHOLE_UNEXPORTED
+                    .with_label_values(&[reason])
+                    .set(count as f64);
+            }
+            BLACKHOLE_EXPORT_READ_ERRORS.set(summary.errors as f64);
+        });
     }
 
     fn build_flowspec_rule(
@@ -2744,7 +2752,7 @@ mod tests {
     /// A POP-scoped loop whose current configuration is `config`.
     fn blackhole_reconciler(
         repo: Arc<MockRepository>,
-        speaker: Arc<FaultyBlackholes>,
+        speaker: Arc<dyn FlowSpecAnnouncer>,
         config: crate::config::BlackholeConfig,
         dry_run: bool,
     ) -> ReconciliationLoop {
@@ -2859,6 +2867,124 @@ mod tests {
         }
     }
 
+    struct PausedExportRead {
+        started: tokio::sync::Notify,
+        proceed: tokio::sync::Notify,
+    }
+
+    impl FlowSpecAnnouncer for PausedExportRead {
+        fn backend(&self) -> &'static str {
+            "mock"
+        }
+
+        fn export_observer(&self) -> Option<&dyn crate::bgp::ExportObserver> {
+            Some(self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for PausedExportRead {
+        async fn announce(&self, _: &FlowSpecRule) -> Result<()> {
+            panic!("export observation must not announce")
+        }
+
+        async fn withdraw(&self, _: &FlowSpecRule) -> Result<()> {
+            panic!("export observation must not withdraw")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::bgp::ExportObserver for PausedExportRead {
+        async fn blackhole_exports(
+            &self,
+            _: &ipnet::IpNet,
+        ) -> Result<Option<Vec<crate::bgp::PeerExport>>> {
+            self.started.notify_one();
+            self.proceed.notified().await;
+            Ok(Some(vec![crate::bgp::PeerExport {
+                peer_address: "192.0.2.10".into(),
+                disposition: crate::bgp::ExportDisposition::Committed,
+                reason: String::new(),
+                explain_code: String::new(),
+                detail: String::new(),
+                advertised_path_id: 0,
+            }]))
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn export_read_crossing_fence_loss_cannot_publish_current_evidence() {
+        use crate::domain::{BlackholeExportEvidence, ExportObservation};
+        use crate::observability::metrics::BLACKHOLE_EXPORT_PEERS;
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for regain_in_flight in [false, true] {
+            let speaker = Arc::new(PausedExportRead {
+                started: tokio::sync::Notify::new(),
+                proceed: tokio::sync::Notify::new(),
+            });
+            let reconciler = Arc::new(blackhole_reconciler(
+                Arc::new(MockRepository::new()),
+                speaker.clone(),
+                live_config(),
+                false,
+            ));
+            let state = reconciler.state.clone().unwrap();
+            let id = uuid::Uuid::new_v4();
+            let prefix: ipnet::IpNet = "192.0.2.1/32".parse().unwrap();
+            let old_time = chrono::DateTime::from_timestamp(0, 0).unwrap();
+            let old = BlackholeExportEvidence::from_read(&Ok(Some(vec![])), None, old_time);
+            state
+                .export_evidence
+                .replace(old_time, 0, [(id, (prefix.to_string(), old))].into());
+            BLACKHOLE_EXPORT_PEERS
+                .with_label_values(&["committed"])
+                .set(12.0);
+            let pass = tokio::spawn({
+                let reconciler = reconciler.clone();
+                async move {
+                    reconciler
+                        .observe_blackhole_exports(Some(vec![(id, prefix)]), None)
+                        .await
+                }
+            });
+            speaker.started.notified().await;
+            state.fence.set(false);
+            if regain_in_flight {
+                state.fence.set(true);
+            }
+            speaker.proceed.notify_one();
+            pass.await.unwrap();
+            let retained = state
+                .fence
+                .with_observation_epoch(|epoch| state.export_evidence.get(id, epoch).unwrap());
+            assert!(retained.historical, "regain_in_flight={regain_in_flight}");
+            assert_eq!(
+                retained.observed_at,
+                Some(old_time),
+                "crossing pass was discarded"
+            );
+            assert_eq!(retained.counts.committed, 0);
+            assert_eq!(
+                BLACKHOLE_EXPORT_PEERS
+                    .with_label_values(&["committed"])
+                    .get(),
+                12.0
+            );
+
+            state.fence.set(true);
+            speaker.proceed.notify_one();
+            reconciler
+                .observe_blackhole_exports(Some(vec![(id, prefix)]), None)
+                .await;
+            let current = state
+                .fence
+                .with_observation_epoch(|epoch| state.export_evidence.get(id, epoch).unwrap());
+            assert!(!current.historical);
+            assert_eq!(current.status, ExportObservation::Observed);
+            assert_eq!(current.counts.committed, 1);
+        }
+    }
+
     /// A stalled export read spends the pass's budget and no more: expiry has
     /// run, the lifecycle mutex is free during the stall, the pass returns,
     /// and every unread blackhole is an error (unknown export), keeping its
@@ -2900,7 +3026,7 @@ mod tests {
         );
         reconciler.reconcile().await.unwrap();
         let state = reconciler.state.clone().unwrap();
-        assert_eq!(state.export_evidence.summary().unexported.len(), 1);
+        assert_eq!(state.export_evidence.summary(Some(0)).unexported.len(), 1);
 
         let expired = expired_mitigation("192.0.2.9");
         repo.insert_mitigation(&expired).await.unwrap();
@@ -2924,8 +3050,12 @@ mod tests {
             .unwrap();
         assert!(started.elapsed() <= EXPORT_OBSERVATION_BUDGET);
 
-        let evidence =
-            |mitigation: &Mitigation| state.export_evidence.get(mitigation.mitigation_id).unwrap();
+        let evidence = |mitigation: &Mitigation| {
+            state
+                .export_evidence
+                .get(mitigation.mitigation_id, Some(0))
+                .unwrap()
+        };
         for row in &rows {
             let evidence = evidence(row);
             assert_eq!(evidence.status, ExportObservation::Error);
@@ -2934,7 +3064,7 @@ mod tests {
         }
         assert_eq!(evidence(&rows[0]).warning.unwrap().reason, "export_policy");
         assert_eq!(evidence(&rows[1]).warning, None);
-        let summary = state.export_evidence.summary();
+        let summary = state.export_evidence.summary(Some(0));
         assert_eq!((summary.blackholes, summary.errors), (2, 2));
         assert_eq!(
             summary.unexported.len(),
@@ -2993,7 +3123,8 @@ mod tests {
         let adds = speaker.adds.load(SeqCst);
         assert_eq!(adds, 3, "repairs, not observation, add the missing routes");
         let store = &reconciler.state.as_ref().unwrap().export_evidence;
-        let evidence = |mitigation: &Mitigation| store.get(mitigation.mitigation_id).unwrap();
+        let evidence =
+            |mitigation: &Mitigation| store.get(mitigation.mitigation_id, Some(0)).unwrap();
         assert_eq!(evidence(&rows[0]).counts.committed, 1);
         assert_eq!(evidence(&rows[0]).warning, None);
         assert_eq!(evidence(&rows[1]).warning.unwrap().reason, "export_policy");
@@ -3003,10 +3134,10 @@ mod tests {
         // No peer observer on this speaker: the session join is unknown, not none.
         assert_eq!(evidence(&rows[0]).not_established_peers, None);
         assert!(
-            store.get(simulated.mitigation_id).is_none(),
+            store.get(simulated.mitigation_id, Some(0)).is_none(),
             "dry-run origin"
         );
-        assert_eq!(store.summary().blackholes, 3);
+        assert_eq!(store.summary(Some(0)).blackholes, 3);
         assert_eq!(label("export_policy"), 1.0);
         assert_eq!(label("no_established_peer"), 0.0);
         assert_eq!(BLACKHOLE_EXPORT_READ_ERRORS.get(), 1.0);

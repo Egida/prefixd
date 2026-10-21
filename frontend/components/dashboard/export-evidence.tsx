@@ -19,6 +19,7 @@ export const DISPOSITION_LABEL: Record<ExportDisposition, Pill> = {
 }
 
 function summary(evidence: BlackholeExportEvidence): Pill {
+  if (evidence.historical) return { label: "Historical export evidence", tone: "neutral" }
   const listed = evidence.peers.length
 
   switch (evidence.status) {
@@ -49,11 +50,18 @@ export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExpor
         <StatusPill tone={overall.tone}>{overall.label}</StatusPill>
       </CardHeader>
       <CardContent className="space-y-4">
+        {evidence.historical && (
+          <p role="status" className="text-sm text-muted-foreground">
+            Controller ownership was lost after this observation. Current export is unknown until a fresh complete read.
+          </p>
+        )}
         {evidence.warning && (
-          <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+          <div role="alert" className={`flex items-start gap-2 rounded-md border p-3 text-sm ${evidence.historical ? "text-muted-foreground" : "border-destructive/30 bg-destructive/10 text-destructive"}`}>
             <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
             <span>
-              {evidence.status === "error" ? "At the last complete read, no Established peer had" : "No Established peer has"} this blackhole in its Adj-RIB-Out, so no router is sent it. {evidence.warning.message}{" "}
+              {evidence.historical
+                ? "At the retained observation, no Established peer had this blackhole in its Adj-RIB-Out."
+                : <>{evidence.status === "error" ? "At the last complete read, no Established peer had" : "No Established peer has"} this blackhole in its Adj-RIB-Out, so no router is sent it. {evidence.warning.message}</>}{" "}
               <span className="font-mono">({evidence.warning.reason})</span>
             </span>
           </div>
@@ -65,7 +73,9 @@ export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExpor
         )}
         {evidence.status === "no_local_route" && (
           <p className="text-sm text-muted-foreground">
-            The speaker holds no local route for this blackhole, so it is exported to no peer. Reconciliation re-adds it; check repair errors if this persists.
+            {evidence.historical
+              ? "At the retained observation, the speaker held no local route for this blackhole."
+              : "The speaker holds no local route for this blackhole, so it is exported to no peer. Reconciliation re-adds it; check repair errors if this persists."}
           </p>
         )}
         {evidence.status === "unsupported" && (
@@ -81,7 +91,7 @@ export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExpor
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   <TableHead>Peer</TableHead>
-                  <TableHead>Export</TableHead>
+                  <TableHead>{evidence.historical ? "Export at observation" : "Export"}</TableHead>
                   <TableHead>Reason</TableHead>
                   <TableHead>Explain code</TableHead>
                 </TableRow>
@@ -93,7 +103,7 @@ export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExpor
                   return (
                     <TableRow key={peer.peer_address}>
                       <TableCell className="font-mono">{peer.peer_address}</TableCell>
-                      <TableCell><StatusPill tone={disposition.tone}>{disposition.label}</StatusPill></TableCell>
+                      <TableCell><StatusPill tone={evidence.historical ? "neutral" : disposition.tone}>{disposition.label}</StatusPill></TableCell>
                       <TableCell>
                         <span className="font-mono">{peer.reason || "—"}</span>
                         {peer.detail && peer.disposition !== "committed" && <span className="block text-xs text-muted-foreground">{peer.detail}</span>}
@@ -107,12 +117,12 @@ export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExpor
           </div>
         )}
 
-        {(evidence.status === "observed" || evidence.status === "no_local_route") && (
+        {(evidence.historical || evidence.status === "observed" || evidence.status === "no_local_route") && (
           notEstablished === null ? (
             <p className="text-sm text-muted-foreground">Peer sessions were not observed, so configured peers without a session are not shown.</p>
           ) : notEstablished.length > 0 ? (
             <p className="text-sm">
-              <span className="text-muted-foreground">Configured, not Established (sent nothing): </span>
+              <span className="text-muted-foreground">{evidence.historical && "At the retained observation: "}Configured, not Established (sent nothing): </span>
               {notEstablished.map((peer, index) => (
                 <span key={peer.peer_address}>
                   {index > 0 && ", "}
