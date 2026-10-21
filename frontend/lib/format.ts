@@ -1,4 +1,4 @@
-// Shared display formatters. Every operator-facing time is UTC, 24-hour.
+// Shared display formatters. Display zones do not change stored timestamps or durations.
 
 /** Shown for a value the backend did not report. Pair with sr-only text where context is unclear. */
 export const MISSING = "\u2014"
@@ -33,37 +33,83 @@ export function formatPps(pps: number | null | undefined): string {
   return isReported(pps) ? scaled(pps, PPS_UNITS) : MISSING
 }
 
-const utcParts = new Intl.DateTimeFormat("en-US", {
-  timeZone: "UTC",
-  year: "numeric",
-  month: "short",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hourCycle: "h23",
-})
+export const DISPLAY_TIME_ZONES = ["UTC", ...Intl.supportedValuesOf("timeZone")]
+const supportedTimeZones = new Set(DISPLAY_TIME_ZONES)
+const dateFormatters = new Map<string, Intl.DateTimeFormat>()
 
-/** Absolute UTC time, e.g. "18 Oct 16:49:58 UTC"; the year appears only when it differs from now. */
-export function formatUtc(value: string | number | Date, now: number = Date.now()): string {
-  const date = new Date(value)
-
-  if (!Number.isFinite(date.getTime())) return MISSING
-  const part = Object.fromEntries(utcParts.formatToParts(date).map(p => [p.type, p.value]))
-  const year = date.getUTCFullYear() === new Date(now).getUTCFullYear() ? "" : ` ${part.year}`
-
-  return `${part.day} ${part.month}${year} ${part.hour}:${part.minute}:${part.second} UTC`
+export function isDisplayTimeZone(value: string | null): value is string {
+  return value !== null && supportedTimeZones.has(value)
 }
 
-/** Chart axis tick in UTC, e.g. "16:00", or "18 Oct 16:00" when buckets span days. */
-export function formatUtcTick(value: string | number | Date, withDate = false): string {
+function dateParts(date: Date, timeZone: string) {
+  if (!isDisplayTimeZone(timeZone)) throw new RangeError("Unsupported display timezone")
+  let formatter = dateFormatters.get(timeZone)
+
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+      timeZoneName: "longOffset",
+    })
+    dateFormatters.set(timeZone, formatter)
+  }
+
+  return Object.fromEntries(formatter.formatToParts(date).map(p => [p.type, p.value]))
+}
+
+function offsetLabel(parts: Record<string, string>): string {
+  const offset = parts.timeZoneName.replace("GMT", "UTC")
+
+  return offset === "UTC+00:00" ? "UTC" : offset
+}
+
+/** Absolute display time with an unambiguous UTC offset, including during repeated DST hours. */
+export function formatTimestamp(value: string | number | Date, timeZone = "UTC", now: number = Date.now()): string {
   const date = new Date(value)
 
   if (!Number.isFinite(date.getTime())) return MISSING
-  const part = Object.fromEntries(utcParts.formatToParts(date).map(p => [p.type, p.value]))
-  const time = `${part.hour}:${part.minute}`
+  const part = dateParts(date, timeZone)
+  const current = new Date(now)
+  const sameYear = Number.isFinite(current.getTime()) && part.year === dateParts(current, timeZone).year
+  const year = sameYear ? "" : ` ${part.year}`
+
+  return `${part.day} ${part.month}${year} ${part.hour}:${part.minute}:${part.second} ${offsetLabel(part)}`
+}
+
+/** Chart ticks retain the offset outside UTC so repeated local hours remain distinct. */
+export function formatTimestampTick(value: string | number | Date, timeZone = "UTC", withDate = false): string {
+  const date = new Date(value)
+
+  if (!Number.isFinite(date.getTime())) return MISSING
+  const part = dateParts(date, timeZone)
+  const time = `${part.hour}:${part.minute}${timeZone === "UTC" ? "" : ` ${offsetLabel(part)}`}`
 
   return withDate ? `${part.day} ${part.month} ${time}` : time
+}
+
+export function formatClock(value: number, timeZone = "UTC"): string {
+  const date = new Date(value)
+
+  if (!Number.isFinite(date.getTime())) return MISSING
+  const part = dateParts(date, timeZone)
+
+  return `${part.hour}:${part.minute}:${part.second} ${offsetLabel(part)}`
+}
+
+/** Calendar-day identity in the selected zone; does not change chart bucket instants. */
+export function displayDateKey(value: string | number | Date, timeZone = "UTC"): string {
+  const date = new Date(value)
+
+  if (!Number.isFinite(date.getTime())) return MISSING
+  const part = dateParts(date, timeZone)
+
+  return `${part.year}-${part.month}-${part.day}`
 }
 
 function compactDuration(ms: number): string {
@@ -80,7 +126,7 @@ function compactDuration(ms: number): string {
   return `${Math.floor(hours / 24)}d`
 }
 
-/** Relative time, e.g. "3m ago" or "in 26m". Show formatUtc alongside it in a tooltip or title. */
+/** Relative time, e.g. "3m ago" or "in 26m". Pair with an absolute display time. */
 export function formatRelative(value: string | number | Date, now: number = Date.now()): string {
   const time = new Date(value).getTime()
 

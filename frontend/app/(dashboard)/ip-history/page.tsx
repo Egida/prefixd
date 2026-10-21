@@ -13,7 +13,8 @@ import { StatusBadge } from "@/components/dashboard/status-badge"
 import { ActionBadge } from "@/components/dashboard/action-badge"
 import { Tag } from "@/components/dashboard/status-pill"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
-import { formatBps, formatUtc } from "@/lib/format"
+import { formatBps } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 import type { Mitigation } from "@/lib/api"
 import { IncidentReportDialog } from "@/components/dashboard/incident-report-dialog"
 import { getIncidentReport } from "@/lib/api"
@@ -23,6 +24,7 @@ type TimelineEntry =
   | { type: "mitigation"; timestamp: string; data: { mitigation_id: string; status: Mitigation["status"]; action_type: string; rate_bps: number | null; vector: string; created_at: string; withdrawn_at: string | null; expires_at: string } }
 
 export default function IpHistoryPage() {
+  const { formatTime } = useTimeFormat()
   const searchParams = useSearchParams()
   const router = useRouter()
   const initialIp = searchParams.get("ip") || ""
@@ -206,13 +208,13 @@ export default function IpHistoryPage() {
                         ) : (
                           <>
                             {entry.data.vector.replace(/_/g, " ")}
-                            {entry.data.withdrawn_at && <> · withdrawn {formatUtc(entry.data.withdrawn_at)}</>}
+                            {entry.data.withdrawn_at && <> · withdrawn {formatTime(entry.data.withdrawn_at)}</>}
                           </>
                         )}
                       </p>
                     </div>
                     <time dateTime={entry.timestamp} className="shrink-0 text-xs text-muted-foreground tabular-nums">
-                      {formatUtc(entry.timestamp)}
+                      {formatTime(entry.timestamp)}
                     </time>
                   </li>
                 ))}

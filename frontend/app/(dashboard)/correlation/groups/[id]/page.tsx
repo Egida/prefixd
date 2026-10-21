@@ -12,7 +12,7 @@ import { ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { isNotFound } from "@/lib/api"
 import { Table, TableBody, TableCell, TableFooter, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { formatConfidence, isConfidence } from "@/lib/confidence"
-import { formatUtc } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 import { AlertTriangle, CheckCircle2, Info } from "lucide-react"
 
 function statusLabel(status: string, corroborated: boolean) {
@@ -30,6 +30,7 @@ export default function SignalGroupDetailPage({
 }: {
   params: Promise<{ id: string }>
 }) {
+  const { formatTime } = useTimeFormat()
   const { id } = use(params)
 
   const { data: group, isLoading, error, mutate } = useSignalGroupDetail(id)
@@ -125,11 +126,11 @@ export default function SignalGroupDetailPage({
               {group.source_count} source{group.source_count !== 1 ? "s" : ""}
             </span>
             <span className="text-muted-foreground tabular-nums">
-              Created <time dateTime={group.created_at}>{formatUtc(group.created_at)}</time>
+              Created <time dateTime={group.created_at}>{formatTime(group.created_at)}</time>
             </span>
             <span className="text-muted-foreground tabular-nums">
               Window {group.status === "open" ? "expires" : group.status === "expired" ? "expired" : "closed"}{" "}
-              <time dateTime={group.window_expires_at}>{formatUtc(group.window_expires_at)}</time>
+              <time dateTime={group.window_expires_at}>{formatTime(group.window_expires_at)}</time>
             </span>
           </>
         }
@@ -164,7 +165,7 @@ export default function SignalGroupDetailPage({
                         </span>
                       </div>
                       <p className="mt-1 text-xs text-muted-foreground tabular-nums">
-                        {event.ingested_at ? formatUtc(event.ingested_at) : "Unknown ingest time"}
+                        {event.ingested_at ? formatTime(event.ingested_at) : "Unknown ingest time"}
                       </p>
                       <p className="mt-1 text-xs text-muted-foreground">
                         Event{" "}

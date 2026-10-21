@@ -15,7 +15,8 @@ import { toast } from "sonner"
 import { cn } from "@/lib/utils"
 import { useReducedMotion } from "@/hooks/use-reduced-motion"
 import { isConfidence } from "@/lib/confidence"
-import { MISSING, formatBps, formatPps, formatRelative, formatUtc } from "@/lib/format"
+import { MISSING, formatBps, formatPps, formatRelative } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 
 interface EventDetailPanelProps {
   event: Event | null
@@ -42,6 +43,7 @@ function parsePorts(portsJson: string): number[] {
 }
 
 export function EventDetailPanel({ event, onClose }: EventDetailPanelProps) {
+  const { formatTime } = useTimeFormat()
   const [copied, setCopied] = useState<string | null>(null)
   const reducedMotion = useReducedMotion()
 
@@ -173,9 +175,9 @@ export function EventDetailPanel({ event, onClose }: EventDetailPanelProps) {
           </CardHeader>
           <CardContent>
             <FieldList className="grid-cols-2">
-              <Field label="Event time"><span className="tabular-nums">{formatUtc(event.event_timestamp)}</span></Field>
+              <Field label="Event time"><span className="tabular-nums">{formatTime(event.event_timestamp)}</span></Field>
               <Field label="Ingested">
-                <time dateTime={event.ingested_at} title={formatUtc(event.ingested_at)} className="tabular-nums">{formatRelative(event.ingested_at)}</time>
+                <time dateTime={event.ingested_at} title={formatTime(event.ingested_at)} className="tabular-nums">{formatRelative(event.ingested_at)}</time>
               </Field>
             </FieldList>
           </CardContent>

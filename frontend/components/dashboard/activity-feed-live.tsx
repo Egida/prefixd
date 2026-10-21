@@ -5,7 +5,8 @@ import { Shield, AlertTriangle, User, FileText } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { useEvents, useAuditLog } from "@/hooks/use-api"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
-import { formatRelative, formatUtc } from "@/lib/format"
+import { formatRelative } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 
 interface ActivityItem {
   id: string
@@ -30,6 +31,7 @@ function getActivityIcon(type: ActivityItem["type"]) {
 }
 
 export function ActivityFeedLive() {
+  const { formatTime } = useTimeFormat()
   const { data: eventsResp, error: eventsError, isLoading: eventsLoading, mutate: retryEvents } = useEvents({ limit: 10 })
   const { data: auditResp, error: auditError, isLoading: auditLoading, mutate: retryAudit } = useAuditLog({ limit: 10 })
   const events = eventsResp?.events
@@ -134,7 +136,7 @@ export function ActivityFeedLive() {
               <div className="mt-0.5 text-muted-foreground">{getActivityIcon(activity.type)}</div>
               <div className="min-w-0 flex-1 text-sm">
                 <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-                  <time dateTime={activity.timestamp} title={formatUtc(activity.timestamp, now)} className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">
+                  <time dateTime={activity.timestamp} title={formatTime(activity.timestamp, now)} className="whitespace-nowrap text-xs text-muted-foreground tabular-nums">
                     {formatRelative(activity.timestamp, now)}
                   </time>
                   <span className="text-pretty">{activity.description}</span>
