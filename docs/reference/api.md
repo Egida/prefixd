@@ -757,6 +757,7 @@ the controller's snapshot and never calls the speaker.
 ```json
 "export_evidence": {
   "status": "observed",
+  "historical": false,
   "observed_at": "2026-10-20T12:00:00Z",
   "peers": [
     {"peer_address": "192.0.2.10", "disposition": "committed", "reason": "",
@@ -774,12 +775,23 @@ the controller's snapshot and never calls the speaker.
 
 | Field | Meaning |
 |-------|---------|
-| `status` | `observed` (read to the last page), `no_local_route` (the speaker holds no local route at the key), `error` (the read failed or was partial: export unknown, `peers` empty), `unsupported` (GoBGP) or `not_observed` (no pass has read it yet) |
+| `status` | `observed` (read to the last page), `no_local_route` (the speaker holds no local route at the key), `error` (the read failed or was partial: current export unknown), `unsupported` (GoBGP) or `not_observed` (no pass has read it yet) |
+| `historical` | `true` when retained evidence predates the controller's last loss of ownership, including after ownership returns. Only a fresh complete read makes that route current again; this is independent of `status` |
+| `observed_at` | Controller time of the read. Historical rows retain their original observation time even if a later refresh fails; `error` reports that new failure |
 | `peers` | One row per Established peer. `disposition` is `committed` (in that peer's Adj-RIB-Out, not proof of receipt, installation or enforcement), `withheld` or `pending`; `reason` and `explain_code` are rustbgpd's bounded codes and `detail` its unstable text |
-| `not_established_peers` | Configured peers without an Established session, which are sent nothing. `null` when the session read failed or is unsupported |
+| `not_established_peers` | Configured peers without an Established session at the observation, which were sent nothing. `null` when that session read failed or is unsupported |
 | `counts` | Peer rows by disposition |
 | `warning` | Present when an observed blackhole is committed to no Established peer: a bounded `reason` (`no_established_peer`, `export_policy`, `family_suppressed`, `family_not_negotiated`, `not_selected`, `outbound_prefix_limit`, `exact_export_rejected`, `export_rule`, `pending`, `mixed` or `other`) and a `message`. `export_policy` means a speaker export policy denied the route. With `status` `error`, it is the last complete read's warning, kept so a transient read error does not clear degraded health |
 | `error` | The read error when `status` is `error` |
+
+An ordinary failed read has no peer rows. If a refresh after loss of controller
+ownership fails, the response instead retains the historical peer rows, counts,
+session observations and original timestamp with `historical: true` and
+`status: "error"`. These rows do not establish current export. A successful
+`no_local_route` read is a fresh observation and clears those old peer rows.
+An in-flight observation spanning ownership loss is discarded, even if the
+controller regains ownership before the RPC returns. HTTP reads never refresh
+the snapshot themselves.
 
 ### Withdraw Mitigation
 
@@ -1920,6 +1932,7 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
       "last_renewal_result": "success"
     },
     "blackhole_exports": {
+      "historical": false,
       "observed_at": "2026-10-18T12:00:00Z",
       "blackholes": 2,
       "counts": {"committed": 3, "withheld": 1, "pending": 0},
@@ -1942,7 +1955,7 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
 | Status | Meaning |
 |--------|---------|
 | `healthy` | Database and supported observations succeeded; observed daemon is ready |
-| `degraded` | Database or supported observation failed, observed daemon is not ready, or an active blackhole is committed to no Established peer |
+| `degraded` | Database or supported observation failed, observed daemon is not ready, active blackhole export evidence is historical, or an active blackhole is committed to no Established peer |
 | `standby` | Another controller holds this POP's fence; this one mutates nothing (overrides the other values) |
 
 `speaker` is additive metadata: backend identity plus observation availability.
@@ -1975,6 +1988,12 @@ failed, so export is unknown), `no_local_route`, and `unexported`. Each
 with `mitigation_id`, `prefix`, a bounded `reason` and a `message`; any entry
 makes `status` `degraded`. A committed disposition is the peer's Adj-RIB-Out,
 not router receipt or enforcement.
+
+`historical` is true if any retained export evidence predates the controller's
+last loss of ownership. The top-level status remains `standby` while ownership
+is absent; after ownership returns, historical evidence makes it `degraded`
+until a fresh complete observation replaces each retained route. Historical
+counts and warnings describe the retained observation, not current export.
 
 Top-level `version` and `uptime_seconds` describe prefixd. `speaker.daemon`
 independently reports authenticated speaker process metadata: `observed`, `error`

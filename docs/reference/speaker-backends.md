@@ -569,6 +569,17 @@ speaker. The read is observation only: it sends no route mutation and adds no
 writer behavior, and a standby controller reads nothing because it runs no
 reconciliation.
 
+Losing controller ownership marks retained evidence as `historical` in detail
+and health responses without discarding peer rows or their observation time.
+Regaining ownership alone does not make those observations current. A failed
+refresh keeps historical rows and their original timestamp while reporting the
+new read error; a fresh complete read, including `no_local_route`, replaces
+them. Observations spanning a loss of ownership are discarded even if the
+controller regains ownership before the read returns. Health stays `standby`
+without ownership and becomes `degraded` after regain while evidence remains
+historical. The interface labels historical rows without a current green
+export claim. No route mutation behavior changes.
+
 rustbgpd lists one row per Established peer:
 
 - `committed`: the route is in that peer's Adj-RIB-Out, committed to its

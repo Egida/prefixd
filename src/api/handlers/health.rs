@@ -263,15 +263,16 @@ pub async fn health_detail(
     let ((mut status, bgp_map, active, db_status, gobgp_health), daemon) =
         tokio::join!(check_health_status(&state), observe_daemon_health(&state));
     // Read from the reconciler's snapshot: health never reads export itself.
-    let blackhole_exports = state
-        .announcer
-        .export_observer()
-        .map(|_| state.export_evidence.summary());
-    // An active blackhole committed to no Established peer reaches no router.
-    let unexported = blackhole_exports
+    let blackhole_exports = state.announcer.export_observer().map(|_| {
+        state
+            .fence
+            .with_observation_epoch(|epoch| state.export_evidence.summary(epoch))
+    });
+    // Historical export cannot establish current health after ownership returns.
+    let export_degraded = blackhole_exports
         .as_ref()
-        .is_some_and(|exports| !exports.unexported.is_empty());
-    if daemon.status == "error" || daemon.ready == Some(false) || unexported {
+        .is_some_and(|exports| exports.historical || !exports.unexported.is_empty());
+    if daemon.status == "error" || daemon.ready == Some(false) || export_degraded {
         status = "degraded".into();
     }
     // Another controller holds this POP's fence; this one mutates nothing.

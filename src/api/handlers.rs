@@ -1868,8 +1868,10 @@ pub async fn get_mitigation(
         // The reconciler's last snapshot; this request never reads the speaker.
         response.export_evidence = Some(match state.announcer.export_observer() {
             None => BlackholeExportEvidence::unobserved(ExportObservation::Unsupported),
-            Some(_) => state.export_evidence.get(id).unwrap_or_else(|| {
-                BlackholeExportEvidence::unobserved(ExportObservation::NotObserved)
+            Some(_) => state.fence.with_observation_epoch(|epoch| {
+                state.export_evidence.get(id, epoch).unwrap_or_else(|| {
+                    BlackholeExportEvidence::unobserved(ExportObservation::NotObserved)
+                })
             }),
         });
     }
@@ -3390,7 +3392,7 @@ mod tests {
             let reconciler =
                 crate::scheduler::ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false)
                     .with_app_state(state.clone());
-            let app = crate::api::create_test_router(state);
+            let app = crate::api::create_test_router(state.clone());
             let (status, created) = send(
                 &app,
                 "/v1/mitigations",
@@ -3431,6 +3433,86 @@ mod tests {
             assert_eq!(exports["blackholes"], 1);
             assert_eq!(exports["counts"]["committed"], 1);
             assert_eq!(exports["unexported"], json!([]));
+
+            let original = evidence.clone();
+            assert_eq!(original["historical"], false);
+            // If a detail request attempted an export RPC, this would stall.
+            speaker
+                .stall_exports
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            state.fence.set(false);
+            let (_, detail) =
+                tokio::time::timeout(std::time::Duration::from_secs(1), get(&app, &path))
+                    .await
+                    .expect("detail reads the snapshot without an export RPC");
+            assert_eq!(detail["export_evidence"]["historical"], true);
+            assert_eq!(
+                detail["export_evidence"]["observed_at"],
+                original["observed_at"]
+            );
+            assert_eq!(detail["export_evidence"]["peers"], original["peers"]);
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(health["status"], "standby");
+            assert_eq!(health["speaker"]["blackhole_exports"]["historical"], true);
+            state.fence.set(true);
+            let (_, detail) = get(&app, &path).await;
+            assert_eq!(
+                detail["export_evidence"]["historical"], true,
+                "regaining alone is not a new observation"
+            );
+            // A loss/regain with no intervening read must invalidate the same snapshot too.
+            state.fence.set(false);
+            state.fence.set(true);
+            let (_, detail) = get(&app, &path).await;
+            assert_eq!(detail["export_evidence"]["historical"], true);
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(
+                health["status"], "degraded",
+                "historical committed rows are not current health"
+            );
+            speaker
+                .stall_exports
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+
+            speaker.set_exports(
+                "203.0.113.10/32".parse().unwrap(),
+                Err("speaker unavailable".into()),
+            );
+            reconciler.reconcile().await.unwrap();
+            let (_, detail) = get(&app, &path).await;
+            let retained = &detail["export_evidence"];
+            assert_eq!(retained["status"], "error");
+            assert_eq!(retained["historical"], true);
+            assert_eq!(retained["observed_at"], original["observed_at"]);
+            assert_eq!(retained["peers"], original["peers"]);
+            assert!(
+                retained["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("speaker unavailable")
+            );
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(health["status"], "degraded");
+            assert_eq!(health["speaker"]["blackhole_exports"]["errors"], 1);
+
+            speaker.set_exports(
+                "203.0.113.10/32".parse().unwrap(),
+                Ok(vec![PeerExport {
+                    peer_address: "192.0.2.10".into(),
+                    disposition: ExportDisposition::Committed,
+                    reason: String::new(),
+                    explain_code: String::new(),
+                    detail: String::new(),
+                    advertised_path_id: 0,
+                }]),
+            );
+            reconciler.reconcile().await.unwrap();
+            let (_, detail) = get(&app, &path).await;
+            assert_eq!(detail["export_evidence"]["historical"], false);
+            assert_eq!(detail["export_evidence"]["status"], "observed");
+            let (_, health) = get(&app, "/v1/health/detail").await;
+            assert_eq!(health["status"], "healthy");
+            assert_eq!(health["speaker"]["blackhole_exports"]["historical"], false);
 
             // Export policy withholds it from the only Established peer.
             speaker.set_exports(

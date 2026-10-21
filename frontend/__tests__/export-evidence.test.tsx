@@ -1,8 +1,9 @@
 import { Suspense } from "react"
-import { act, render, screen, within } from "@testing-library/react"
+import { act, fireEvent, render, screen, within } from "@testing-library/react"
 import { describe, expect, it } from "vitest"
 import MitigationDetailPage from "@/app/(dashboard)/mitigations/[id]/page"
 import { DISPOSITION_LABEL, ExportEvidenceCard } from "@/components/dashboard/export-evidence"
+import { TimeZoneProvider, TIME_ZONE_STORAGE_KEY, useTimeZone } from "@/components/time-zone-provider"
 import type { BlackholeExportEvidence, Mitigation, PeerExport } from "@/lib/api"
 import { json, operatorResponse, renderApp, signIn, useFakeController } from "./support/fake-controller"
 
@@ -17,6 +18,7 @@ function peer(peer_address: string, disposition: PeerExport["disposition"], reas
 function evidence(overrides: Partial<BlackholeExportEvidence>): BlackholeExportEvidence {
   return {
     status: "observed",
+    historical: false,
     observed_at: observedAt,
     peers: [],
     not_established_peers: [],
@@ -38,6 +40,56 @@ const mixed = evidence({
 })
 
 describe("export evidence card", () => {
+  it("formats the retained observation in the selected display timezone", () => {
+    function ChooseTimeZone() {
+      const { setTimeZone } = useTimeZone()
+
+      return <button onClick={() => setTimeZone("America/New_York")}>Choose New York</button>
+    }
+
+    const saved = localStorage.getItem(TIME_ZONE_STORAGE_KEY)
+
+    try {
+      localStorage.removeItem(TIME_ZONE_STORAGE_KEY)
+      render(<TimeZoneProvider><ChooseTimeZone /><ExportEvidenceCard evidence={{ ...mixed, historical: true }} now={Date.parse("2026-10-21T12:00:00Z")} /></TimeZoneProvider>)
+      expect(screen.getByText("20 Oct 12:00:00 UTC")).toHaveAttribute("dateTime", observedAt)
+      fireEvent.click(screen.getByRole("button", { name: "Choose New York" }))
+      expect(screen.getByText("20 Oct 08:00:00 UTC-04:00")).toHaveAttribute("dateTime", observedAt)
+      expect(screen.getByText("Historical export evidence")).toHaveAttribute("data-tone", "neutral")
+    } finally {
+      if (saved === null) localStorage.removeItem(TIME_ZONE_STORAGE_KEY)
+      else localStorage.setItem(TIME_ZONE_STORAGE_KEY, saved)
+    }
+  })
+
+  it("keeps historical rows and time without a green current export claim", () => {
+    render(<ExportEvidenceCard evidence={{ ...mixed, historical: true }} />)
+    const card = screen.getByTestId("export-evidence")
+    expect(within(card).getByText("Historical export evidence")).toHaveAttribute("data-tone", "neutral")
+    expect(within(card).getByRole("status")).toHaveTextContent("Current export is unknown until a fresh complete read")
+    expect(within(card).getAllByRole("row")).toHaveLength(4)
+    expect(within(card).getByText("Committed")).toHaveAttribute("data-tone", "neutral")
+    expect(within(card).getByText(/^20 Oct/)).toHaveAttribute("dateTime", observedAt)
+    expect(within(card).queryByText(/^Committed to/)).not.toBeInTheDocument()
+  })
+
+  it("keeps a failed historical refresh and its warning distinct from a current denial", () => {
+    render(<ExportEvidenceCard evidence={evidence({
+      historical: true,
+      status: "error",
+      peers: [peer("192.0.2.11", "withheld", "export_policy")],
+      counts: { committed: 0, withheld: 1, pending: 0 },
+      warning: { reason: "export_policy", message: "Export policy denies it." },
+      error: "speaker unavailable",
+    })} />)
+    const card = screen.getByTestId("export-evidence")
+    expect(card).toHaveTextContent("At the retained observation, no Established peer had this blackhole")
+    expect(card).toHaveTextContent("The last export read failed: speaker unavailable")
+    expect(card).toHaveTextContent("Export is unknown, not empty")
+    expect(card).not.toHaveTextContent("Export policy denies it.")
+    expect(within(card).getByRole("table")).toHaveTextContent("192.0.2.11")
+  })
+
   it("lists every Established peer with its disposition, reason and explain code, and peers without a session", () => {
     render(<ExportEvidenceCard evidence={mixed} />)
     const card = screen.getByTestId("export-evidence")

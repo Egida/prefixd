@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Retained blackhole export evidence is explicitly historical after controller
+  ownership is lost, including after ownership returns until a fresh complete
+  read. Detail preserves historical peer rows and their timestamp on a failed
+  refresh; health and the interface no longer present them as current export.
 - Rotate blackhole export reads between reconciliation passes so the shared
   observation budget does not repeatedly leave the same mitigations unread.
 - Blackhole export-policy warnings now direct operators to the speaker's export

@@ -6,6 +6,7 @@
 //! sends no speaker mutation and refuses mutation requests.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -50,6 +51,8 @@ pub fn fence_lock_key(owner: &str) -> i64 {
 #[derive(Debug)]
 pub struct ControllerFence {
     active: watch::Sender<bool>,
+    /// Changed under the watch's write lock, read under its read lock.
+    loss_epoch: AtomicU64,
 }
 
 impl ControllerFence {
@@ -57,6 +60,7 @@ impl ControllerFence {
     pub fn new(active: bool) -> Self {
         Self {
             active: watch::Sender::new(active),
+            loss_epoch: AtomicU64::new(0),
         }
     }
 
@@ -76,13 +80,28 @@ impl ControllerFence {
         self.active.subscribe()
     }
 
+    /// Keep the ownership state coherent with a synchronous observation read or publication.
+    pub(crate) fn with_observation_epoch<T>(&self, observe: impl FnOnce(Option<u64>) -> T) -> T {
+        let active = self.active.borrow();
+        let epoch = (*active).then(|| self.loss_epoch.load(Ordering::Relaxed));
+        let result = observe(epoch);
+        drop(active);
+        result
+    }
+
     pub(crate) fn set(&self, active: bool) {
         crate::observability::metrics::CONTROLLER_FENCE_ACTIVE.set(f64::from(u8::from(active)));
         // Notify only on a transition, so the steady-state checks wake no one.
-        if self
-            .active
-            .send_if_modified(|current| std::mem::replace(current, active) != active)
-        {
+        if self.active.send_if_modified(|current| {
+            if *current == active {
+                return false;
+            }
+            if !active {
+                self.loss_epoch.fetch_add(1, Ordering::Relaxed);
+            }
+            *current = active;
+            true
+        }) {
             if active {
                 tracing::info!("controller fence acquired; controller is active");
             } else {
@@ -323,6 +342,23 @@ impl BlackholeSpeaker for FencedAnnouncer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn observation_epoch_detects_a_coalesced_loss_and_regain() {
+        let fence = ControllerFence::new(true);
+        let mut subscriber = fence.subscribe();
+        assert_eq!(fence.with_observation_epoch(|epoch| epoch), Some(0));
+        fence.set(false);
+        assert_eq!(fence.with_observation_epoch(|epoch| epoch), None);
+        fence.set(false);
+        fence.set(true);
+        // The public boolean subscription remains unchanged and may coalesce transitions.
+        subscriber.changed().await.unwrap();
+        assert!(*subscriber.borrow_and_update());
+        assert_eq!(fence.with_observation_epoch(|epoch| epoch), Some(1));
+        fence.set(true);
+        assert_eq!(fence.with_observation_epoch(|epoch| epoch), Some(1));
+    }
 
     #[test]
     fn fence_lock_key_is_pinned() {

@@ -140,9 +140,12 @@ fn unexported(peers: &[PeerExport]) -> ExportWarning {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ToSchema)]
 pub struct BlackholeExportEvidence {
     pub status: ExportObservation,
-    /// Controller time of the read; null when not observed or unsupported.
+    /// Retained evidence from before the controller last lost ownership.
+    pub historical: bool,
+    /// Controller time of the read; preserved with historical rows on a failed
+    /// refresh. Null when not observed or unsupported.
     pub observed_at: Option<DateTime<Utc>>,
-    /// One row per Established peer, from a complete read; empty otherwise.
+    /// One row per Established peer from a complete read, possibly historical.
     pub peers: Vec<PeerExport>,
     /// Configured peers without an Established session. Null when the session
     /// read failed or is unsupported: unknown, not none.
@@ -158,6 +161,7 @@ impl BlackholeExportEvidence {
     pub fn unobserved(status: ExportObservation) -> Self {
         Self {
             status,
+            historical: false,
             observed_at: None,
             peers: vec![],
             not_established_peers: None,
@@ -221,6 +225,8 @@ pub struct UnexportedBlackhole {
 /// Authenticated health summary of the last export observation pass.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, ToSchema)]
 pub struct BlackholeExportSummary {
+    /// At least part of this snapshot predates the last loss of ownership.
+    pub historical: bool,
     /// Controller time of the last pass that observed export; null before one.
     pub observed_at: Option<DateTime<Utc>>,
     /// Active enforced blackholes in that pass.
@@ -238,7 +244,15 @@ pub struct BlackholeExportSummary {
 #[derive(Debug, Default)]
 struct Snapshot {
     observed_at: Option<DateTime<Utc>>,
-    routes: HashMap<Uuid, (String, BlackholeExportEvidence)>,
+    epoch: Option<u64>,
+    routes: HashMap<Uuid, StoredEvidence>,
+}
+
+#[derive(Debug)]
+struct StoredEvidence {
+    prefix: String,
+    evidence: BlackholeExportEvidence,
+    epoch: u64,
 }
 
 /// The last pass's evidence, held in memory. Reconciliation replaces it once
@@ -251,31 +265,66 @@ impl ExportEvidenceStore {
     pub fn replace(
         &self,
         observed_at: DateTime<Utc>,
+        epoch: u64,
         routes: HashMap<Uuid, (String, BlackholeExportEvidence)>,
     ) {
-        *self.0.write().unwrap_or_else(|poison| poison.into_inner()) = Snapshot {
+        let mut snapshot = self.0.write().unwrap_or_else(|poison| poison.into_inner());
+        let routes = routes
+            .into_iter()
+            .map(|(id, (prefix, mut evidence))| {
+                let mut route_epoch = epoch;
+                if evidence.status == ExportObservation::Error
+                    && let Some(previous) = snapshot.routes.get(&id)
+                    && previous.epoch != epoch
+                {
+                    // A failed refresh cannot turn evidence from a previous owner into current data.
+                    let error = evidence.error;
+                    evidence = previous.evidence.clone();
+                    evidence.status = ExportObservation::Error;
+                    evidence.error = error;
+                    route_epoch = previous.epoch;
+                }
+                (
+                    id,
+                    StoredEvidence {
+                        prefix,
+                        evidence,
+                        epoch: route_epoch,
+                    },
+                )
+            })
+            .collect();
+        *snapshot = Snapshot {
             observed_at: Some(observed_at),
+            epoch: Some(epoch),
             routes,
         };
     }
 
-    pub fn get(&self, mitigation_id: Uuid) -> Option<BlackholeExportEvidence> {
+    pub fn get(&self, mitigation_id: Uuid, epoch: Option<u64>) -> Option<BlackholeExportEvidence> {
         self.0
             .read()
             .unwrap_or_else(|poison| poison.into_inner())
             .routes
             .get(&mitigation_id)
-            .map(|(_, evidence)| evidence.clone())
+            .map(|stored| {
+                let mut evidence = stored.evidence.clone();
+                evidence.historical = epoch != Some(stored.epoch);
+                evidence
+            })
     }
 
-    pub fn summary(&self) -> BlackholeExportSummary {
+    pub fn summary(&self, epoch: Option<u64>) -> BlackholeExportSummary {
         let snapshot = self.0.read().unwrap_or_else(|poison| poison.into_inner());
         let mut summary = BlackholeExportSummary {
+            historical: snapshot.observed_at.is_some() && snapshot.epoch != epoch,
             observed_at: snapshot.observed_at,
             blackholes: snapshot.routes.len(),
             ..Default::default()
         };
-        for (id, (prefix, evidence)) in &snapshot.routes {
+        for (id, stored) in &snapshot.routes {
+            let evidence = &stored.evidence;
+            summary.historical |= epoch != Some(stored.epoch);
             match evidence.status {
                 ExportObservation::Error => summary.errors += 1,
                 ExportObservation::NoLocalRoute => summary.no_local_route += 1,
@@ -287,7 +336,7 @@ impl ExportEvidenceStore {
             if let Some(warning) = &evidence.warning {
                 summary.unexported.push(UnexportedBlackhole {
                     mitigation_id: *id,
-                    prefix: prefix.clone(),
+                    prefix: stored.prefix.clone(),
                     warning: warning.clone(),
                 });
             }
@@ -317,6 +366,83 @@ mod tests {
         BlackholeExportEvidence::from_read(&Ok(Some(peers)), None, Utc::now())
             .warning
             .map(|warning| warning.reason)
+    }
+
+    #[test]
+    fn a_failed_refresh_preserves_historical_rows_until_each_route_is_read_again() {
+        let store = ExportEvidenceStore::default();
+        let ids = [Uuid::new_v4(), Uuid::new_v4()];
+        let observed_at = Utc::now();
+        let committed = BlackholeExportEvidence::from_read(
+            &Ok(Some(vec![peer(
+                "192.0.2.1",
+                ExportDisposition::Committed,
+                "",
+            )])),
+            None,
+            observed_at,
+        );
+        let routes = || {
+            ids.into_iter()
+                .map(|id| (id, ("192.0.2.10/32".into(), committed.clone())))
+                .collect()
+        };
+        store.replace(observed_at, 0, routes());
+        assert!(!store.get(ids[0], Some(0)).unwrap().historical);
+        for epoch in [None, Some(1)] {
+            let historical = store.get(ids[0], epoch).unwrap();
+            assert!(historical.historical);
+            assert_eq!(historical.observed_at, Some(observed_at));
+            assert_eq!(historical.peers, committed.peers);
+            assert!(store.summary(epoch).historical);
+        }
+
+        let later = observed_at + chrono::Duration::seconds(30);
+        let failed = BlackholeExportEvidence::from_read(
+            &Err(crate::error::PrefixdError::Internal(
+                "speaker unavailable".into(),
+            )),
+            None,
+            later,
+        );
+        store.replace(
+            later,
+            1,
+            [
+                (ids[0], ("192.0.2.10/32".into(), failed)),
+                (ids[1], ("192.0.2.11/32".into(), committed.clone())),
+            ]
+            .into(),
+        );
+        let historical = store.get(ids[0], Some(1)).unwrap();
+        assert_eq!(historical.status, ExportObservation::Error);
+        assert!(historical.historical);
+        assert_eq!(historical.observed_at, Some(observed_at));
+        assert_eq!(historical.peers, committed.peers);
+        assert_eq!(historical.counts, committed.counts);
+        assert_eq!(
+            historical.error.as_deref(),
+            Some("internal error: speaker unavailable")
+        );
+        assert!(
+            !store.get(ids[1], Some(1)).unwrap().historical,
+            "freshness is per route"
+        );
+        assert!(store.summary(Some(1)).historical);
+        assert_eq!(store.summary(Some(1)).errors, 1);
+
+        let missing = BlackholeExportEvidence::from_read(&Ok(None), None, later);
+        store.replace(
+            later,
+            1,
+            [(ids[0], ("192.0.2.10/32".into(), missing))].into(),
+        );
+        let current = store.get(ids[0], Some(1)).unwrap();
+        assert!(!current.historical);
+        assert_eq!(current.status, ExportObservation::NoLocalRoute);
+        assert_eq!(current.observed_at, Some(later));
+        assert!(current.peers.is_empty());
+        assert!(!store.summary(Some(1)).historical);
     }
 
     #[test]
@@ -439,10 +565,11 @@ mod tests {
         );
 
         let store = ExportEvidenceStore::default();
-        assert_eq!(store.summary(), BlackholeExportSummary::default());
+        assert_eq!(store.summary(Some(0)), BlackholeExportSummary::default());
         let ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
         store.replace(
             now,
+            0,
             [
                 (ids[0], ("192.0.2.10/32".to_owned(), failed)),
                 (
@@ -456,13 +583,16 @@ mod tests {
             ]
             .into(),
         );
-        let summary = store.summary();
+        let summary = store.summary(Some(0));
         assert_eq!(
             (summary.blackholes, summary.errors, summary.no_local_route),
             (3, 1, 1)
         );
         assert_eq!(summary.unexported.len(), 1);
         assert_eq!(summary.unexported[0].mitigation_id, ids[1]);
-        assert_eq!(store.get(ids[0]).unwrap().status, ExportObservation::Error);
+        assert_eq!(
+            store.get(ids[0], Some(0)).unwrap().status,
+            ExportObservation::Error
+        );
     }
 }

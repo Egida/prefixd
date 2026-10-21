@@ -69,8 +69,10 @@ export interface DispositionCounts {
 
 /** Export evidence for an active enforced blackhole from the last reconciliation pass. */
 export interface BlackholeExportEvidence {
-  /** `error` is unknown export, never an empty peer list. */
+  /** `error` means current export is unknown; historical rows may remain. */
   status: "observed" | "no_local_route" | "error" | "unsupported" | "not_observed"
+  /** Retained evidence from before the controller last lost ownership. */
+  historical: boolean
   observed_at: string | null
   peers: PeerExport[]
   /** Null when sessions were not observed: unknown, not none. */
@@ -207,6 +209,7 @@ export interface HealthResponse {
     }
     /** Present when the speaker reports blackhole export. */
     blackhole_exports?: {
+      historical: boolean
       observed_at: string | null
       blackholes: number
       counts: DispositionCounts
