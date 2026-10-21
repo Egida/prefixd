@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   updates absolute times, charts and tooltips; UTC remains the default, and API
   timestamps, exports, TTLs and notification quiet hours stay unchanged.
 
+### Fixed
+
+- Blackhole export-policy warnings now direct operators to the speaker's export
+  policy without guessing that RPKI validation caused the denial.
+
 ## [0.21.0] - 2026-10-21
 
 prefixd 0.21.0 adds blackhole host routes on rustbgpd, created by Admins or by
