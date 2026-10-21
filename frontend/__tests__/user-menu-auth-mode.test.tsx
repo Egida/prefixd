@@ -1,6 +1,7 @@
 import { act } from "react"
 import { describe, expect, it } from "vitest"
 import { fireEvent, screen, waitFor } from "@testing-library/react"
+import { TimeZoneProvider } from "@/components/time-zone-provider"
 import { UserMenu } from "@/components/user-menu"
 import { deferred, failure, json, operatorResponse, renderApp, settle, useFakeController } from "./support/fake-controller"
 
@@ -35,7 +36,7 @@ describe("operator menu authentication mode", () => {
     { label: "auth is loading", mode: "credentials", health: "ok", auth: "pending" },
   ] as const)("hides a retained named operator when $label", async ({ mode, health, auth }) => {
     session({ mode, health, auth })
-    renderApp(<UserMenu />)
+    renderApp(<TimeZoneProvider><UserMenu /></TimeZoneProvider>)
     await waitFor(() => expect(controller.calls("GET", "/v1/health")).toHaveLength(1))
     await settle()
     expect(screen.queryByRole("button", { name: "Operator menu for alice" })).not.toBeInTheDocument()
@@ -44,23 +45,25 @@ describe("operator menu authentication mode", () => {
     expect(screen.queryByText("Quiet hours (UTC)")).not.toBeInTheDocument()
   })
 
-  it("removes an open named preferences dialog when mode becomes none", async () => {
+  it("removes account preferences but keeps browser display settings when mode becomes none", async () => {
     session({})
-    const { mutate } = renderApp(<UserMenu />)
+    const { mutate } = renderApp(<TimeZoneProvider><UserMenu /></TimeZoneProvider>)
     await openMenu()
-    fireEvent.click(await screen.findByRole("menuitem", { name: "Notifications" }))
-    expect(await screen.findByRole("dialog", { name: "Notification preferences" })).toBeInTheDocument()
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Preferences" }))
+    expect(await screen.findByRole("dialog", { name: "Preferences" })).toBeInTheDocument()
     expect(await screen.findByText("Quiet hours (UTC)")).toBeInTheDocument()
     controller.route("GET", "/v1/health", () => json({ status: "ok", version: "test", auth_mode: "none" }))
     await act(() => mutate()("health"))
-    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByText("Quiet hours (UTC)")).not.toBeInTheDocument())
+    expect(screen.getByRole("dialog", { name: "Preferences" })).toBeInTheDocument()
+    expect(screen.getByLabelText("Display timezone")).toBeInTheDocument()
     expect(screen.queryByText("alice")).not.toBeInTheDocument()
     expect(controller.calls("POST", "/v1/auth/logout")).toHaveLength(0)
   })
 
   it.each(["credentials", "bearer"])("preserves named sign out in %s mode", async (mode) => {
     session({ mode })
-    const { router } = renderApp(<UserMenu />)
+    const { router } = renderApp(<TimeZoneProvider><UserMenu /></TimeZoneProvider>)
     await openMenu()
     fireEvent.click(await screen.findByRole("menuitem", { name: "Sign out" }))
     await waitFor(() => expect(controller.calls("POST", "/v1/auth/logout")).toHaveLength(1))
@@ -69,9 +72,24 @@ describe("operator menu authentication mode", () => {
 
   it("has no named controls without an authenticated operator", async () => {
     session({ operator: false })
-    renderApp(<UserMenu />)
+    renderApp(<TimeZoneProvider><UserMenu /></TimeZoneProvider>)
     await waitFor(() => expect(controller.calls("GET", "/v1/auth/me")).toHaveLength(1))
     await settle()
-    expect(screen.queryByRole("button")).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Preferences" })).toBeInTheDocument()
+    expect(screen.queryByText("alice")).not.toBeInTheDocument()
+  })
+
+  it.each(["none", "bearer"])("offers browser preferences without an account in %s mode", async (mode) => {
+    session({ mode, operator: false })
+    renderApp(<TimeZoneProvider><UserMenu /></TimeZoneProvider>)
+    const trigger = await screen.findByRole("button", { name: "Preferences" })
+    fireEvent.click(trigger)
+    expect(await screen.findByRole("dialog", { name: "Preferences" })).toBeInTheDocument()
+    expect(screen.getByRole("combobox", { name: "Display timezone" })).toBeInTheDocument()
+    expect(screen.queryByText("Quiet hours (UTC)")).not.toBeInTheDocument()
+    expect(controller.calls("GET", "/v1/preferences")).toHaveLength(0)
+    expect(screen.queryByText("Sign out")).not.toBeInTheDocument()
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Preferences" }), { key: "Escape" })
+    await waitFor(() => expect(trigger).toHaveFocus())
   })
 })

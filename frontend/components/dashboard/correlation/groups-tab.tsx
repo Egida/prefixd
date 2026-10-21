@@ -10,7 +10,8 @@ import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/stat
 import { useSignalGroupsPaginated } from "@/hooks/use-api"
 import { Loader2 } from "lucide-react"
 import { SignalGroupStatusBadge } from "./signals-tab"
-import { MISSING, formatRelative, formatUtc } from "@/lib/format"
+import { MISSING, formatRelative } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 import { formatConfidence, isConfidence } from "@/lib/confidence"
 
 const STATUS_OPTIONS = [
@@ -31,6 +32,7 @@ const VECTOR_OPTIONS = [
 ]
 
 export function GroupsTab() {
+  const { formatTime } = useTimeFormat()
   const searchParams = useSearchParams()
   const router = useRouter()
 
@@ -164,13 +166,13 @@ export function GroupsTab() {
                   </TableCell>
                   <TableCell numeric>{group.source_count}</TableCell>
                   <TableCell numeric className="text-muted-foreground">
-                    <time dateTime={group.created_at} title={formatUtc(group.created_at)}>{formatRelative(group.created_at)}</time>
+                    <time dateTime={group.created_at} title={formatTime(group.created_at)}>{formatRelative(group.created_at)}</time>
                   </TableCell>
                   <TableCell numeric className="text-muted-foreground">
                     {group.status === "open"
                       ? <>
                           <time dateTime={group.window_expires_at} className="text-foreground">{formatRelative(group.window_expires_at)}</time>
-                          <span className="block whitespace-nowrap text-xs">{formatUtc(group.window_expires_at)}</span>
+                          <span className="block whitespace-nowrap text-xs">{formatTime(group.window_expires_at)}</span>
                         </>
                       : MISSING}
                   </TableCell>

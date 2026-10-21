@@ -6,7 +6,8 @@ import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, Download } from
 import { Tag } from "@/components/dashboard/status-pill"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { formatBps, formatPps, formatRelative, formatUtc } from "@/lib/format"
+import { formatBps, formatPps, formatRelative } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 import { ConfidenceBar } from "@/components/dashboard/confidence-bar"
 import { EventDetailPanel } from "@/components/dashboard/event-detail-panel"
 import { Button } from "@/components/ui/button"
@@ -25,6 +26,7 @@ interface EventsContentLiveProps {
 }
 
 export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {}) {
+  const { formatTime } = useTimeFormat()
   const [sourceFilter, setSourceFilter] = useState<string>("All")
   const [vectorFilter, setVectorFilter] = useState("All")
   const [searchQuery, setSearchQuery] = useState("")
@@ -163,6 +165,7 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
             }}
             disabled={filteredEvents.length === 0}
             aria-label="Export CSV"
+            title="CSV timestamps remain UTC"
           >
             <Download className="size-4" aria-hidden="true" />
           </Button>
@@ -260,7 +263,7 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
                       onClick={() => setSelectedId(event.event_id)}
                     >
                       <TableCell className="hidden whitespace-nowrap text-muted-foreground tabular-nums md:table-cell">
-                        <time dateTime={event.event_timestamp} title={formatUtc(event.event_timestamp, now)}>
+                        <time dateTime={event.event_timestamp} title={formatTime(event.event_timestamp, now)}>
                           {formatRelative(event.event_timestamp, now)}
                         </time>
                       </TableCell>

@@ -6,7 +6,8 @@ import { Badge } from "@/components/ui/badge"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { useCachedCorroborators } from "@/hooks/use-api"
-import { MISSING, formatRelative, formatUtc } from "@/lib/format"
+import { MISSING, formatRelative } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 
 function dimsLabel(s: {
   customer_id: string | null
@@ -28,6 +29,7 @@ function dimsLabel(s: {
 }
 
 export function CacheTab() {
+  const { formatTime } = useTimeFormat()
   const { data, error, isLoading, mutate } = useCachedCorroborators({ limit: 200 })
 
   if (isLoading) {
@@ -102,11 +104,11 @@ export function CacheTab() {
                 <TableCell className="font-mono text-xs text-muted-foreground">{dimsLabel(s)}</TableCell>
                 <TableCell numeric>{formatConfidence(s.confidence)}</TableCell>
                 <TableCell className="text-muted-foreground tabular-nums">
-                  <time dateTime={s.ingested_at} title={formatUtc(s.ingested_at)}>{formatRelative(s.ingested_at)}</time>
+                  <time dateTime={s.ingested_at} title={formatTime(s.ingested_at)}>{formatRelative(s.ingested_at)}</time>
                 </TableCell>
                 <TableCell className="text-muted-foreground tabular-nums">
                   <time dateTime={s.expires_at} className="text-foreground">{formatRelative(s.expires_at)}</time>
-                  <span className="block whitespace-nowrap text-xs">{formatUtc(s.expires_at)}</span>
+                  <span className="block whitespace-nowrap text-xs">{formatTime(s.expires_at)}</span>
                 </TableCell>
               </TableRow>
             ))}

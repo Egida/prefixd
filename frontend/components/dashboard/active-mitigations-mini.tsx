@@ -8,7 +8,8 @@ import { OriginTag } from "./status-pill"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import type { Mitigation } from "@/lib/api"
 import { formatConfidence } from "@/lib/confidence"
-import { formatTimeRemaining, formatUtc } from "@/lib/format"
+import { formatTimeRemaining } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 
 interface ActiveMitigationsMiniProps {
   mitigations: Mitigation[]
@@ -28,6 +29,7 @@ export function formatSourceCount(value?: number): string {
 }
 
 export function ActiveMitigationsMini({ mitigations, limit = 8, loading, error, hasMore, onRetry }: ActiveMitigationsMiniProps) {
+  const { formatTime } = useTimeFormat()
   const [now, setNow] = useState<number | null>(null)
   useEffect(() => {
     const update = () => setNow(Date.now())
@@ -93,7 +95,7 @@ export function ActiveMitigationsMini({ mitigations, limit = 8, loading, error, 
                   <td className="col-span-2 px-4 align-top xl:py-4">
                     <span className="mb-1 block text-xs text-muted-foreground xl:hidden">Expires</span>
                     <div className="font-medium tabular-nums">{now === null ? "Calculating…" : formatTimeRemaining(m.expires_at, now)}</div>
-                    <time dateTime={m.expires_at} className="mt-1 block whitespace-nowrap text-xs text-muted-foreground tabular-nums">{formatUtc(m.expires_at, now ?? undefined)}</time>
+                    <time dateTime={m.expires_at} className="mt-1 block whitespace-nowrap text-xs text-muted-foreground tabular-nums">{formatTime(m.expires_at, now ?? undefined)}</time>
                   </td>
                 </tr>
               ))}

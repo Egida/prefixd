@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Choose a dashboard display timezone in Preferences. The browser-local choice
+  updates absolute times, charts and tooltips; UTC remains the default, and API
+  timestamps, exports, TTLs and notification quiet hours stay unchanged.
+
 ### Fixed
 
 - Rotate blackhole export reads between reconciliation passes so the shared

@@ -2,7 +2,8 @@
 
 import Link from "next/link"
 import { formatConfidence } from "@/lib/confidence"
-import { formatRelative, formatUtc } from "@/lib/format"
+import { formatRelative } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
@@ -12,6 +13,7 @@ import { useSignalSources, useSignalGroups } from "@/hooks/use-api"
 import { cn } from "@/lib/utils"
 
 function SourceStatusCards() {
+  const { formatTime } = useTimeFormat()
   const { data: sources, error, isLoading, mutate } = useSignalSources()
 
   if (isLoading) {
@@ -72,7 +74,7 @@ function SourceStatusCards() {
                 <dt className="text-muted-foreground">Last seen</dt>
                 <dd className="tabular-nums">
                   {source.last_seen
-                    ? <time dateTime={source.last_seen} title={formatUtc(source.last_seen)}>{formatRelative(source.last_seen)}</time>
+                    ? <time dateTime={source.last_seen} title={formatTime(source.last_seen)}>{formatRelative(source.last_seen)}</time>
                     : "Never"}
                 </dd>
               </div>
@@ -141,6 +143,7 @@ function SourceWeightVisualization() {
 }
 
 function RecentSignalsTable() {
+  const { formatTime } = useTimeFormat()
   const { data: groupsResp, error, isLoading, mutate } = useSignalGroups({ limit: 20 })
   const groups = groupsResp?.groups ?? []
 
@@ -186,7 +189,7 @@ function RecentSignalsTable() {
                 <TableCell numeric>{formatConfidence(group.derived_confidence)}</TableCell>
                 <TableCell numeric>{group.source_count}</TableCell>
                 <TableCell numeric className="text-muted-foreground">
-                  <time dateTime={group.created_at} title={formatUtc(group.created_at)}>{formatRelative(group.created_at)}</time>
+                  <time dateTime={group.created_at} title={formatTime(group.created_at)}>{formatRelative(group.created_at)}</time>
                 </TableCell>
               </TableRow>
             ))}

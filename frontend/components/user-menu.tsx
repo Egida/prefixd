@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "@/hooks/use-auth"
 import { useHealth } from "@/hooks/use-api"
@@ -18,9 +18,11 @@ import {
   DialogContent,
   DialogHeader,
   DialogTitle,
+  DialogDescription,
 } from "@/components/ui/dialog"
-import { User, LogOut, Shield, Loader2, Bell } from "lucide-react"
+import { User, LogOut, Shield, Loader2, Settings } from "lucide-react"
 import { NotificationPreferencesPanel } from "@/components/dashboard/notification-preferences"
+import { DisplayPreferencesPanel } from "@/components/dashboard/display-preferences"
 
 export function UserMenu() {
   const { operator, logout, isLoading: authLoading } = useAuth()
@@ -28,8 +30,9 @@ export function UserMenu() {
   const router = useRouter()
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [showPrefs, setShowPrefs] = useState(false)
+  const preferencesTrigger = useRef<HTMLButtonElement | null>(null)
 
-  if (authLoading || healthLoading || !health || health.auth_mode === "none" || !operator) return null
+  const namedOperator = !authLoading && !healthLoading && health && health.auth_mode !== "none" ? operator : null
 
   const handleLogout = async () => {
     setIsLoggingOut(true)
@@ -44,27 +47,27 @@ export function UserMenu() {
 
   return (
     <>
-      <DropdownMenu>
+      {namedOperator ? <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="sm" className="h-11 gap-2 sm:h-8" aria-label={`Operator menu for ${operator.username}`}>
+          <Button ref={preferencesTrigger} variant="ghost" size="sm" className="h-11 gap-2 sm:h-8" aria-label={`Operator menu for ${namedOperator.username}`}>
             <User className="h-4 w-4" />
-            <span className="hidden max-w-32 truncate sm:inline">{operator.username}</span>
+            <span className="hidden max-w-32 truncate sm:inline">{namedOperator.username}</span>
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-56">
           <DropdownMenuLabel className="font-normal">
             <div className="flex flex-col space-y-1">
-              <p className="text-sm font-medium">{operator.username}</p>
+              <p className="text-sm font-medium">{namedOperator.username}</p>
               <p className="text-xs text-muted-foreground flex items-center gap-1">
                 <Shield className="h-3 w-3" />
-                {operator.role}
+                {namedOperator.role}
               </p>
             </div>
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
           <DropdownMenuItem onClick={() => setShowPrefs(true)}>
-            <Bell className="mr-2 h-4 w-4" />
-            Notifications
+            <Settings className="mr-2 h-4 w-4" />
+            Preferences
           </DropdownMenuItem>
           <DropdownMenuItem onClick={handleLogout} disabled={isLoggingOut}>
             {isLoggingOut ? (
@@ -75,13 +78,22 @@ export function UserMenu() {
             Sign out
           </DropdownMenuItem>
         </DropdownMenuContent>
-      </DropdownMenu>
+      </DropdownMenu> : <Button ref={preferencesTrigger} variant="ghost" className="size-11 p-0 sm:size-9" aria-label="Preferences" onClick={() => setShowPrefs(true)}>
+        <Settings className="size-4" aria-hidden="true" />
+      </Button>}
       <Dialog open={showPrefs} onOpenChange={setShowPrefs}>
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-lg" onCloseAutoFocus={(event) => {
+          event.preventDefault()
+          preferencesTrigger.current?.focus()
+        }}>
           <DialogHeader>
-            <DialogTitle className="text-sm">Notification preferences</DialogTitle>
+            <DialogTitle className="text-sm">Preferences</DialogTitle>
+            <DialogDescription>
+              Display settings stay in this browser.{namedOperator ? " Notifications are saved to your account." : ""}
+            </DialogDescription>
           </DialogHeader>
-          <NotificationPreferencesPanel />
+          <DisplayPreferencesPanel />
+          {namedOperator && <NotificationPreferencesPanel />}
         </DialogContent>
       </Dialog>
     </>

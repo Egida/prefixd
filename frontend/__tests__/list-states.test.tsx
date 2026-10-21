@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { fireEvent, screen, waitFor } from "@testing-library/react"
 import type { Mitigation } from "@/lib/api"
-import { formatUtc } from "@/lib/format"
+import { formatTimestamp } from "@/lib/format"
 import { MitigationsContentLive } from "@/components/dashboard/mitigations-content-live"
 import { EventsContentLive } from "@/components/dashboard/events-content-live"
 import { deferred, failure, json, operatorResponse, renderApp, signIn, useFakeController } from "./support/fake-controller"
@@ -72,7 +72,7 @@ describe("list states", () => {
 
     serveMitigations(loaded([mitigation]))
     renderApp(<MitigationsContentLive />)
-    const deadline = await screen.findByText(formatUtc(expiresAt))
+    const deadline = await screen.findByText(formatTimestamp(expiresAt))
     expect(deadline).toBeVisible()
     expect(deadline.closest("td")).toHaveTextContent(/26m/)
     expect(deadline.closest("td")?.querySelector("time")).toHaveAttribute("dateTime", expiresAt)

@@ -4,7 +4,7 @@ import { useHealthDetail } from "@/hooks/use-api"
 import { cn } from "@/lib/utils"
 import { Skeleton } from "@/components/ui/skeleton"
 import { StatusPill, healthTone } from "@/components/dashboard/status-pill"
-import { formatUtc } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 
 export function formatControllerUptime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "unavailable"
@@ -21,6 +21,7 @@ export function formatControllerUptime(seconds: number): string {
 }
 
 export function BgpSessionStatus() {
+  const { formatTime } = useTimeFormat()
   const { data: health, error, isStale: stale, receiptAge: age } = useHealthDetail()
   const daemon = error ? undefined : health?.speaker?.daemon
   const daemonAvailable = daemon?.status === "observed" && !stale
@@ -60,7 +61,7 @@ export function BgpSessionStatus() {
           </span>
           <span className="text-muted-foreground">
             Daemon <span className={cn(daemonAvailable && "font-mono", daemonAvailable && daemon?.ready === false ? "text-destructive" : "text-foreground")}>{daemonAvailable ? daemon.version ?? "version unavailable" : daemon?.status === "unsupported" ? "unsupported" : "unavailable"}</span>
-            {daemonAvailable && <>{" · up "}<span className="text-foreground tabular-nums">{daemon.uptime_seconds === null ? "unavailable" : formatControllerUptime(daemon.uptime_seconds)}</span>{" · "}<span className={daemon.ready === false ? "font-medium text-destructive" : undefined}>{daemon.ready === true ? "ready" : daemon.ready === false ? "not ready" : "readiness unavailable"}</span>{daemon.observed_at && <>{" · observed "}<time dateTime={daemon.observed_at} className="tabular-nums">{formatUtc(daemon.observed_at)}</time></>}</>}
+            {daemonAvailable && <>{" · up "}<span className="text-foreground tabular-nums">{daemon.uptime_seconds === null ? "unavailable" : formatControllerUptime(daemon.uptime_seconds)}</span>{" · "}<span className={daemon.ready === false ? "font-medium text-destructive" : undefined}>{daemon.ready === true ? "ready" : daemon.ready === false ? "not ready" : "readiness unavailable"}</span>{daemon.observed_at && <>{" · observed "}<time dateTime={daemon.observed_at} className="tabular-nums">{formatTime(daemon.observed_at)}</time></>}</>}
           </span>
           {!stale && age !== null && <span className="text-muted-foreground">Received {Math.floor(age / 1000)}s ago</span>}
           <span className="text-muted-foreground">Database <span className={cn(health.database === "connected" ? "text-foreground" : "text-destructive")}>{health.database === "connected" ? "connected" : "unavailable"}</span></span>
