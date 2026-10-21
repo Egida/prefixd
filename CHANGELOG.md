@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Rotate blackhole export reads between reconciliation passes so the shared
   observation budget does not repeatedly leave the same mitigations unread.
+- Blackhole export-policy warnings now direct operators to the speaker's export
+  policy without guessing that RPKI validation caused the denial.
 
 ## [0.21.0] - 2026-10-21
 
