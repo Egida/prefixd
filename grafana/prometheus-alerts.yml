@@ -75,8 +75,8 @@ groups:
             {{ $value }} active blackhole(s) on {{ $labels.instance }} are
             committed to no Established peer, reason {{ $labels.reason }}, so
             no router is sent them.{{ if eq $labels.reason "export_policy" }}
-            A blackhole /32 or /128 is usually RPKI-Invalid: check for an
-            export filter that drops RPKI-Invalid routes.{{ end }} Health
+            Export policy denies them toward every Established peer; check
+            the speaker's export policy.{{ end }} Health
             detail lists each blackhole under speaker.blackhole_exports.
 
   # Historical local-replacement evidence, latched until this process counter

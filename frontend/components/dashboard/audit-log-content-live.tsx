@@ -7,7 +7,8 @@ import { ActorBadge } from "@/components/dashboard/actor-badge"
 import { StatusPill, Tag, auditActionTone } from "@/components/dashboard/status-pill"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
-import { MISSING, formatUtc } from "@/lib/format"
+import { MISSING } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
@@ -25,6 +26,7 @@ function AuditRow({ entry, isExpanded, onToggle }: {
   isExpanded: boolean
   onToggle: () => void
 }) {
+  const { formatTime } = useTimeFormat()
   const detailsStr = JSON.stringify(entry.details)
   const isTruncated = detailsStr.length > 50
   const tone = auditActionTone(entry.action)
@@ -37,7 +39,7 @@ function AuditRow({ entry, isExpanded, onToggle }: {
         onClick={onToggle}
       >
         <TableCell className="whitespace-nowrap text-muted-foreground tabular-nums">
-          <time dateTime={entry.timestamp}>{formatUtc(entry.timestamp)}</time>
+          <time dateTime={entry.timestamp}>{formatTime(entry.timestamp)}</time>
         </TableCell>
         <TableCell>
           <ActorBadge type={entry.actor_type} name={entry.actor_id || "system"} />
@@ -95,6 +97,7 @@ function AuditRow({ entry, isExpanded, onToggle }: {
 }
 
 export function AuditLogContentLive() {
+  const { timeZone } = useTimeFormat()
   const [actionFilter, setActionFilter] = useState<string>("All")
   const [actorFilter, setActorFilter] = useState<string>("All")
   const [searchQuery, setSearchQuery] = useState("")
@@ -232,6 +235,7 @@ export function AuditLogContentLive() {
           }}
           disabled={filteredLogs.length === 0}
           aria-label="Export CSV"
+          title="CSV timestamps remain UTC"
         >
           <Download className="size-4" aria-hidden="true" />
         </Button>
@@ -298,7 +302,7 @@ export function AuditLogContentLive() {
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">
-                {sortHeader("timestamp", "Time (UTC)")}
+                {sortHeader("timestamp", `Time (${timeZone})`)}
                 {sortHeader("actor", "Actor")}
                 {sortHeader("action", "Action")}
                 {sortHeader("target", "Target")}

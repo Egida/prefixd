@@ -118,7 +118,7 @@ tests:
           - exp_labels: {severity: warning, job: prefixd, instance: a, reason: export_policy}
             exp_annotations:
               summary: "Active blackhole exported to no peer"
-              description: "1 active blackhole(s) on a are committed to no Established peer, reason export_policy, so no router is sent them. A blackhole /32 or /128 is usually RPKI-Invalid: check for an export filter that drops RPKI-Invalid routes. Health detail lists each blackhole under speaker.blackhole_exports."
+              description: "1 active blackhole(s) on a are committed to no Established peer, reason export_policy, so no router is sent them. Export policy denies them toward every Established peer; check the speaker's export policy. Health detail lists each blackhole under speaker.blackhole_exports."
           - exp_labels: {severity: warning, job: prefixd, instance: a, reason: no_established_peer}
             exp_annotations:
               summary: "Active blackhole exported to no peer"

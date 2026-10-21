@@ -9,13 +9,15 @@ import { UserMenu } from "@/components/user-menu"
 import { useWebSocket } from "@/hooks/use-websocket"
 import { useHealthDetail } from "@/hooks/use-api"
 import { useTheme } from "next-themes"
+import { useTimeFormat } from "@/components/time-zone-provider"
 
 interface TopBarProps {
   onSearchClick?: () => void
 }
 
 export function TopBar({ onSearchClick }: TopBarProps) {
-  const [time, setTime] = useState("")
+  const [now, setNow] = useState<number | null>(null)
+  const { timeZone, formatClock } = useTimeFormat()
   const [mounted, setMounted] = useState(false)
   const { connectionState } = useWebSocket()
   const { data: health, error } = useHealthDetail()
@@ -24,7 +26,7 @@ export function TopBar({ onSearchClick }: TopBarProps) {
 
   useEffect(() => { setMounted(true) }, [])
   useEffect(() => {
-    const updateTime = () => setTime(new Date().toLocaleTimeString("en-GB", { timeZone: "UTC", hour12: false }) + " UTC")
+    const updateTime = () => setNow(Date.now())
     updateTime()
     const interval = setInterval(updateTime, 1000)
 
@@ -42,7 +44,7 @@ export function TopBar({ onSearchClick }: TopBarProps) {
       </div>
       <div className="flex shrink-0 items-center gap-1.5 sm:gap-4">
         <ConnectionStatus state={connectionState} />
-        <time className="hidden text-xs text-muted-foreground tabular-nums xl:block">{time}</time>
+        <time title={timeZone} className="hidden text-xs text-muted-foreground tabular-nums xl:block">{now === null ? "" : formatClock(now)}</time>
         {mounted ? <Button variant="ghost" className="size-11 p-0 sm:size-9" onClick={() => setTheme(resolvedTheme === "dark" ? "light" : "dark")} aria-label={`Switch to ${resolvedTheme === "dark" ? "light" : "dark"} mode`}>
           {resolvedTheme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
         </Button> : null}

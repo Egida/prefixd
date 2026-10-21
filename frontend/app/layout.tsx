@@ -6,6 +6,7 @@ import { SWRProvider } from "@/components/swr-provider"
 import { AuthProvider } from "@/hooks/use-auth"
 import { ThemeProvider } from "@/components/theme-provider"
 import { Toaster } from "@/components/ui/sonner"
+import { TimeZoneProvider } from "@/components/time-zone-provider"
 
 const geist = Geist({ 
   subsets: ["latin"],
@@ -60,8 +61,10 @@ export default function RootLayout({
         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem disableTransitionOnChange>
           <AuthProvider>
             <SWRProvider>
-              {children}
-              <Toaster />
+              <TimeZoneProvider>
+                {children}
+                <Toaster />
+              </TimeZoneProvider>
             </SWRProvider>
           </AuthProvider>
         </ThemeProvider>

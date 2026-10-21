@@ -65,7 +65,7 @@ export function IncidentReportDialog({
             Incident report
           </DialogTitle>
           <DialogDescription className="text-xs text-muted-foreground">
-            Markdown report for sharing in Slack, email, or Jira.
+            Markdown report for sharing in Slack, email, or Jira. Report timestamps remain UTC.
           </DialogDescription>
         </DialogHeader>
 
