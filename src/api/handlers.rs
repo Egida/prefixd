@@ -3465,11 +3465,9 @@ mod tests {
             let unexported = &health["speaker"]["blackhole_exports"]["unexported"][0];
             assert_eq!(unexported["prefix"], "203.0.113.10/32");
             assert_eq!(unexported["reason"], "export_policy");
-            assert!(
-                unexported["message"]
-                    .as_str()
-                    .unwrap()
-                    .contains("RPKI-Invalid")
+            assert_eq!(
+                unexported["message"],
+                "Export policy denies it toward every Established peer; check the speaker's export policy."
             );
 
             // A failed read is unknown export, not an empty list; it keeps the
