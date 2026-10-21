@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Choose a dashboard display timezone in Preferences. The browser-local choice
   updates absolute times, charts and tooltips; UTC remains the default, and API
   timestamps, exports, TTLs and notification quiet hours stay unchanged.
+- Count unleased blackhole admissions that replace an untracked local route
+  with `prefixd_blackhole_replaced_total{pop}` and alert with
+  `PrefixdBlackholeReplaced`. The alert latches historical replacement
+  evidence until the process counter resets; admission and leased ownership
+  behavior are unchanged.
 
 ### Fixed
 

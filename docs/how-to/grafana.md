@@ -96,7 +96,9 @@ scrape_configs:
 ### Availability alerts
 
 [`grafana/prometheus-alerts.yml`](../../grafana/prometheus-alerts.yml) ships
-three availability rules and one [export rule](#export-alerts), loaded by the Compose Prometheus through `rule_files` in
+availability, [export](#export-alerts) and
+[replacement-conflict](#replacement-conflict-alert) rules, loaded by the Compose
+Prometheus through `rule_files` in
 `grafana/prometheus.yml`. They expect the scrape job to be named `prefixd`.
 TTL expiry, withdrawals and reconciliation need a running controller that
 holds its POP's fence, so monitor it independently of BGP health:
@@ -136,6 +138,24 @@ its mitigation detail shows every peer. The rule detects missing export only:
 a committed route is in a peer's Adj-RIB-Out, which does not prove the router
 installed or enforces it. See
 [export evidence](../reference/speaker-backends.md#export-evidence).
+
+### Replacement conflict alert
+
+The `prefixd-blackhole-conflicts` group reports an unleased admission that
+replaced an untracked local route after its pre-read:
+
+| Alert | Fires when | Why it matters |
+| --- | --- | --- |
+| `PrefixdBlackholeReplaced` | `prefixd_blackhole_replaced_total{pop}` is above zero, including its first observed sample | An unleased add replaced a route that appeared between the ownership pre-read and add; another writer may be using this speaker |
+
+This is historical local-replacement evidence, not proof that a conflict
+remains active or that a router enforced the route. The counter is local to
+this process. The alert stays firing until it resets, normally on restart;
+it does not clear merely because no more replacements occur. Inspect the
+error log and `announce` audit entries for the affected prefix, check the
+speaker's current routes and other writers, and use normal Alertmanager
+triage or silencing. Do not restart just to clear this alert. Leased adds,
+created or unchanged outcomes and failed adds do not increment the counter.
 
 ### Example rules
 
