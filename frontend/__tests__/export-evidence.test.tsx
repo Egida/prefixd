@@ -68,12 +68,13 @@ describe("export evidence card", () => {
     render(<ExportEvidenceCard evidence={evidence({
       peers: [peer("192.0.2.11", "withheld", "export_policy", "policy_denied")],
       counts: { committed: 0, withheld: 1, pending: 0 },
-      warning: { reason: "export_policy", message: "Export policy denies it toward every Established peer. A blackhole /32 or /128 is usually RPKI-Invalid: check for an export filter that drops RPKI-Invalid routes." },
+      warning: { reason: "export_policy", message: "Export policy denies it toward every Established peer; check the speaker's export policy." },
     })} />)
     expect(screen.getByText("Exported to no peer")).toHaveAttribute("data-tone", "danger")
     const alert = screen.getByRole("alert")
     expect(alert).toHaveTextContent("so no router is sent it")
-    expect(alert).toHaveTextContent("RPKI-Invalid")
+    expect(alert).toHaveTextContent("check the speaker's export policy")
+    expect(alert).not.toHaveTextContent("RPKI-Invalid")
     expect(alert).toHaveTextContent("(export_policy)")
   })
 

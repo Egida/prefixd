@@ -127,6 +127,16 @@ pub static BLACKHOLE_DETECTOR_UNLEASED: Lazy<Gauge> = Lazy::new(|| {
     .unwrap()
 });
 
+/// Unleased admissions that replaced an untracked local route, by configured POP.
+pub static BLACKHOLE_REPLACED: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "prefixd_blackhole_replaced_total",
+        "Unleased blackhole admissions that replaced an untracked local route, by POP",
+        &["pop"]
+    )
+    .unwrap()
+});
+
 /// Injection lease renewals by result: success, not_live (FAILED_PRECONDITION) or error (ADR 027).
 pub static INJECTION_LEASE_RENEWALS: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
@@ -425,6 +435,7 @@ pub fn init_metrics() {
     Lazy::force(&EVENT_RULE_QUOTA_REJECTIONS);
     Lazy::force(&CONTROLLER_FENCE_ACTIVE);
     Lazy::force(&BLACKHOLE_DETECTOR_UNLEASED);
+    Lazy::force(&BLACKHOLE_REPLACED);
     for result in ["success", "not_live", "error"] {
         INJECTION_LEASE_RENEWALS.with_label_values(&[result]);
     }

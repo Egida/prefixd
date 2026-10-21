@@ -1,8 +1,10 @@
+"use client"
+
 import { AlertTriangle } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { StatusPill, type StatusTone } from "@/components/dashboard/status-pill"
-import { formatUtc } from "@/lib/format"
+import { useTimeFormat } from "@/components/time-zone-provider"
 import type { BlackholeExportEvidence, ExportDisposition } from "@/lib/api"
 
 /** A labelled status pill. */
@@ -39,6 +41,7 @@ function summary(evidence: BlackholeExportEvidence): Pill {
 
 /** Per-peer export of an active blackhole from the last reconciliation pass (rustbgpd). */
 export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExportEvidence; now?: number }) {
+  const { formatTime } = useTimeFormat()
   const overall = summary(evidence)
   const notEstablished = evidence.not_established_peers
 
@@ -125,7 +128,7 @@ export function ExportEvidenceCard({ evidence, now }: { evidence: BlackholeExpor
 
         <p className="text-xs text-muted-foreground">
           Committed means the speaker placed the route in that peer&apos;s Adj-RIB-Out. BGP reports no receipt, so router enforcement is not verified here.
-          {evidence.observed_at && <> Observed <time dateTime={evidence.observed_at} className="tabular-nums">{formatUtc(evidence.observed_at, now)}</time>.</>}
+          {evidence.observed_at && <> Observed <time dateTime={evidence.observed_at} className="tabular-nums">{formatTime(evidence.observed_at, now)}</time>.</>}
         </p>
       </CardContent>
     </Card>

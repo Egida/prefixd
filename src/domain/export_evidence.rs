@@ -116,8 +116,7 @@ fn unexported(peers: &[PeerExport]) -> ExportWarning {
     let message = match reason {
         "no_established_peer" => "No peer session is Established, so no router is sent the route.",
         "export_policy" => {
-            "Export policy denies it toward every Established peer. A blackhole /32 or /128 is \
-             usually RPKI-Invalid: check for an export filter that drops RPKI-Invalid routes."
+            "Export policy denies it toward every Established peer; check the speaker's export policy."
         }
         "family_suppressed" => {
             "Every Established session withholds its address family, for example an IPv6 \
@@ -390,14 +389,14 @@ mod tests {
                 "{text}"
             );
         }
-        assert!(
+        assert_eq!(
             unexported(&[peer(
                 "192.0.2.1",
                 ExportDisposition::Withheld,
                 "export_policy"
             )])
-            .message
-            .contains("RPKI-Invalid")
+            .message,
+            "Export policy denies it toward every Established peer; check the speaker's export policy."
         );
     }
 
