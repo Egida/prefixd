@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Rotate blackhole export reads between reconciliation passes so the shared
+  observation budget does not repeatedly leave the same mitigations unread.
+
 ## [0.21.0] - 2026-10-21
 
 prefixd 0.21.0 adds blackhole host routes on rustbgpd, created by Admins or by
