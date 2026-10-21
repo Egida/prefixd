@@ -233,6 +233,10 @@ impl ReconciliationLoop {
         if let Some(state) = &self.state {
             state.fence.ensure_active()?;
         }
+        let export_epoch = self
+            .state
+            .as_ref()
+            .and_then(|state| state.fence.with_observation_epoch(|epoch| epoch));
         self.verified_speaker_binding()?;
         let mut failure = None;
         // One requested full leased re-add covers both route kinds; taken
@@ -279,7 +283,7 @@ impl ReconciliationLoop {
             None => None,
         };
         self.update_bgp_session_metrics(sessions.as_ref());
-        self.observe_blackhole_exports(blackholes, sessions.as_ref())
+        self.observe_blackhole_exports(blackholes, sessions.as_ref(), export_epoch)
             .await;
         match failure {
             Some(error) => Err(error),
@@ -1288,19 +1292,26 @@ impl ReconciliationLoop {
         &self,
         blackholes: Option<Vec<(uuid::Uuid, ipnet::IpNet)>>,
         sessions: Option<&crate::error::Result<Vec<crate::bgp::PeerStatus>>>,
+        epoch: Option<u64>,
     ) {
         use crate::domain::{BlackholeExportEvidence, UNEXPORTED_REASONS};
         use crate::observability::metrics::{
             BLACKHOLE_EXPORT_PEERS, BLACKHOLE_EXPORT_READ_ERRORS, BLACKHOLE_UNEXPORTED,
         };
-        let (Some(state), Some(observer), Some(mut blackholes)) =
-            (&self.state, self.announcer.export_observer(), blackholes)
-        else {
+        let (Some(state), Some(observer), Some(mut blackholes), Some(epoch)) = (
+            &self.state,
+            self.announcer.export_observer(),
+            blackholes,
+            epoch,
+        ) else {
             return;
         };
-        let Some(epoch) = state.fence.with_observation_epoch(|epoch| epoch) else {
+        if !state
+            .fence
+            .with_observation_epoch(|current| current == Some(epoch))
+        {
             return;
-        };
+        }
         // Repository order is unspecified. Move the head one place per pass,
         // not past the last attempted read: a timed-out read has not completed.
         blackholes.sort_unstable_by_key(|(id, _)| *id);
@@ -1383,8 +1394,8 @@ mod tests {
     use super::*;
     use crate::{
         bgp::{
-            BlackholeSpeaker, FaultyBlackholes, FlowSpecReader, FlowSpecWriter, MockAnnouncer,
-            PeerObserver, PeerStatus,
+            BlackholeSpeaker, ExportObserver, FaultyBlackholes, FlowSpecReader, FlowSpecWriter,
+            MockAnnouncer, PeerObserver, PeerStatus,
         },
         db::MockRepository,
         domain::{
@@ -2971,7 +2982,7 @@ mod tests {
             }
             let started = tokio::time::Instant::now();
             reconciler
-                .observe_blackhole_exports(Some(unordered), None)
+                .observe_blackhole_exports(Some(unordered), None, Some(0))
                 .await;
             assert!(started.elapsed() >= EXPORT_OBSERVATION_BUDGET);
             // Tokio timers round wakeups to millisecond boundaries.
@@ -2998,15 +3009,17 @@ mod tests {
             .iter()
             .map(|(id, _)| store.get(*id, Some(0)))
             .collect();
-        reconciler.observe_blackhole_exports(None, None).await;
+        reconciler
+            .observe_blackhole_exports(None, None, Some(0))
+            .await;
         assert_eq!(reconciler.export_cursor.load(SeqCst), candidates.len());
         speaker.enabled.store(false, SeqCst);
         reconciler
-            .observe_blackhole_exports(Some(candidates.clone()), None)
+            .observe_blackhole_exports(Some(candidates.clone()), None, Some(0))
             .await;
         assert_eq!(reconciler.export_cursor.load(SeqCst), candidates.len());
         reconciler
-            .observe_blackhole_exports(Some(vec![]), None)
+            .observe_blackhole_exports(Some(vec![]), None, Some(0))
             .await;
         assert_eq!(reconciler.export_cursor.load(SeqCst), candidates.len());
         assert_eq!(store.summary(Some(0)), previous);
@@ -3026,7 +3039,7 @@ mod tests {
         );
         speaker.enabled.store(true, SeqCst);
         reconciler
-            .observe_blackhole_exports(Some(vec![]), None)
+            .observe_blackhole_exports(Some(vec![]), None, Some(0))
             .await;
         assert_eq!(store.summary(Some(0)).blackholes, 0);
         assert_eq!(reconciler.export_cursor.load(SeqCst), candidates.len());
@@ -3049,13 +3062,191 @@ mod tests {
         }
         assert_eq!(*speaker.completed.lock().unwrap(), expected);
         reconciler
-            .observe_blackhole_exports(Some(candidates.clone()), None)
+            .observe_blackhole_exports(Some(candidates.clone()), None, Some(0))
             .await;
         assert_eq!(
             speaker.completed.lock().unwrap().last(),
             Some(&candidates[0].1)
         );
         assert_eq!(speaker.completed.lock().unwrap().len(), 5);
+    }
+
+    struct PausedExportPrerequisite {
+        inner: MockAnnouncer,
+        inventory: bool,
+        paused: std::sync::atomic::AtomicBool,
+        started: tokio::sync::Notify,
+        proceed: tokio::sync::Notify,
+        export_reads: AtomicUsize,
+    }
+
+    impl FlowSpecAnnouncer for PausedExportPrerequisite {
+        fn backend(&self) -> &'static str {
+            "mock"
+        }
+        fn blackhole(&self) -> Option<&dyn BlackholeSpeaker> {
+            Some(self)
+        }
+        fn peer_observer(&self) -> Option<&dyn PeerObserver> {
+            Some(self)
+        }
+        fn export_observer(&self) -> Option<&dyn ExportObserver> {
+            Some(self)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlowSpecWriter for PausedExportPrerequisite {
+        async fn announce(&self, _: &FlowSpecRule) -> Result<()> {
+            panic!("the seeded route needs no mutation")
+        }
+        async fn withdraw(&self, _: &FlowSpecRule) -> Result<()> {
+            panic!("the seeded route needs no mutation")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BlackholeSpeaker for PausedExportPrerequisite {
+        async fn announce_blackhole(
+            &self,
+            _: &crate::bgp::BlackholeRoute,
+        ) -> Result<crate::bgp::AddOutcome> {
+            panic!("the seeded route needs no mutation")
+        }
+        async fn announce_leased_blackhole(
+            &self,
+            _: &crate::bgp::BlackholeRoute,
+            _: u32,
+        ) -> Result<(crate::bgp::LeaseGeneration, crate::bgp::AddOutcome)> {
+            panic!("the seeded route needs no mutation")
+        }
+        async fn withdraw_blackhole(&self, _: &ipnet::IpNet, _: &str) -> Result<()> {
+            panic!("the seeded route needs no mutation")
+        }
+        async fn list_blackholes(&self) -> Result<crate::bgp::BlackholeInventory> {
+            let snapshot = self.inner.list_blackholes().await?;
+            if self.inventory && self.paused.load(SeqCst) {
+                self.started.notify_one();
+                self.proceed.notified().await;
+            }
+            Ok(snapshot)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PeerObserver for PausedExportPrerequisite {
+        async fn session_status(&self) -> Result<Vec<PeerStatus>> {
+            let mut snapshot = self.inner.session_status().await?;
+            if !self.inventory && self.paused.load(SeqCst) {
+                snapshot[0].state = crate::bgp::SessionState::Active;
+                self.started.notify_one();
+                self.proceed.notified().await;
+            }
+            Ok(snapshot)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExportObserver for PausedExportPrerequisite {
+        async fn blackhole_exports(
+            &self,
+            prefix: &ipnet::IpNet,
+        ) -> Result<Option<Vec<crate::bgp::PeerExport>>> {
+            self.export_reads.fetch_add(1, SeqCst);
+            self.inner.blackhole_exports(prefix).await
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn export_prerequisites_crossing_fence_loss_keep_the_previous_snapshot() {
+        use crate::domain::{BlackholeExportEvidence, ExportObservation};
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for inventory in [false, true] {
+            let repo = Arc::new(MockRepository::new());
+            let peer = PeerStatus {
+                name: "192.0.2.10".into(),
+                address: "192.0.2.10".into(),
+                state: crate::bgp::SessionState::Established,
+            };
+            let speaker = Arc::new(PausedExportPrerequisite {
+                inner: MockAnnouncer::with_peers(vec![peer.clone()]),
+                inventory,
+                paused: std::sync::atomic::AtomicBool::new(true),
+                started: tokio::sync::Notify::new(),
+                proceed: tokio::sync::Notify::new(),
+                export_reads: AtomicUsize::new(0),
+            });
+            let mitigation = blackhole_row("192.0.2.1");
+            repo.insert_mitigation(&mitigation).await.unwrap();
+            let route = frozen(&mitigation);
+            speaker.inner.announce_blackhole(&route).await.unwrap();
+            let reconciler = Arc::new(blackhole_reconciler(
+                repo,
+                speaker.clone(),
+                live_config(),
+                false,
+            ));
+            let state = reconciler.state.clone().unwrap();
+            let old_time = chrono::DateTime::from_timestamp(0, 0).unwrap();
+            let original = BlackholeExportEvidence::from_read(
+                &speaker.inner.blackhole_exports(&route.prefix()).await,
+                Some(&[peer]),
+                old_time,
+            );
+            state.export_evidence.replace(
+                old_time,
+                0,
+                [(
+                    mitigation.mitigation_id,
+                    (route.prefix().to_string(), original.clone()),
+                )]
+                .into(),
+            );
+            let pass = tokio::spawn({
+                let reconciler = reconciler.clone();
+                async move { reconciler.reconcile().await }
+            });
+            speaker.started.notified().await;
+            state.fence.set(false);
+            state.fence.set(true);
+            speaker.paused.store(false, SeqCst);
+            speaker.proceed.notify_one();
+            pass.await.unwrap().unwrap();
+
+            let retained = state.fence.with_observation_epoch(|epoch| {
+                state
+                    .export_evidence
+                    .get(mitigation.mitigation_id, epoch)
+                    .unwrap()
+            });
+            assert!(retained.historical, "inventory={inventory}");
+            assert_eq!(retained.observed_at, Some(old_time));
+            assert_eq!(retained.peers, original.peers);
+            assert_eq!(
+                retained.not_established_peers,
+                original.not_established_peers
+            );
+            assert_eq!(
+                speaker.export_reads.load(SeqCst),
+                0,
+                "stale prerequisites start no export read"
+            );
+            assert_eq!(reconciler.export_cursor.load(SeqCst), 0);
+
+            reconciler.reconcile().await.unwrap();
+            let current = state.fence.with_observation_epoch(|epoch| {
+                state
+                    .export_evidence
+                    .get(mitigation.mitigation_id, epoch)
+                    .unwrap()
+            });
+            assert!(!current.historical);
+            assert_eq!(current.status, ExportObservation::Observed);
+            assert_ne!(current.observed_at, Some(old_time));
+            assert_eq!(current.counts.committed, 1);
+            assert_eq!(current.not_established_peers, Some(vec![]));
+            assert_eq!(speaker.export_reads.load(SeqCst), 1);
+        }
     }
 
     struct PausedExportRead {
@@ -3134,7 +3325,7 @@ mod tests {
                 let reconciler = reconciler.clone();
                 async move {
                     reconciler
-                        .observe_blackhole_exports(Some(vec![(id, prefix)]), None)
+                        .observe_blackhole_exports(Some(vec![(id, prefix)]), None, Some(0))
                         .await
                 }
             });
@@ -3165,7 +3356,7 @@ mod tests {
             state.fence.set(true);
             speaker.proceed.notify_one();
             reconciler
-                .observe_blackhole_exports(Some(vec![(id, prefix)]), None)
+                .observe_blackhole_exports(Some(vec![(id, prefix)]), None, Some(1))
                 .await;
             let current = state
                 .fence
