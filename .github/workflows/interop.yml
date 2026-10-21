@@ -1,11 +1,10 @@
 name: Interop
 
-# FlowSpec interop against a real receiving router. Each leg drives prefixd's
-# HTTP API with the speaker in containerlab, peered to FRR 10.7.1, and asserts
-# the exact rules in FRR's received IPv4/IPv6 FlowSpec tables after manual
-# discard and police, a detector event, operator withdrawal, TTL expiry, a
-# speaker restart with prefixd re-injection, and an IPv6 rule. Every run
-# uploads a dated receipt (versions, commands, FRR JSON before and after).
+# FlowSpec, blackhole and amplification interop against a real receiving router.
+# Each leg drives prefixd's HTTP API with the speaker in containerlab, peered
+# to FRR 10.7.1. FlowSpec scenarios inspect received IPv4/IPv6 rules; blackhole
+# also checks zebra and kernel discard state, controller restart and RPKI.
+# Every run uploads a dated receipt (versions, commands, FRR JSON before and after).
 #
 # Job layout, the install-containerlab action and the FRR lab follow rustbgpd's
 # Interop workflow and its M22 FlowSpec lab. Path filters keep documentation
@@ -55,13 +54,23 @@ permissions:
 
 jobs:
   frr:
-    name: FlowSpec into FRR (${{ matrix.speaker }})
+    name: FRR (${{ matrix.speaker }}/${{ matrix.scenario }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        speaker: [rustbgpd, gobgp]
+        include:
+          - speaker: rustbgpd
+            scenario: flowspec
+          - speaker: gobgp
+            scenario: flowspec
+          - speaker: rustbgpd
+            scenario: blackhole
+          - speaker: rustbgpd
+            scenario: amplification
+          - speaker: gobgp
+            scenario: amplification
     steps:
       - uses: actions/checkout@v7
 
@@ -89,16 +98,16 @@ jobs:
             type=gha,scope=prefixd-interop
           cache-to: type=gha,scope=prefixd-interop,mode=max,ignore-error=true
 
-      - name: Run FlowSpec interop lab (deploy, test, destroy)
+      - name: Run FRR lab (${{ matrix.speaker }}/${{ matrix.scenario }})
         env:
           CLAB: sudo containerlab
           PREFIXD_INTEROP_RECEIPTS: ${{ runner.temp }}/interop-receipts
-        run: lab/interop/run-frr.sh "${{ matrix.speaker }}"
+        run: lab/interop/run-frr.sh "${{ matrix.speaker }}" "${{ matrix.scenario }}"
 
       - name: Retain dated receipt
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: flowspec-frr-${{ matrix.speaker }}-receipt-attempt-${{ github.run_attempt }}
+          name: ${{ matrix.scenario }}-frr-${{ matrix.speaker }}-receipt-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/interop-receipts
           if-no-files-found: warn

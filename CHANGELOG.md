@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   evidence until the process counter resets; admission and leased ownership
   behavior are unchanged.
 
+### Changed
+
+- Run the FRR blackhole scenario with rustbgpd and amplification scenarios with
+  both speakers in Interop CI alongside FlowSpec, retaining separate receipts
+  for each speaker, scenario and workflow attempt, including failed runs.
+
 ### Fixed
 
 - Rotate blackhole export reads between reconciliation passes so the shared
