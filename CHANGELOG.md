@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Run the FRR blackhole scenario with rustbgpd and amplification scenarios with
+  both speakers in Interop CI alongside FlowSpec, retaining separate receipts
+  for each speaker, scenario and workflow attempt, including failed runs.
+
 ## [0.21.0] - 2026-10-21
 
 prefixd 0.21.0 adds blackhole host routes on rustbgpd, created by Admins or by
