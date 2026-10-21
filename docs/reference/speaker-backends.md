@@ -425,7 +425,11 @@ restart or each retry of a partial re-add, is `unchanged`: it is logged but
 writes no audit entry, so retries cannot flood the audit log. After a speaker
 restart the same re-add is `created` and audited. A `replaced` outcome on an unleased
 admission means a local route appeared at the prefix after the pre-read; it is
-logged as an error and the audit entry records it.
+logged as an error and the audit entry records it. It also increments
+`prefixd_blackhole_replaced_total{pop}` and triggers the shipped
+[replacement-conflict alert](../how-to/grafana.md#replacement-conflict-alert).
+The alert records a historical local replacement, not ongoing conflict or
+router enforcement; leased adds do not increment this counter.
 
 Enforced admission returns `409` without persisting or adding when the prefix
 already has a live owner or has a pending withdrawal. Unleased admission also

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Count unleased blackhole admissions that replace an untracked local route
+  with `prefixd_blackhole_replaced_total{pop}` and alert with
+  `PrefixdBlackholeReplaced`. The alert latches historical replacement
+  evidence until the process counter resets; admission and leased ownership
+  behavior are unchanged.
+
 ## [0.21.0] - 2026-10-21
 
 prefixd 0.21.0 adds blackhole host routes on rustbgpd, created by Admins or by

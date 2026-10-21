@@ -78,3 +78,22 @@ groups:
             A blackhole /32 or /128 is usually RPKI-Invalid: check for an
             export filter that drops RPKI-Invalid routes.{{ end }} Health
             detail lists each blackhole under speaker.blackhole_exports.
+
+  # Historical local-replacement evidence, latched until this process counter
+  # resets. A >0 rule also catches the first sample being positive.
+  - name: prefixd-blackhole-conflicts
+    rules:
+      - alert: PrefixdBlackholeReplaced
+        expr: prefixd_blackhole_replaced_total > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Unleased blackhole replaced an untracked local route"
+          description: >-
+            prefixd on {{ $labels.instance }} at POP {{ $labels.pop }} reported
+            {{ $value }} unleased blackhole add(s) that replaced an untracked
+            local route. This is historical replacement evidence, not proof of
+            an active conflict or router enforcement. Inspect the error log
+            and announce audit for the affected prefix and check other tools
+            writing to this speaker. A positive process counter keeps this
+            alert firing; triage or silence it as needed.

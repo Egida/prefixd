@@ -352,6 +352,8 @@ pub struct FaultyBlackholes {
     pub fail_flowspec_reads: std::sync::atomic::AtomicBool,
     /// Every add fails without changing the speaker.
     pub fail_adds: std::sync::atomic::AtomicBool,
+    /// A route to insert immediately before an add, simulating a writer racing admission.
+    pub before_add: std::sync::Mutex<Option<BlackholeRoute>>,
     /// 1: a delete is rejected before removal; 2: removed, then the reply is lost.
     pub withdraw_fault: std::sync::atomic::AtomicUsize,
     /// Well-formed local routes that are not prefixd-shaped.
@@ -378,6 +380,14 @@ pub struct FaultyBlackholes {
 
 #[cfg(test)]
 impl FaultyBlackholes {
+    async fn inject_before_add(&self) {
+        let route = self.before_add.lock().unwrap().take();
+        if let Some(route) = route {
+            let mut routes = self.inner.blackholes.write().await;
+            upsert_blackhole(&mut routes, &route);
+        }
+    }
+
     pub async fn routes(&self) -> Vec<BlackholeRoute> {
         self.inner.list_blackholes().await.unwrap().routes
     }
@@ -491,6 +501,7 @@ impl BlackholeSpeaker for FaultyBlackholes {
                 "add failed".into(),
             ));
         }
+        self.inject_before_add().await;
         self.inner.announce_blackhole(route).await
     }
     async fn announce_leased_blackhole(
@@ -507,6 +518,7 @@ impl BlackholeSpeaker for FaultyBlackholes {
                 "AddLeasedPath RPC failed: Unimplemented".into(),
             ));
         }
+        self.inject_before_add().await;
         self.inner
             .announce_leased_blackhole(route, lease_seconds)
             .await
