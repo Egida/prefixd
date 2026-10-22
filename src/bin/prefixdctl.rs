@@ -55,6 +55,10 @@ enum Commands {
     /// Show BGP peer status
     Peers,
 
+    /// Observe the configured BGP speaker
+    #[command(subcommand)]
+    Speaker(SpeakerCommands),
+
     /// Reload configuration (inventory, playbooks)
     Reload,
 
@@ -92,6 +96,12 @@ enum Commands {
         #[arg(long)]
         confidence: Option<f32>,
     },
+}
+
+#[derive(Subcommand)]
+enum SpeakerCommands {
+    /// List local FlowSpec rules only, not blackholes or router enforcement
+    ListRoutes,
 }
 
 #[derive(Subcommand)]
@@ -270,41 +280,61 @@ impl MitigationResponse {
         if self.blackhole.is_some() || self.action_type == "blackhole" {
             return "all traffic".into();
         }
-        let join = |ports: &[u16]| {
-            ports
-                .iter()
-                .map(u16::to_string)
-                .collect::<Vec<_>>()
-                .join(",")
-        };
-        let mut parts = vec![match self.protocol {
-            None => "any".to_string(),
-            Some(1) => "icmp".into(),
-            Some(6) => "tcp".into(),
-            Some(17) => "udp".into(),
-            Some(58) => "icmpv6".into(),
-            Some(other) => other.to_string(),
-        }];
-        if let Some(prefix) = &self.src_prefix {
-            parts.push(format!("from {prefix}"));
-        }
-        if !self.src_ports.is_empty() {
-            parts.push(format!("src {}", join(&self.src_ports)));
-        }
-        if !self.dst_ports.is_empty() {
-            parts.push(format!("dst {}", join(&self.dst_ports)));
-        }
-        if let Some(fragment) = &self.fragment {
-            parts.push(match fragment.as_str() {
-                "non_first" => "non-first fragments".into(),
-                other => format!("fragment {other}"),
-            });
-        }
-        if let Some(length) = &self.packet_length {
-            parts.push(format!("len {}-{}", length.min, length.max));
-        }
-        parts.join(" ")
+        match_summary(
+            self.protocol,
+            self.src_prefix.as_deref(),
+            &self.dst_ports,
+            &self.src_ports,
+            self.fragment.as_deref(),
+            self.packet_length
+                .as_ref()
+                .map(|length| (length.min, length.max)),
+        )
     }
+}
+
+fn match_summary(
+    protocol: Option<u8>,
+    src_prefix: Option<&str>,
+    dst_ports: &[u16],
+    src_ports: &[u16],
+    fragment: Option<&str>,
+    packet_length: Option<(u16, u16)>,
+) -> String {
+    let join = |ports: &[u16]| {
+        ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let mut parts = vec![match protocol {
+        None => "any".to_string(),
+        Some(1) => "icmp".into(),
+        Some(6) => "tcp".into(),
+        Some(17) => "udp".into(),
+        Some(58) => "icmpv6".into(),
+        Some(other) => other.to_string(),
+    }];
+    if let Some(prefix) = src_prefix {
+        parts.push(format!("from {prefix}"));
+    }
+    if !src_ports.is_empty() {
+        parts.push(format!("src {}", join(src_ports)));
+    }
+    if !dst_ports.is_empty() {
+        parts.push(format!("dst {}", join(dst_ports)));
+    }
+    if let Some(fragment) = fragment {
+        parts.push(match fragment {
+            "non_first" => "non-first fragments".into(),
+            other => format!("fragment {other}"),
+        });
+    }
+    if let Some((min, max)) = packet_length {
+        parts.push(format!("len {min}-{max}"));
+    }
+    parts.join(" ")
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -448,6 +478,9 @@ async fn main() -> ExitCode {
         Commands::Safelist(cmd) => cmd_safelist(&client, cmd, cli.format).await,
         Commands::Operators(cmd) => cmd_operators(cmd, cli.format).await,
         Commands::Peers => cmd_peers(&client, cli.format).await,
+        Commands::Speaker(SpeakerCommands::ListRoutes) => {
+            cmd_speaker_routes(&client, cli.format).await
+        }
         Commands::Reload => cmd_reload(&client, cli.format).await,
         Commands::Migrations => cmd_migrations(cli.format).await,
         Commands::SendCorroborator {
@@ -775,6 +808,71 @@ async fn cmd_peers(client: &Client, format: OutputFormat) -> Result<(), String> 
         }
     }
 
+    Ok(())
+}
+
+async fn cmd_speaker_routes(client: &Client, format: OutputFormat) -> Result<(), String> {
+    use prefixd::api::handlers::{FlowSpecObservationScope, SpeakerRoutesResponse};
+
+    let inventory: SpeakerRoutesResponse = client.get("/v1/speaker/routes").await?;
+    match format {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&inventory).unwrap()),
+        OutputFormat::Table => {
+            let scope = match inventory.observation_scope {
+                FlowSpecObservationScope::RetainedLocalFlowSpecIntent => {
+                    "retained local FlowSpec intent"
+                }
+                FlowSpecObservationScope::AcceptedLocalFlowSpecRib => "accepted local FlowSpec RIB",
+                FlowSpecObservationScope::AdapterLocalFlowSpec => {
+                    "adapter local FlowSpec read-back"
+                }
+            };
+            println!("Speaker: {}", inventory.backend);
+            println!("Observation: {scope}");
+            println!("Local FlowSpec rules only; no router enforcement proof.");
+            if inventory.routes.is_empty() {
+                println!("No local FlowSpec rules observed.");
+                return Ok(());
+            }
+            println!(
+                "{:<25}  {:<45}  {:<20}  OWNER",
+                "DESTINATION", "MATCH", "ACTION"
+            );
+            for rule in inventory.routes {
+                let nlri = &rule.nlri;
+                let summary = match_summary(
+                    nlri.protocol,
+                    nlri.src_prefix.as_deref(),
+                    &nlri.dst_ports,
+                    &nlri.src_ports,
+                    nlri.fragment.map(|fragment| match fragment {
+                        prefixd::domain::FragmentMatch::NonFirst => "non_first",
+                    }),
+                    nlri.packet_length.map(|length| (length.min, length.max)),
+                );
+                let actions = rule
+                    .actions
+                    .iter()
+                    .map(|action| match action.rate_bps {
+                        Some(rate) => format!("{} {rate} bps", action.action_type),
+                        None => action.action_type.to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                println!(
+                    "{:<25}  {:<45}  {:<20}  {}",
+                    nlri.dst_prefix,
+                    summary,
+                    actions,
+                    if rule.owner.is_empty() {
+                        "-"
+                    } else {
+                        &rule.owner
+                    }
+                );
+            }
+        }
+    }
     Ok(())
 }
 
