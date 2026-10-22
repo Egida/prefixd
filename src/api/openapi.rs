@@ -269,7 +269,7 @@ mod tests {
         let doc = serde_json::to_value(ApiDoc::openapi()).unwrap();
         let schemas = &doc["components"]["schemas"];
         for schema in ["CreateMitigationRequest", "MitigationResponse"] {
-            for field in ["src_ports", "fragment", "packet_length"] {
+            for field in ["src_prefix", "src_ports", "fragment", "packet_length"] {
                 assert!(
                     schemas[schema]["properties"][field].is_object(),
                     "{schema}.{field}"

@@ -103,6 +103,8 @@ export interface Mitigation {
   action_type: "police" | "discard" | "blackhole"
   rate_bps: number | null
   dst_prefix: string
+  /** Source CIDR; null or absent means no source constraint. */
+  src_prefix?: string | null
   protocol: number | null
   dst_ports: number[]
   /** UDP source ports (ADR 028), sorted; absent from controllers that predate them. */
@@ -206,6 +208,12 @@ export interface HealthResponse {
       peer_observer: boolean
       daemon_health?: boolean
       blackhole_export?: boolean
+      flowspec_match?: {
+        source_prefix?: boolean
+        source_ports?: boolean
+        fragment?: boolean
+        packet_length?: boolean
+      }
     }
     /** Present when the speaker reports blackhole export. */
     blackhole_exports?: {
@@ -384,6 +392,8 @@ export async function createBlackhole(request: CreateBlackholeRequest): Promise<
 
 export interface CreateFlowSpecRequest {
   victim_ip: string
+  /** Same-family source CIDR; requires guardrails.allow_src_prefix_match. */
+  src_prefix?: string
   /** udp, tcp, icmp, icmpv6 or any. Source ports, fragment and packet length need udp. */
   protocol: string
   action: "discard" | "police"
@@ -398,6 +408,16 @@ export interface CreateFlowSpecRequest {
 
 /** Manual FlowSpec rule; the controller applies the same guardrails as playbooks. */
 export async function createMitigation(request: CreateFlowSpecRequest): Promise<Mitigation> {
+  // Older controllers ignore unknown request fields. Never send a source
+  // constraint unless a fresh capability read confirms it will be preserved.
+  if (request.src_prefix !== undefined) {
+    const health = await getHealthDetail()
+
+    if (health.speaker?.capabilities.flowspec_match?.source_prefix !== true) {
+      throw new Error("This controller does not support source prefix matching. Upgrade the controller before creating this rule.")
+    }
+  }
+
   return fetchApi<Mitigation>("/v1/mitigations", {
     method: "POST",
     body: JSON.stringify(request),

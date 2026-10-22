@@ -338,6 +338,10 @@ use super::RUSTBGPD_MAX_PORTS_PER_LIST as MAX_PORTS_PER_LIST;
 
 /// Components in strictly ascending type order; the daemon does not reorder them.
 fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)> {
+    if nlri.src_prefix.is_some() {
+        nlri.validate()
+            .map_err(|error| invalid(&error.to_string()))?;
+    }
     let prefix: ipnet::IpNet = nlri
         .dst_prefix
         .parse()
@@ -350,6 +354,14 @@ fn encode_match(nlri: &FlowSpecNlri) -> Result<(i32, Vec<pb::FlowSpecComponent>)
         prefix: prefix.to_string(),
         ..Default::default()
     }];
+    if let Some(source) = &nlri.src_prefix {
+        components.push(pb::FlowSpecComponent {
+            r#type: 2,
+            prefix: crate::domain::canonical_source_prefix(source)
+                .map_err(|error| invalid(&error.to_string()))?,
+            ..Default::default()
+        });
+    }
     if let Some(protocol) = nlri.protocol {
         components.push(pb::FlowSpecComponent {
             r#type: 3,
@@ -462,15 +474,19 @@ fn decode(route: pb::FlowSpecRouteEntry, family: i32) -> Result<FlowSpecRule> {
         }
         previous = component.r#type;
         match component.r#type {
-            1 if component.value.is_empty() => {
+            1 | 2 if component.value.is_empty() => {
                 let prefix: ipnet::IpNet = component
                     .prefix
                     .parse()
-                    .map_err(|_| invalid("invalid destination prefix"))?;
+                    .map_err(|_| invalid("invalid prefix"))?;
                 if prefix != prefix.trunc() || (prefix.addr().is_ipv4() != (family == 3)) {
                     return Err(invalid("invalid prefix family or host bits"));
                 }
-                nlri.dst_prefix = prefix.to_string();
+                if component.r#type == 1 {
+                    nlri.dst_prefix = prefix.to_string();
+                } else {
+                    nlri.src_prefix = Some(prefix.to_string());
+                }
             }
             3 if component.prefix.is_empty() => {
                 let values = numbers(&component.value)?;
@@ -1361,6 +1377,94 @@ mod tests {
             afi_safi: encoded.afi_safi,
             extended_communities: vec![0x8006_u64 << 48],
             ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn source_prefix_encodes_and_readback_fails_closed() {
+        let writer = RustBgpdAnnouncer::new(
+            Endpoint::from_static("http://127.0.0.1:1").connect_lazy(),
+            None,
+        );
+        for (destination, source, canonical) in [
+            ("192.0.2.1/32", "198.51.100.129/24", "198.51.100.0/24"),
+            ("2001:db8::1/128", "2001:DB8:1::1/48", "2001:db8:1::/48"),
+            ("192.0.2.1/32", "0.0.0.0/0", "0.0.0.0/0"),
+            ("2001:db8::1/128", "::/0", "::/0"),
+        ] {
+            let nlri = FlowSpecNlri {
+                dst_prefix: destination.into(),
+                src_prefix: Some(source.into()),
+                protocol: Some(6),
+                ..Default::default()
+            };
+            let rule = FlowSpecRule::new(nlri.clone(), FlowSpecAction::discard());
+            let encoded = encode(&rule).unwrap();
+            assert_eq!(
+                encoded
+                    .components
+                    .iter()
+                    .map(|c| c.r#type)
+                    .collect::<Vec<_>>(),
+                [1, 2, 3]
+            );
+            assert_eq!(encoded.components[1].prefix, canonical);
+            assert_eq!(encoded.components[1].offset, 0);
+            let decoded = decode(route(&rule), encoded.afi_safi).unwrap();
+            assert_eq!(decoded.nlri.src_prefix.as_deref(), Some(canonical));
+            assert_eq!(decoded.nlri_hash(), rule.nlri_hash());
+            assert!(writer.matches_nlri(&nlri, &decoded.nlri).unwrap());
+            for case in 0..8 {
+                let mut bad = route(&rule);
+                match case {
+                    0 => bad.components[1].offset = 1,
+                    1 => bad.components[1].prefix = "198.51.100.0/33".into(),
+                    2 => bad.components[1].prefix = "invalid".into(),
+                    3 => {
+                        bad.components[1].prefix = if destination.contains(':') {
+                            "198.51.100.0/24"
+                        } else {
+                            "2001:db8::/64"
+                        }
+                        .into()
+                    }
+                    4 => bad.components[1].r#type = 4,
+                    5 => bad.components[1].value = "=1".into(),
+                    6 => {
+                        let duplicate = bad.components[1].clone();
+                        bad.components.insert(2, duplicate);
+                    }
+                    7 => {
+                        bad.components.remove(0);
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(
+                    decode(bad, encoded.afi_safi).is_err(),
+                    "source mutation {case}"
+                );
+            }
+            let absent = FlowSpecNlri {
+                src_prefix: None,
+                ..nlri.clone()
+            };
+            assert!(!writer.matches_nlri(&nlri, &absent).unwrap());
+            for source in [
+                "invalid",
+                "192.0.2.0/33",
+                if destination.contains(':') {
+                    "198.51.100.0/24"
+                } else {
+                    "2001:db8::/64"
+                },
+            ] {
+                let bad = FlowSpecNlri {
+                    src_prefix: Some(source.into()),
+                    ..nlri.clone()
+                };
+                assert!(encode_match(&bad).is_err());
+                assert!(writer.matches_nlri(&bad, &absent).is_err());
+            }
         }
     }
 

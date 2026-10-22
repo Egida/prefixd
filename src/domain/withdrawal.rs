@@ -542,7 +542,7 @@ pub async fn retire_dry_run_intent(
 mod tests {
     use super::*;
     use crate::{
-        bgp::{FlowSpecWriter, MockAnnouncer},
+        bgp::{FlowSpecReader, FlowSpecWriter, MockAnnouncer},
         db::MockRepository,
         domain::{
             ActionParams, ActionType, AttackVector, FragmentMatch, MatchCriteria, MitigationIntent,
@@ -923,6 +923,126 @@ mod tests {
                 assert_ne!(hash, pinned);
             }
         }
+    }
+
+    #[test]
+    fn source_prefix_v3_identity_is_pinned_and_canonical() {
+        let mut tcp = amplification_criteria("192.0.2.10/32");
+        tcp.src_prefix = Some("198.51.100.129/24".into());
+        tcp.protocol = Some(6);
+        tcp.dst_ports = vec![443, 80];
+        let mut length = amplification_criteria("192.0.2.10/32");
+        length.src_prefix = Some("0.0.0.0/0".into());
+        length.src_ports = vec![389, 123, 123];
+        length.packet_length = Some(PacketLengthRange {
+            min: 468,
+            max: 65535,
+        });
+        let mut fragment = amplification_criteria("2001:0DB8::1/128");
+        fragment.src_prefix = Some("2001:DB8:ABCD::1/48".into());
+        fragment.fragment = Some(FragmentMatch::NonFirst);
+        // Independent Python hashlib/struct calculation of the v3 byte layout.
+        for (criteria, pinned) in [
+            (tcp, "f0956ed52ace12acf65e35060156a430"),
+            (length, "1d1bd486a4df0836bb2931e6b0d1139a"),
+            (fragment, "8535936c1892574a69750f81d2aa7f50"),
+        ] {
+            let rule =
+                MitigationRoute::new(ActionType::Discard, &criteria, &ActionParams::default())
+                    .into_flowspec()
+                    .unwrap();
+            assert_eq!(criteria.compute_scope_hash(), pinned);
+            assert_eq!(rule.nlri_hash(), pinned);
+            assert_eq!(ownership_key(&rule), pinned);
+            let stored = serde_json::to_value(&criteria).unwrap();
+            let canonical: MatchCriteria = serde_json::from_value(stored).unwrap();
+            assert_eq!(canonical.compute_scope_hash(), pinned);
+            let writer = MockAnnouncer::new();
+            assert!(
+                writer
+                    .matches_nlri(
+                        &FlowSpecNlri::from(&criteria),
+                        &FlowSpecNlri::from(&canonical)
+                    )
+                    .unwrap()
+            );
+            let absent = MatchCriteria {
+                src_prefix: None,
+                ..criteria
+            };
+            assert_ne!(absent.compute_scope_hash(), pinned);
+        }
+    }
+
+    #[tokio::test]
+    async fn source_prefix_identity_ownership_and_withdrawal_are_exact() {
+        let repo = MockRepository::new();
+        let writer = MockAnnouncer::new();
+        let mut owners = Vec::new();
+        for source in [
+            None,
+            Some("0.0.0.0/0"),
+            Some("198.51.100.0/24"),
+            Some("198.51.100.0/25"),
+        ] {
+            let mut owner = mitigation("192.0.2.10/32");
+            owner.match_criteria.src_prefix = source.map(str::to_owned);
+            owner.scope_hash = owner.match_criteria.compute_scope_hash();
+            repo.insert_mitigation(&owner).await.unwrap();
+            writer
+                .announce(&mitigation_rule(&owner).unwrap())
+                .await
+                .unwrap();
+            owners.push(owner);
+        }
+        assert_eq!(writer.list_active().await.unwrap().len(), owners.len());
+        for owner in &owners {
+            let route = MitigationRoute::of(owner);
+            assert_eq!(
+                find_mitigation_owner(&repo, "test", &route, &owner.scope_hash)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .mitigation_id,
+                owner.mitigation_id
+            );
+            let request = request_withdrawal(
+                &repo,
+                owner,
+                false,
+                "operator",
+                "alice",
+                "source withdrawal".into(),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            let frozen = request.flowspec_rule().unwrap();
+            assert_eq!(frozen.nlri.src_prefix, owner.match_criteria.src_prefix);
+            assert_eq!(request.ownership_key().unwrap(), route.ownership_key());
+            execute_withdrawal(&repo, &writer, false, &request, None)
+                .await
+                .unwrap();
+            let remaining = writer.list_active().await.unwrap();
+            for other in owners
+                .iter()
+                .filter(|other| other.mitigation_id != owner.mitigation_id)
+            {
+                if repo
+                    .get_mitigation(other.mitigation_id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_active()
+                {
+                    assert!(remaining.iter().any(
+                        |rule| rule.nlri_hash() == mitigation_rule(other).unwrap().nlri_hash()
+                    ));
+                }
+            }
+        }
+        assert!(writer.list_active().await.unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -50,6 +50,52 @@ async fn live_rustbgpd_controller_roundtrip() {
 
 #[tokio::test]
 #[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
+async fn live_rustbgpd_source_prefix_components_are_retained_in_both_families() {
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    let rules = contract::source_prefix_rules();
+    for rule in &rules {
+        speaker.announce(rule).await.unwrap();
+    }
+    contract::wait_inventory(&speaker, &rules).await.unwrap();
+    for family in [3, 4] {
+        let mut sources: Vec<_> = fixture
+            .received_flow_spec(family, "0.0.0.0")
+            .await
+            .received_routes
+            .into_iter()
+            .map(|row| {
+                row.route
+                    .unwrap()
+                    .components
+                    .into_iter()
+                    .find(|c| c.r#type == 2)
+                    .map(|c| {
+                        assert_eq!(c.offset, 0);
+                        assert!(c.value.is_empty());
+                        c.prefix
+                    })
+            })
+            .collect();
+        sources.sort();
+        let mut expected: Vec<_> = rules
+            .iter()
+            .filter(|rule| rule.nlri.dst_prefix.contains(':') == (family == 4))
+            .map(|rule| rule.nlri.src_prefix.clone())
+            .collect();
+        expected.sort();
+        assert_eq!(sources, expected);
+    }
+    for (index, rule) in rules.iter().enumerate() {
+        speaker.withdraw(rule).await.unwrap();
+        contract::wait_inventory(&speaker, &rules[index + 1..])
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-rustbgpd.sh"]
 async fn live_rustbgpd_amplification_components_inject_read_and_delete() {
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;

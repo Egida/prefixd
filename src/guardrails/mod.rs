@@ -190,6 +190,9 @@ impl Guardrails {
         if let Err(reason) = FlowSpecNlri::from(criteria).validate() {
             return refuse(GuardrailError::InvalidMatch { reason });
         }
+        if criteria.src_prefix.is_some() && !self.config.allow_src_prefix_match {
+            return refuse(GuardrailError::SrcPrefixNotAllowed);
+        }
         if criteria.fragment.is_some() && !self.config.allow_fragment_match {
             return refuse(GuardrailError::FragmentMatchNotAllowed);
         }
@@ -344,6 +347,29 @@ mod tests {
         match result {
             Err(PrefixdError::GuardrailViolation(error)) => error,
             other => panic!("expected a guardrail refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn source_prefix_match_needs_explicit_opt_in_for_both_families() {
+        let (mut config, _) = test_config();
+        for (destination, source) in [
+            ("192.0.2.1/32", "0.0.0.0/0"),
+            ("2001:db8::1/128", "2001:db8:1::/48"),
+        ] {
+            let criteria = MatchCriteria {
+                dst_prefix: destination.into(),
+                src_prefix: Some(source.into()),
+                protocol: Some(6),
+                ..Default::default()
+            };
+            config.allow_src_prefix_match = false;
+            assert!(matches!(
+                refused(check(&config, criteria.clone()).await),
+                GuardrailError::SrcPrefixNotAllowed
+            ));
+            config.allow_src_prefix_match = true;
+            check(&config, criteria).await.unwrap();
         }
     }
 
