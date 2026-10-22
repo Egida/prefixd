@@ -116,6 +116,40 @@ describe("operator menu authentication mode", () => {
     expect(controller.calls("GET", "/v1/preferences")).toHaveLength(0)
   })
 
+  it.each([false, true])("keeps preferences mounted while retrying failed health (recovered: %s)", async (recovered) => {
+    session({ health: "failed" })
+    const { mutate } = renderApp(<TimeZoneProvider><UserMenu /></TimeZoneProvider>)
+    fireEvent.click(await screen.findByRole("button", { name: "Preferences" }))
+    const dialog = await screen.findByRole("dialog", { name: "Preferences" })
+    const timeZone = screen.getByRole("combobox", { name: "Display timezone" })
+    timeZone.focus()
+
+    const response = deferred<Response>()
+    controller.route("GET", "/v1/health", () => response.promise)
+    let revalidation: Promise<unknown> | undefined
+    await act(async () => { revalidation = mutate()("health") })
+    await waitFor(() => expect(controller.calls("GET", "/v1/health")).toHaveLength(2))
+    expect(screen.getByRole("dialog", { name: "Preferences" })).toBe(dialog)
+    expect(screen.getByRole("combobox", { name: "Display timezone" })).toBe(timeZone)
+    expect(timeZone).toBeEnabled()
+    expect(timeZone).toHaveFocus()
+    expect(screen.queryByRole("status", { name: "Loading operator menu" })).not.toBeInTheDocument()
+
+    await act(async () => {
+      response.resolve(recovered
+        ? json({ status: "ok", version: "test", auth_mode: "credentials" })
+        : failure(503))
+      await revalidation
+    })
+    expect(screen.getByRole("dialog", { name: "Preferences" })).toBe(dialog)
+    expect(screen.getByRole("combobox", { name: "Display timezone" })).toBe(timeZone)
+    expect(timeZone).toHaveFocus()
+    fireEvent.keyDown(dialog, { key: "Escape" })
+    await waitFor(() => expect(screen.getByRole("button", {
+      name: recovered ? "Operator menu for alice" : "Preferences",
+    })).toHaveFocus())
+  })
+
   it("has no named controls without an authenticated operator", async () => {
     session({ operator: false })
     renderApp(<TimeZoneProvider><UserMenu /></TimeZoneProvider>)

@@ -27,7 +27,7 @@ import { DisplayPreferencesPanel } from "@/components/dashboard/display-preferen
 
 export function UserMenu() {
   const { operator, logout, isLoading: authLoading } = useAuth()
-  const { data: health, isLoading: healthLoading } = useHealth()
+  const { data: health, isLoading: healthLoading, error: healthError } = useHealth()
   const router = useRouter()
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [showPrefs, setShowPrefs] = useState(false)
@@ -46,7 +46,7 @@ export function UserMenu() {
     }
   }
 
-  if (authLoading || healthLoading) {
+  if (authLoading || (healthLoading && !healthError)) {
     return <Skeleton role="status" aria-label="Loading operator menu" className="size-11 sm:size-9" />
   }
 
