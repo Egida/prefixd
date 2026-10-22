@@ -38,15 +38,19 @@ fn go_received(path: &go::Path, afi: i32, peer: &str) -> FlowSpecRule {
     for rule in &nlri.rules {
         let kind = match rule.rule.as_ref().unwrap() {
             go::flow_spec_rule::Rule::IpPrefix(prefix) => {
-                assert_eq!(prefix.r#type, 1);
+                assert!(matches!(prefix.r#type, 1 | 2));
                 assert_eq!(prefix.offset, 0);
                 let net: ipnet::IpNet = format!("{}/{}", prefix.prefix, prefix.prefix_len)
                     .parse()
                     .unwrap();
                 assert_eq!(net, net.trunc());
                 assert_eq!(net.addr().is_ipv4(), afi == 1);
-                result.dst_prefix = net.to_string();
-                1
+                if prefix.r#type == 1 {
+                    result.dst_prefix = net.to_string();
+                } else {
+                    result.src_prefix = Some(net.to_string());
+                }
+                prefix.r#type
             }
             go::flow_spec_rule::Rule::Component(component) => {
                 assert!(matches!(component.r#type, 3 | 5));
@@ -139,12 +143,16 @@ fn rust_received(route: &rust::FlowSpecRouteEntry, family: i32, peer: &str) -> F
         previous = component.r#type;
         assert_eq!(component.offset, 0);
         match component.r#type {
-            1 => {
+            1 | 2 => {
                 assert!(component.value.is_empty());
                 let net: ipnet::IpNet = component.prefix.parse().unwrap();
                 assert_eq!(net, net.trunc());
                 assert_eq!(net.addr().is_ipv4(), family == 3);
-                nlri.dst_prefix = net.to_string();
+                if component.r#type == 1 {
+                    nlri.dst_prefix = net.to_string();
+                } else {
+                    nlri.src_prefix = Some(net.to_string());
+                }
             }
             3 => {
                 assert!(component.prefix.is_empty());

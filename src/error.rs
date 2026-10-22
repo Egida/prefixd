@@ -137,7 +137,7 @@ pub enum GuardrailError {
     )]
     NewMitigationRateExceeded { current: u32, max: u32 },
 
-    #[error("source prefix matching not allowed")]
+    #[error("source prefix matching requires guardrails.allow_src_prefix_match=true")]
     SrcPrefixNotAllowed,
 
     #[error("no allowed ports for service")]

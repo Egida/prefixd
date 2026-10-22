@@ -242,9 +242,9 @@ guardrails:
   # FlowSpec match opt-ins (default false)
   allow_fragment_match: false
   allow_packet_length_match: false
+  allow_src_prefix_match: false
 
   # Reserved: parsed, no effect (default false)
-  allow_src_prefix_match: false
   allow_tcp_flags_match: false
 ```
 
@@ -288,10 +288,20 @@ matches, with the same checks. A playbook rule that needs a flag left `false`, a
 source-port list over `max_ports`, or a component the selected speaker cannot
 encode fails startup, reload and playbook edits, in both modes.
 
-`allow_src_prefix_match` and `allow_tcp_flags_match` are reserved: they still
-parse so existing configurations load, but prefixd never matches source
-prefixes or TCP flags. Setting either to `true` logs one startup warning that
-the flag has no effect.
+`allow_src_prefix_match` enables an optional same-family `src_prefix` CIDR on
+manual discard and police rules. It defaults to `false`; a request carrying a
+source prefix then returns `422` before persistence or speaker RPC, including
+in dry run. Disabling the flag prevents new admissions; withdraw existing rules
+explicitly. This flag previously had no effect. Source prefixes do not require
+UDP; source-port, fragment and packet-length combinations still do. Host bits
+are cleared, IPv6 offsets are always zero, and an explicit `/0` matches all
+sources. The destination stays one victim host. Detectors and playbooks do not
+select source prefixes: source addresses may be spoofed, so operators must
+choose the scope from their own evidence. See [source matches](api.md#source-prefix-matches)
+and the [downgrade procedure](../how-to/upgrading.md#source-prefix-matches-and-downgrade).
+
+`allow_tcp_flags_match` remains reserved. Setting it to `true` logs one startup
+warning that it has no effect.
 
 ### Quotas
 

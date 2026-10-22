@@ -291,7 +291,7 @@ pub struct GuardrailsConfig {
     /// per-list cap of 8.
     #[serde(default = "default_max_ports")]
     pub max_ports: usize,
-    /// Reserved (ADR 028): parsed so configurations load, has no effect.
+    /// Admits rules with an explicit source CIDR in the destination's address family.
     #[serde(default)]
     pub allow_src_prefix_match: bool,
     /// Reserved (ADR 028): parsed so configurations load, has no effect.
@@ -320,16 +320,10 @@ impl GuardrailsConfig {
 
     /// Reserved flags set to true; startup warns once for each.
     pub fn reserved_flags_set(&self) -> Vec<&'static str> {
-        [
-            (
-                "guardrails.allow_src_prefix_match",
-                self.allow_src_prefix_match,
-            ),
-            (
-                "guardrails.allow_tcp_flags_match",
-                self.allow_tcp_flags_match,
-            ),
-        ]
+        [(
+            "guardrails.allow_tcp_flags_match",
+            self.allow_tcp_flags_match,
+        )]
         .into_iter()
         .filter_map(|(key, set)| set.then_some(key))
         .collect()
@@ -1077,10 +1071,7 @@ observability:
         assert_eq!(
             parse("allow_src_prefix_match: true\nallow_tcp_flags_match: true\n")
                 .reserved_flags_set(),
-            [
-                "guardrails.allow_src_prefix_match",
-                "guardrails.allow_tcp_flags_match"
-            ]
+            ["guardrails.allow_tcp_flags_match"]
         );
         assert_eq!(
             parse("allow_tcp_flags_match: true\n").reserved_flags_set(),
@@ -1091,6 +1082,7 @@ observability:
             "{}",
             "allow_src_prefix_match: false\nallow_tcp_flags_match: false\n",
             "allow_fragment_match: true\nallow_packet_length_match: true\n",
+            "allow_src_prefix_match: true\n",
         ] {
             assert!(parse(yaml).reserved_flags_set().is_empty(), "{yaml}");
         }

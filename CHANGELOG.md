@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Manual FlowSpec discard and police rules accept a same-family `src_prefix`
+  CIDR through the API and dashboard. Both speakers encode and read IPv4 and
+  offset-zero IPv6 source prefixes; list/detail, CLI and rule previews show the
+  source scope. `speaker.capabilities.flowspec_match` adds `source_prefix`.
+
+### Changed
+
+- `guardrails.allow_src_prefix_match` now enables manual source-prefix matches
+  instead of logging that it has no effect. It still defaults to false. Rules
+  without a source prefix keep their existing identity and JSON storage. Before
+  downgrading, drain source-prefix rules and their pending withdrawals as
+  described in the upgrade guide. No database migration is required.
+
 ## [0.22.1] - 2026-10-22
 
 prefixd 0.22.1 makes `PrefixdBlackholeReplaced` clear an hour after the last

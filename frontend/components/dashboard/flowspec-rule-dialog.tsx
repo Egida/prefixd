@@ -29,6 +29,7 @@ export interface RuleForm {
   action: "discard" | "police"
   rateBps: string
   dstPorts: string
+  srcPrefix: string
   srcPorts: string
   nonFirstFragments: boolean
   lengthMin: string
@@ -40,6 +41,7 @@ export interface RuleForm {
 /** The guardrails this form checks before the controller does; absent settings skip the opt-ins. */
 export interface RuleGuardrails {
   maxPorts: number
+  allowSrcPrefixMatch?: boolean
   allowFragmentMatch?: boolean
   allowPacketLengthMatch?: boolean
 }
@@ -52,6 +54,7 @@ const EMPTY_FORM: RuleForm = {
   action: "discard",
   rateBps: "",
   dstPorts: "",
+  srcPrefix: "",
   srcPorts: "",
   nonFirstFragments: false,
   lengthMin: "",
@@ -92,6 +95,31 @@ export function validateRule(form: RuleForm, guardrails: RuleGuardrails): RuleEr
   const v6 = !v4 && isIPv6(form.victimIp)
 
   if (!v4 && !v6) errors.victimIp = "Enter an IPv4 or IPv6 address."
+
+  const source = form.srcPrefix.trim()
+
+  if (source) {
+    const [address, length, extra] = source.split("/")
+    const sourceV4 = isIPv4(address)
+    let sourceV6 = false
+
+    if (isIPv6(address)) {
+      try {
+        sourceV6 = new URL(`http://[${address}]/`).hostname.startsWith("[")
+      } catch {
+        sourceV6 = false
+      }
+    }
+
+    if (extra !== undefined || !/^\d{1,3}$/.test(length ?? "") ||
+      !(sourceV4 || sourceV6) || Number(length) > (sourceV6 ? 128 : 32)) {
+      errors.srcPrefix = "Enter an IPv4 or IPv6 network in CIDR notation."
+    } else if ((v4 && !sourceV4) || (v6 && !sourceV6)) {
+      errors.srcPrefix = "Source prefix must match the victim's address family."
+    } else if (guardrails.allowSrcPrefixMatch === false) {
+      errors.srcPrefix = "Source prefix matching is off (guardrails.allow_src_prefix_match=false)."
+    }
+  }
 
   if ((form.protocol === "icmp" && v6) || (form.protocol === "icmpv6" && v4)) {
     errors.protocol = "Protocol does not match the victim's address family."
@@ -174,6 +202,8 @@ export function toRequest(form: RuleForm): CreateFlowSpecRequest {
 
   if (dstPorts.length > 0) request.dst_ports = dstPorts
 
+  if (form.srcPrefix.trim()) request.src_prefix = form.srcPrefix.trim()
+
   if (srcPorts.length > 0) request.src_ports = srcPorts
 
   if (form.nonFirstFragments) request.fragment = "non_first"
@@ -193,6 +223,7 @@ function readGuardrails(settings: { [key: string]: JsonValue } | undefined): Rul
 
   return {
     maxPorts: Number.isInteger(maxPorts) && maxPorts > 0 ? maxPorts : 5,
+    allowSrcPrefixMatch: flag("allow_src_prefix_match"),
     allowFragmentMatch: flag("allow_fragment_match"),
     allowPacketLengthMatch: flag("allow_packet_length_match"),
   }
@@ -307,6 +338,25 @@ export function FlowSpecRuleDialog({ open, onOpenChange }: FlowSpecRuleDialogPro
               autoComplete="off"
             />
             {fieldError("victimIp", "fs-ip")}
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="fs-src-prefix">Source prefix (optional)</Label>
+            <Input
+              id="fs-src-prefix"
+              placeholder="e.g. 198.51.100.0/24"
+              value={form.srcPrefix}
+              onChange={(e) => update("srcPrefix", e.target.value)}
+              aria-invalid={Boolean(shown("srcPrefix"))}
+              aria-describedby={["fs-src-prefix-help", describedBy("srcPrefix", "fs-src-prefix")].filter(Boolean).join(" ")}
+              className="h-9 font-mono"
+              spellCheck={false}
+              autoComplete="off"
+            />
+            <p id="fs-src-prefix-help" className="text-xs text-muted-foreground">
+              Limits which sources match this victim. Requires source prefix matching to be enabled.
+            </p>
+            {fieldError("srcPrefix", "fs-src-prefix")}
           </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">

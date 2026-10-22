@@ -50,21 +50,27 @@ family mismatch. GoBGP returns `None`, which is unsupported rather than empty.
 The controller uses it for the
 [blackhole lifecycle](#blackhole-lifecycle-and-reconciliation).
 
-`match_support()` reports which [ADR 028](../adr/028-amplification-matches.md)
-match components the adapter encodes: UDP source ports (type 6), a non-first
+`match_support()` reports which [source-prefix](../adr/031-source-prefix-matches.md)
+and [amplification](../adr/028-amplification-matches.md) components the adapter
+encodes: a same-family source CIDR (type 2), UDP
+source ports (type 6), a non-first
 fragment (type 12, bit `0x02` with the match bit) and one packet-length range
-(type 10). The default is none. rustbgpd, GoBGP and the mock report all three
+(type 10). The default is none. rustbgpd, GoBGP and the mock report all four
 in both families. Before any speaker RPC, and before persistence in dry-run
 and enforced modes, the controller refuses a rule with a component the
 selected speaker does not encode. It never drops the component, because that
 would widen the rule. Both adapters emit components in ascending type order and
 decode only the forms they emit: any other operator, term or bit fails the
-whole read. No API, playbook or detector creates these components yet.
+whole read. IPv6 source prefixes support offset zero only; a nonzero offset
+fails the inventory read. Manual requests can select a source CIDR behind
+`guardrails.allow_src_prefix_match`; playbooks and detectors do not. Source
+prefixes alone have no UDP restriction. Existing amplification rules keep
+their UDP invariants.
 
 Health detail adds `speaker.backend` and availability booleans under
 `speaker.capabilities`: `rule_reader`, `peer_observer`, `daemon_health`,
 `blackhole`, `blackhole_lease`, `blackhole_export` and the `flowspec_match`
-object (`source_ports`, `fragment`, `packet_length`). `blackhole_export` is
+object (`source_prefix`, `source_ports`, `fragment`, `packet_length`). `blackhole_export` is
 true when the adapter reads per-peer [export evidence](#export-evidence),
 which only rustbgpd does. `blackhole_lease` is true only
 after the rustbgpd adapter's `ListInjectionLeases` probe succeeded, which

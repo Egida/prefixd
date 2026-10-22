@@ -73,6 +73,11 @@ impl BlackholeRule {
 
 /// The frozen route of a blackhole row; a missing or mismatched route fails closed.
 pub fn blackhole_rule(mitigation: &Mitigation) -> Result<BlackholeRule> {
+    if mitigation.match_criteria.src_prefix.is_some() {
+        return Err(PrefixdError::Internal(
+            "blackhole mitigation contains a source prefix".into(),
+        ));
+    }
     if mitigation.action_type != ActionType::Blackhole {
         return Err(PrefixdError::Internal(
             "FlowSpec mitigation has no blackhole route".into(),

@@ -7,7 +7,7 @@ use prefixd::{
 use std::time::Duration;
 
 pub fn contract_rules() -> Vec<FlowSpecRule> {
-    [
+    let mut rules: Vec<_> = [
         (
             "192.0.2.240/32",
             Some(6),
@@ -40,7 +40,51 @@ pub fn contract_rules() -> Vec<FlowSpecRule> {
             },
         )
     })
-    .collect()
+    .collect();
+    rules.extend(source_prefix_rules());
+    rules
+}
+
+/// Same destination/protocol with absent, /0, network and host sources. Losing
+/// type 2 collapses these identities and fails the shared cardinality oracle.
+pub fn source_prefix_rules() -> Vec<FlowSpecRule> {
+    let mut rules = Vec::new();
+    for (destination, sources) in [
+        (
+            "192.0.2.248/32",
+            [
+                None,
+                Some("0.0.0.0/0"),
+                Some("198.51.100.0/24"),
+                Some("198.51.100.128/25"),
+                Some("198.51.100.1/32"),
+            ],
+        ),
+        (
+            "2001:db8::248/128",
+            [
+                None,
+                Some("::/0"),
+                Some("2001:db8:1::/48"),
+                Some("2001:db8:1::/64"),
+                Some("2001:db8:1::1/128"),
+            ],
+        ),
+    ] {
+        for source in sources {
+            rules.push(FlowSpecRule::new(
+                FlowSpecNlri {
+                    dst_prefix: destination.into(),
+                    src_prefix: source.map(str::to_owned),
+                    protocol: Some(6),
+                    dst_ports: vec![443],
+                    ..Default::default()
+                },
+                FlowSpecAction::discard(),
+            ));
+        }
+    }
+    rules
 }
 
 pub fn exact_inventory(actual: &[FlowSpecRule], expected: &[FlowSpecRule]) -> Result<()> {
@@ -66,6 +110,11 @@ pub fn exact_inventory(actual: &[FlowSpecRule], expected: &[FlowSpecRule]) -> Re
             found.nlri.dst_prefix.parse::<ipnet::IpNet>()?
                 == wanted.nlri.dst_prefix.parse::<ipnet::IpNet>()?,
             "destination prefix mismatch"
+        );
+        ensure!(
+            found.nlri.src_prefix == wanted.nlri.src_prefix,
+            "source prefix mismatch for {}",
+            wanted.nlri.dst_prefix
         );
         ensure!(
             found.nlri.protocol == wanted.nlri.protocol,
@@ -349,9 +398,12 @@ pub async fn run_readable_contract(speaker: &dyn FlowSpecAnnouncer) -> Result<()
             .await
             .context("available peer observation")?;
     }
-    for rule in &rules {
+    for (index, rule) in rules.iter().enumerate() {
         speaker.withdraw(rule).await.context("withdraw")?;
         speaker.withdraw(rule).await.context("duplicate withdraw")?;
+        wait_inventory(speaker, &rules[index + 1..])
+            .await
+            .context("withdraw only the exact source and destination match")?;
     }
     wait_inventory(speaker, &[])
         .await

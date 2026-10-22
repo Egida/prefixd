@@ -333,7 +333,8 @@ fn check_intent(config: &BlackholeConfig, intent: &MitigationIntent) -> Result<I
     }
     // The blackhole identity hashes only the prefix, so any other term would be dropped.
     let criteria = &intent.match_criteria;
-    if criteria.protocol.is_some()
+    if criteria.src_prefix.is_some()
+        || criteria.protocol.is_some()
         || !criteria.dst_ports.is_empty()
         || !criteria.src_ports.is_empty()
         || criteria.fragment.is_some()
@@ -1065,6 +1066,8 @@ mod tests {
         ports.match_criteria.dst_ports = vec![53];
         let mut src_ports = base();
         src_ports.match_criteria.src_ports = vec![123];
+        let mut src_prefix = base();
+        src_prefix.match_criteria.src_prefix = Some("198.51.100.0/24".into());
         let mut fragment = base();
         fragment.match_criteria.fragment = Some(crate::domain::FragmentMatch::NonFirst);
         let mut packet_length = base();
@@ -1077,6 +1080,7 @@ mod tests {
             protocol,
             ports,
             src_ports,
+            src_prefix,
             fragment,
             packet_length,
             rate,
