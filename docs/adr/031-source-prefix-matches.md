@@ -46,7 +46,9 @@ one source scope must leave other sources and a source-free rule untouched.
 
 The API exposes canonical source scope, and the dashboard form, list, detail,
 copyable rule preview and CLI show it. `flowspec_match.source_prefix` reports
-adapter encoding capability, not router enforcement. No detector or playbook
+adapter encoding capability, not router enforcement. The dashboard confirms this
+capability before posting each source selector; older controllers can otherwise
+ignore the unknown field and install a wider rule. No detector or playbook
 chooses a source prefix in this slice. No migration or new dependency is needed.
 
 ## Alternatives

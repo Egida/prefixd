@@ -621,6 +621,12 @@ be spoofed, so this field is chosen manually and is not derived from detector
 samples. Follow the [downgrade procedure](../how-to/upgrading.md#source-prefix-matches-and-downgrade)
 before running an older controller against these rules.
 
+Older controllers may ignore unknown request fields. Clients must confirm
+`speaker.capabilities.flowspec_match.source_prefix: true` from authenticated
+health detail before submitting a source selector. The dashboard checks this
+for each source-prefix creation and refuses if the read fails or support is
+missing. Upgrade the controller before using a newer dashboard's source form.
+
 #### Amplification matches
 
 `src_ports`, `fragment` and `packet_length` narrow a FlowSpec rule to one part

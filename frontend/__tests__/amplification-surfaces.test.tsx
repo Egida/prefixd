@@ -8,7 +8,7 @@ import { describeMatch, formatFlowSpecRule } from "@/components/dashboard/flowsp
 import { MitigationsContentLive } from "@/components/dashboard/mitigations-content-live"
 import { PlaybookEditor } from "@/components/dashboard/playbook-editor"
 import { PlaybookYamlEditor } from "@/components/dashboard/playbook-yaml-editor"
-import { updatePlaybooks, type ConfigPlaybook, type Event, type Mitigation } from "@/lib/api"
+import { createMitigation, updatePlaybooks, type ConfigPlaybook, type Event, type Mitigation } from "@/lib/api"
 import { failure, json, operatorResponse, renderApp, settle, signIn, useFakeController } from "./support/fake-controller"
 
 const controller = useFakeController()
@@ -188,6 +188,7 @@ describe("manual rule dialog", () => {
   }
 
   it("completes from the keyboard and posts the source ports", async () => {
+    controller.route("GET", "/v1/health/detail", () => json({ gobgp: { status: "connected" }, speaker: { capabilities: { flowspec_match: { source_prefix: true } } } }))
     controller.route("POST", "/v1/mitigations", () => json(sourcePortRule, 201))
     signIn(controller, "credentials", operatorResponse("operator"))
     let router: ReturnType<typeof renderApp>["router"] | undefined
@@ -216,6 +217,13 @@ describe("manual rule dialog", () => {
       victim_ip: "203.0.113.10", protocol: "udp", action: "discard", ttl_seconds: 300,
       reason: "NTP and CLDAP reflection", src_prefix: "198.51.100.0/24", src_ports: [389, 123],
     })
+  })
+
+  it.each([undefined, false, "error"])("never posts a source selector when controller support is %s", async (support) => {
+    controller.route("GET", "/v1/health/detail", () => support === "error" ? failure(503, "unavailable") : json({ gobgp: { status: "connected" }, speaker: { capabilities: { flowspec_match: { source_prefix: support } } } }))
+    const request = toRequest({ ...validForm, srcPrefix: "198.51.100.0/24" })
+    await expect(createMitigation(request)).rejects.toThrow(support === "error" ? /unavailable/ : /does not support/)
+    expect(controller.calls("POST", "/v1/mitigations")).toHaveLength(0)
   })
 
   it("names the guardrail from settings and sends nothing until it is fixed", async () => {
