@@ -5,10 +5,11 @@ import { useHealth } from "./use-api"
 
 export function usePermissions() {
   const { operator, isLoading: authLoading } = useAuth()
-  const { data: health, isLoading: healthLoading } = useHealth()
+  const { data: health, isLoading: healthLoading, error: healthError } = useHealth()
 
   const role = operator?.role
-  const settled = !authLoading && !healthLoading
+  // A completed failure stays settled while SWR retries without cached data.
+  const settled = !authLoading && (!healthLoading || Boolean(healthError))
 
   // Deny-by-default: no permissions until both health and auth have resolved.
   // Backend reports auth_mode in /v1/health. When "none", all operations
