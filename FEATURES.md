@@ -586,7 +586,11 @@ reconciliation, database and alerting metrics. Exact metric names and labels liv
 Active gauges count database status and can include expired intent or pending
 cleanup until terminal transition. Successful announcement counters acknowledge
 local RPCs, not router enforcement. Unsupported or failed peer observations must
-not be interpreted as confirmed absence.
+not be interpreted as confirmed absence. Announcement and session series identify
+the selected backend. A bounded capability gauge reports observation, injection,
+lease and match support; an unprobed lease remains unconfirmed. See the
+[speaker series](docs/reference/api.md#speaker-series) for labels and retained
+peer observation semantics.
 
 ### Request Correlation IDs
 

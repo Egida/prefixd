@@ -2662,12 +2662,47 @@ Returns Prometheus text format:
 ```
 # HELP prefixd_mitigations_active Current active mitigations
 # TYPE prefixd_mitigations_active gauge
-prefixd_mitigations_active{customer="acme",pop="iad1"} 5
+prefixd_mitigations_active{action_type="discard",pop="iad1"} 5
 
 # HELP prefixd_http_requests_total Total HTTP requests
 # TYPE prefixd_http_requests_total counter
 prefixd_http_requests_total{method="POST",route="/v1/events",status_class="2xx"} 1543
 ```
+
+### Speaker series
+
+Speaker metrics keep their existing names and add a `backend` label. Its bounded
+values are `rustbgpd`, `gobgp`, `mock`, and `other` for third-party adapters.
+Endpoints, owners, targets and user-supplied backend names are never label values.
+Update queries that depend on the previous label sets when upgrading.
+
+| Metric | Labels | Meaning |
+| --- | --- | --- |
+| `prefixd_announcements_total` | `backend`, `status` | Successful local add (`announced`) or completed withdrawal (`withdrawn`), for FlowSpec and blackholes |
+| `prefixd_announcements_latency_seconds` | `backend` (plus histogram `le`) | Latency recorded by the successful add and withdrawal paths |
+| `prefixd_bgp_session_up` | `backend`, `peer` | Last complete peer observation: `1` for Established, `0` for another known state |
+| `prefixd_speaker_capability` | `backend`, `capability` | `1` for an available capability, `0` for unavailable or unconfirmed |
+
+The selected backend's announcement counters and histogram start at zero.
+Every metrics scrape refreshes capabilities from local adapter state without a
+speaker RPC. Capability values match health detail's `speaker.capabilities`:
+`rule_reader`, `peer_observer`, `daemon_health`, `blackhole`, `blackhole_lease`,
+`blackhole_export`, `flowspec_source_prefix`, `flowspec_source_ports`,
+`flowspec_fragment` and `flowspec_packet_length` (the last four correspond to
+`flowspec_match` fields). Lease capability is `0` until a successful runtime
+probe confirms it, and returns to `0` if a lease RPC reports unsupported after
+a speaker rollback. Zero alone cannot distinguish unprobed from unsupported.
+Capability is availability, not current health, a live lease, export or router
+installation; use the separate lease-state and export series for those stages.
+
+A successful complete peer inventory retires samples for omitted peers; a
+successful empty inventory removes every peer sample. Unsupported observations,
+stream failures, malformed rows and other failed reads retain the last complete
+snapshot. Retained `1` values can therefore be stale during observation failure;
+an error is never converted to a successful empty result or a guessed down state.
+The capability gauge identifies an unavailable observer, not freshness of a
+supported observer. The Grafana session panel uses an instant query so retired
+peers are not displayed from historical samples.
 
 `prefixd_controller_fence_active` is `1` while this controller holds its POP's
 fence and `0` in standby. Alert when no controller for a POP reports `1`.

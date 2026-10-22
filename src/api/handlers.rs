@@ -721,10 +721,13 @@ async fn persist_new_mitigation(
             return Ok(Some(AnnouncementOutcome::Unconfirmed));
         }
     }
+    let backend = crate::observability::metrics::backend_label(state.announcer.backend());
     crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-        .with_label_values(&["announced"])
+        .with_label_values(&[backend, "announced"])
         .inc();
-    crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
+    crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+        .with_label_values(&[backend])
+        .observe(start.elapsed().as_secs_f64());
     Ok(None)
 }
 

@@ -1506,13 +1506,15 @@ async fn test_config_settings_endpoint() {
 
 #[tokio::test]
 async fn metrics_remain_unauthenticated_on_the_private_api_listener() {
+    use prefixd::bgp::InjectionLeases;
     prefixd::observability::init_metrics("test-pop");
+    let speaker = Arc::new(MockAnnouncer::new());
     let mut state = AppState::new(
         test_settings(),
         test_inventory(),
         test_playbooks(),
         Arc::new(MockRepository::new()),
-        Arc::new(MockAnnouncer::new()),
+        speaker.clone(),
         std::path::PathBuf::from("."),
     )
     .unwrap();
@@ -1534,6 +1536,7 @@ async fn metrics_remain_unauthenticated_on_the_private_api_listener() {
     assert_eq!(protected.status(), StatusCode::UNAUTHORIZED);
 
     let response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/metrics")
@@ -1549,6 +1552,36 @@ async fn metrics_remain_unauthenticated_on_the_private_api_listener() {
     let scrape = std::str::from_utf8(&body).unwrap();
     assert!(scrape.contains("# TYPE prefixd_reconciliation_runs_total counter"));
     assert!(scrape.contains("prefixd_reconciliation_runs_total{status=\"success\"}"));
+    assert!(
+        scrape.contains(
+            r#"prefixd_speaker_capability{backend="mock",capability="blackhole_lease"} 0"#
+        )
+    );
+    assert!(
+        scrape.contains(r#"prefixd_speaker_capability{backend="mock",capability="rule_reader"} 1"#)
+    );
+    assert!(
+        !speaker.lease_confirmed(),
+        "metrics must not probe the daemon"
+    );
+    speaker.live_lease("metrics-test").await.unwrap();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(
+        std::str::from_utf8(&body).unwrap().contains(
+            r#"prefixd_speaker_capability{backend="mock",capability="blackhole_lease"} 1"#
+        )
+    );
 }
 
 #[tokio::test]

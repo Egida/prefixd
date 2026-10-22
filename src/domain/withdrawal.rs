@@ -468,11 +468,16 @@ async fn finish_withdrawal_request(
     let mitigation = repo.finish_withdrawal(&request).await?.ok_or_else(|| {
         PrefixdError::Conflict("withdrawal completion no longer matches mitigation".into())
     })?;
-    if request.speaker_delete_required {
+    if request.speaker_delete_required
+        && let Some(announcer) = announcer
+    {
+        let backend = crate::observability::metrics::backend_label(announcer.backend());
         crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-            .with_label_values(&["withdrawn"])
+            .with_label_values(&[backend, "withdrawn"])
             .inc();
-        crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(rpc_seconds);
+        crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+            .with_label_values(&[backend])
+            .observe(rpc_seconds);
     }
     debug_assert!(matches!(
         mitigation.status,

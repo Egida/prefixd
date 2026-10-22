@@ -239,7 +239,7 @@ async fn action_reconciliation_rejects_port_order_alias_without_mutation() {
             .unwrap();
         let successes = metrics::RECONCILIATION_REPAIRS.with_label_values(&["success"]);
         let errors = metrics::RECONCILIATION_REPAIRS.with_label_values(&["error"]);
-        let announcements = metrics::ANNOUNCEMENTS_TOTAL.with_label_values(&["announced"]);
+        let announcements = metrics::ANNOUNCEMENTS_TOTAL.with_label_values(&["gobgp", "announced"]);
         let before = (successes.get(), errors.get(), announcements.get());
         for _ in 0..2 {
             assert!(reconciler.reconcile().await.is_err());

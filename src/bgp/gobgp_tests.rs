@@ -17,6 +17,22 @@ fn speaker() -> GoBgpAnnouncer {
     GoBgpAnnouncer::new("unused".into())
 }
 
+fn peer_row(address: &str, state: i32) -> ListPeerResponse {
+    ListPeerResponse {
+        peer: Some(Peer {
+            conf: Some(PeerConf {
+                neighbor_address: address.into(),
+                ..Default::default()
+            }),
+            state: Some(PeerState {
+                session_state: state,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    }
+}
+
 fn rule(prefix: &str) -> FlowSpecRule {
     FlowSpecRule::new(
         FlowSpecNlri {
@@ -464,6 +480,23 @@ impl tonic::server::ServerStreamingService<ListPeerRequest> for Fake {
 
     fn call(&mut self, _request: Request<ListPeerRequest>) -> Self::Future {
         let stream = self.stream(self.peers.clone());
+        // Keep trickled rows valid; duplicate peers would fail before the deadline.
+        let stream: RpcStream<ListPeerResponse> = if matches!(self.tail, Tail::Trickle) {
+            Box::pin(stream.enumerate().map(|(index, row)| {
+                row.map(|mut row| {
+                    row.peer
+                        .as_mut()
+                        .unwrap()
+                        .conf
+                        .as_mut()
+                        .unwrap()
+                        .neighbor_address = format!("192.0.2.{}", index + 1);
+                    row
+                })
+            }))
+        } else {
+            stream
+        };
         Box::pin(async move { Ok(Response::new(stream)) })
     }
 }
@@ -656,9 +689,7 @@ async fn either_family_failure_fails_whole_inventory() {
 async fn valid_rows_then_stream_error_fail_inventory_and_peers() {
     let mut fake = inventory(vec![(AFI_IP, Ok(vec![row(vec![path("192.0.2.1/32")])]))]);
     fake.stream_error = true;
-    fake.peers = vec![ListPeerResponse {
-        peer: Some(Peer::default()),
-    }];
+    fake.peers = vec![peer_row("192.0.2.1", 6)];
     let (speaker, _server) = serve(fake).await;
     assert!(
         speaker
@@ -735,8 +766,9 @@ async fn malformed_local_rows_never_return_partial_success() {
 
 #[tokio::test]
 async fn peers_keep_addresses_as_identity() {
+    let addresses = ["192.0.2.1", "192.0.2.2", "2001:db8::1", "fe80::1%eth0"];
     let fake = Fake {
-        peers: ["192.0.2.1", "192.0.2.2"]
+        peers: addresses
             .into_iter()
             .map(|address| ListPeerResponse {
                 peer: Some(Peer {
@@ -757,19 +789,92 @@ async fn peers_keep_addresses_as_identity() {
     };
     let (speaker, _server) = serve(fake).await;
     let peers = speaker.session_status().await.unwrap();
-    assert_eq!(peers.len(), 2);
-    for (peer, address) in peers.iter().zip(["192.0.2.1", "192.0.2.2"]) {
+    assert_eq!(peers.len(), addresses.len());
+    for (peer, address) in peers.iter().zip(addresses) {
         assert_eq!(peer.name, address);
         assert_eq!(peer.address, address);
         assert_eq!(peer.state, SessionState::Established);
     }
 }
 
+#[tokio::test]
+async fn malformed_peer_rows_fail_the_whole_observation() {
+    for case in 0..7 {
+        let good = peer_row("192.0.2.1", 6);
+        let mut bad = peer_row("192.0.2.2", 1);
+        match case {
+            0 => bad.peer = None,
+            1 => bad.peer.as_mut().unwrap().conf = None,
+            2 => bad
+                .peer
+                .as_mut()
+                .unwrap()
+                .conf
+                .as_mut()
+                .unwrap()
+                .neighbor_address
+                .clear(),
+            3 => bad.peer.as_mut().unwrap().state = None,
+            4 => {
+                bad.peer
+                    .as_mut()
+                    .unwrap()
+                    .state
+                    .as_mut()
+                    .unwrap()
+                    .session_state = 0
+            }
+            5 => {
+                bad.peer
+                    .as_mut()
+                    .unwrap()
+                    .state
+                    .as_mut()
+                    .unwrap()
+                    .session_state = 7
+            }
+            6 => bad = good.clone(),
+            _ => unreachable!(),
+        }
+        let (speaker, _server) = serve(Fake {
+            peers: vec![good, bad],
+            ..Default::default()
+        })
+        .await;
+        assert!(
+            speaker.session_status().await.is_err(),
+            "malformed peer case {case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn configured_down_peers_preserve_their_reported_state() {
+    let states = [
+        SessionState::Idle,
+        SessionState::Connect,
+        SessionState::Active,
+        SessionState::OpenSent,
+        SessionState::OpenConfirm,
+        SessionState::Established,
+    ];
+    let (speaker, _server) = serve(Fake {
+        peers: (1..=6)
+            .map(|state| peer_row(&format!("192.0.2.{state}"), state))
+            .collect(),
+        ..Default::default()
+    })
+    .await;
+    let observed = speaker.session_status().await.unwrap();
+    assert_eq!(observed.len(), states.len());
+    for (peer, state) in observed.iter().zip(states) {
+        assert_eq!(peer.state, state);
+    }
+}
+
 async fn assert_stream_deadline(peers: bool, tail: Tail) {
     let mut fake = inventory(vec![(AFI_IP, Ok(vec![row(vec![path("192.0.2.1/32")])]))]);
-    fake.peers = vec![ListPeerResponse {
-        peer: Some(Peer::default()),
-    }];
+    fake.peers = vec![peer_row("192.0.2.1", 6)];
     if matches!(tail, Tail::Stall) {
         fake.paths.lock().unwrap()[0].1 = Ok(vec![]);
         fake.peers.clear();

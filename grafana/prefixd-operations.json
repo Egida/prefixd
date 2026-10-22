@@ -70,6 +70,7 @@
       },
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
       "id": 2,
+      "description": "Last complete peer observation. Failed or unsupported reads retain prior samples; peer state does not confirm rule installation.",
       "options": {
         "colorMode": "background",
         "graphMode": "none",
@@ -83,10 +84,13 @@
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
           "expr": "prefixd_bgp_session_up",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{backend}} {{peer}}",
           "refId": "A"
         }
       ],
-      "title": "BGP Session",
+      "title": "BGP Sessions by Backend",
       "type": "stat"
     },
     {
@@ -297,20 +301,20 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "histogram_quantile(0.50, sum(rate(prefixd_announcements_latency_seconds_bucket[5m])) by (le))",
-          "legendFormat": "p50",
+          "expr": "histogram_quantile(0.50, sum(rate(prefixd_announcements_latency_seconds_bucket[5m])) by (backend, le))",
+          "legendFormat": "{{backend}} p50",
           "refId": "A"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "histogram_quantile(0.95, sum(rate(prefixd_announcements_latency_seconds_bucket[5m])) by (le))",
-          "legendFormat": "p95",
+          "expr": "histogram_quantile(0.95, sum(rate(prefixd_announcements_latency_seconds_bucket[5m])) by (backend, le))",
+          "legendFormat": "{{backend}} p95",
           "refId": "B"
         },
         {
           "datasource": { "type": "prometheus", "uid": "${datasource}" },
-          "expr": "histogram_quantile(0.99, sum(rate(prefixd_announcements_latency_seconds_bucket[5m])) by (le))",
-          "legendFormat": "p99",
+          "expr": "histogram_quantile(0.99, sum(rate(prefixd_announcements_latency_seconds_bucket[5m])) by (backend, le))",
+          "legendFormat": "{{backend}} p99",
           "refId": "C"
         }
       ],
@@ -481,6 +485,42 @@
       ],
       "title": "Reconciliation Runs",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "description": "Capability availability only. Leases remain unconfirmed until the speaker answers the lease probe. This does not show current health or router installation.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "options": { "0": { "color": "gray", "index": 0, "text": "Unavailable / unconfirmed" }, "1": { "color": "blue", "index": 1, "text": "Available" } }, "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "gray", "value": null }, { "color": "blue", "value": 1 }] }
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 28 },
+      "id": 11,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "prefixd_speaker_capability",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{backend}} {{capability}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Speaker Capabilities",
+      "type": "stat"
     }
   ],
   "refresh": "30s",
@@ -510,6 +550,6 @@
   "timezone": "",
   "title": "prefixd Operations",
   "uid": "prefixd-operations",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

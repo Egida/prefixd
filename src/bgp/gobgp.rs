@@ -573,38 +573,44 @@ impl PeerObserver for GoBgpAnnouncer {
                 .into_inner();
 
             let mut peers = Vec::new();
+            let mut identities = std::collections::HashSet::new();
 
             while let Some(resp) = stream
                 .message()
                 .await
                 .map_err(|e| PrefixdError::Internal(format!("GoBGP stream error: {}", e)))?
             {
-                if let Some(peer) = resp.peer {
-                    let state = peer
-                        .state
-                        .map(|s| match s.session_state {
-                            1 => SessionState::Idle,
-                            2 => SessionState::Connect,
-                            3 => SessionState::Active,
-                            4 => SessionState::OpenSent,
-                            5 => SessionState::OpenConfirm,
-                            6 => SessionState::Established,
-                            _ => SessionState::Idle,
-                        })
-                        .unwrap_or(SessionState::Idle);
-
-                    let name = peer
-                        .conf
-                        .as_ref()
-                        .map(|c| c.neighbor_address.clone())
-                        .unwrap_or_default();
-
-                    peers.push(PeerStatus {
-                        name: name.clone(),
-                        address: name,
-                        state,
-                    });
+                let peer = resp
+                    .peer
+                    .ok_or_else(|| PrefixdError::Internal("GoBGP peer row has no peer".into()))?;
+                let state = peer.state.ok_or_else(|| {
+                    PrefixdError::Internal("GoBGP peer has no session state".into())
+                })?;
+                let state = match state.session_state {
+                    1 => SessionState::Idle,
+                    2 => SessionState::Connect,
+                    3 => SessionState::Active,
+                    4 => SessionState::OpenSent,
+                    5 => SessionState::OpenConfirm,
+                    6 => SessionState::Established,
+                    _ => return Err(PrefixdError::Internal("GoBGP unknown peer state".into())),
+                };
+                let name = peer
+                    .conf
+                    .ok_or_else(|| {
+                        PrefixdError::Internal("GoBGP peer has no configuration".into())
+                    })?
+                    .neighbor_address;
+                if name.is_empty() || !identities.insert(name.clone()) {
+                    return Err(PrefixdError::Internal(
+                        "GoBGP missing or duplicate peer identity".into(),
+                    ));
                 }
+                peers.push(PeerStatus {
+                    name: name.clone(),
+                    address: name,
+                    state,
+                });
             }
 
             Ok(peers)

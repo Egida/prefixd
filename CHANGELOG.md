@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `prefixd_speaker_capability{backend,capability}` exposes the selected speaker's
+  runtime capabilities without probing on scrape. An unprobed lease is
+  unconfirmed, distinct from current health or router installation.
+
 - Manual FlowSpec discard and police rules accept a same-family `src_prefix`
   CIDR through the API and dashboard. Both speakers encode and read IPv4 and
   offset-zero IPv6 source prefixes; list/detail, CLI and rule previews show the
@@ -16,11 +20,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Announcement counters, announcement latency histograms and BGP session gauges
+  add a bounded `backend` label. The operations dashboard identifies backend and
+  peer, preserves backend latency groups and shows capability availability.
+
 - `guardrails.allow_src_prefix_match` now enables manual source-prefix matches
   instead of logging that it has no effect. It still defaults to false. Rules
   without a source prefix keep their existing identity and JSON storage. Before
   downgrading, drain source-prefix rules and their pending withdrawals as
   described in the upgrade guide. No database migration is required.
+
+### Fixed
+
+- A successful complete peer observation retires deleted-peer metrics, including
+  after an empty inventory. Failed or unsupported reads retain prior samples;
+  malformed GoBGP peer rows fail the whole observation instead of appearing empty
+  or inventing an Idle state.
 
 ## [0.22.1] - 2026-10-22
 

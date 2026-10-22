@@ -49,15 +49,16 @@ Monitor system health and performance:
 | Panel | Description |
 |-------|-------------|
 | Active Mitigations | Current count with threshold colors |
-| BGP Session | UP/DOWN status indicator |
+| BGP Sessions by Backend | Last complete UP/DOWN observation for each backend and peer |
 | HTTP Request Rate | Requests per second |
 | In-Flight Requests | Concurrent request count |
 | Active Mitigations by POP | Time series breakdown |
 | Mitigation Lifecycle | Created/expired/withdrawn rates |
-| BGP Announcement Latency | p50/p95/p99 histogram |
+| BGP Announcement Latency | p50/p95/p99 by backend |
 | HTTP Request Latency | p50/p95/p99 histogram |
 | HTTP Response Codes | 2xx/4xx/5xx breakdown |
 | Reconciliation Runs | Success/failure rates |
+| Speaker Capabilities | Available or unavailable/unconfirmed capabilities, separate from health |
 
 ### Security Dashboard
 
@@ -165,6 +166,14 @@ adds do not increment the counter.
 
 More example Prometheus alerting rules:
 
+Session samples carry `backend` and `peer`. A successful complete observation
+removes deleted peers, and the operations dashboard uses an instant query to
+avoid showing their historical state. Failed reads retain the last complete
+samples; a retained `UP` is not proof of a fresh observation. The dashboard also
+shows `prefixd_speaker_capability{backend,capability}`. Availability is separate
+from health: lease capability remains unconfirmed until the runtime probe
+succeeds. See [speaker series](../reference/api.md#speaker-series).
+
 ```yaml
 groups:
   - name: prefixd
@@ -216,4 +225,6 @@ Dashboards use a `${datasource}` variable for flexibility. To modify:
 
 ## Metrics Reference
 
-See [FEATURES.md](../../FEATURES.md#prometheus-metrics) for the full list of available metrics.
+See the [metrics reference](../reference/api.md#metrics) for labels, capability
+semantics and lifecycle counters, and [definitions](../../src/observability/metrics.rs)
+for the full list.

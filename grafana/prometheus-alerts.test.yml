@@ -216,3 +216,59 @@ tests:
       - eval_time: 3m
         alertname: PrefixdBlackholeReplaced
         exp_alerts: []
+
+  # Dashboard queries retain backend identity; retired peers vanish rather than
+  # being displayed from their last historical UP sample.
+  - interval: 1m
+    input_series:
+      - series: 'prefixd_bgp_session_up{backend="rustbgpd",peer="192.0.2.1"}'
+        values: '1x2 stale'
+      - series: 'prefixd_bgp_session_up{backend="gobgp",peer="192.0.2.2"}'
+        values: '0x6'
+      - series: 'prefixd_speaker_capability{backend="rustbgpd",capability="blackhole_lease"}'
+        values: '0x1 1x1 0x2'
+      - series: 'prefixd_speaker_capability{backend="gobgp",capability="blackhole_lease"}'
+        values: '0x6'
+      - series: 'prefixd_announcements_latency_seconds_bucket{backend="rustbgpd",le="1"}'
+        values: '0+10x6'
+      - series: 'prefixd_announcements_latency_seconds_bucket{backend="rustbgpd",le="+Inf"}'
+        values: '0+10x6'
+      - series: 'prefixd_announcements_latency_seconds_bucket{backend="gobgp",le="1"}'
+        values: '0+20x6'
+      - series: 'prefixd_announcements_latency_seconds_bucket{backend="gobgp",le="+Inf"}'
+        values: '0+20x6'
+    promql_expr_test:
+      - expr: prefixd_bgp_session_up
+        eval_time: 1m
+        exp_samples:
+          - labels: 'prefixd_bgp_session_up{backend="rustbgpd",peer="192.0.2.1"}'
+            value: 1
+          - labels: 'prefixd_bgp_session_up{backend="gobgp",peer="192.0.2.2"}'
+            value: 0
+      - expr: prefixd_bgp_session_up
+        eval_time: 4m
+        exp_samples:
+          - labels: 'prefixd_bgp_session_up{backend="gobgp",peer="192.0.2.2"}'
+            value: 0
+      - expr: 'prefixd_speaker_capability{backend="rustbgpd",capability="blackhole_lease"}'
+        eval_time: 1m
+        exp_samples:
+          - labels: 'prefixd_speaker_capability{backend="rustbgpd",capability="blackhole_lease"}'
+            value: 0
+      - expr: 'prefixd_speaker_capability{backend="rustbgpd",capability="blackhole_lease"}'
+        eval_time: 3m
+        exp_samples:
+          - labels: 'prefixd_speaker_capability{backend="rustbgpd",capability="blackhole_lease"}'
+            value: 1
+      - expr: 'prefixd_speaker_capability{backend="rustbgpd",capability="blackhole_lease"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'prefixd_speaker_capability{backend="rustbgpd",capability="blackhole_lease"}'
+            value: 0
+      - expr: histogram_quantile(0.50, sum(rate(prefixd_announcements_latency_seconds_bucket[5m])) by (backend, le))
+        eval_time: 5m
+        exp_samples:
+          - labels: '{backend="rustbgpd"}'
+            value: 0.5
+          - labels: '{backend="gobgp"}'
+            value: 0.5
