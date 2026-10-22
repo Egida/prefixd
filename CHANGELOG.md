@@ -37,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   malformed GoBGP peer rows fail the whole observation instead of appearing empty
   or inventing an Idle state.
 
+- The operator menu now waits for authentication and health to resolve before
+  showing controls, avoiding a flash of anonymous browser preferences for
+  signed-in operators. Browser preferences remain available when health fails,
+  and a retry keeps the signed-in dashboard and open preferences mounted.
+
 ## [0.22.1] - 2026-10-22
 
 prefixd 0.22.1 makes `PrefixdBlackholeReplaced` clear an hour after the last

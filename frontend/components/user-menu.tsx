@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import { useAuth } from "@/hooks/use-auth"
 import { useHealth } from "@/hooks/use-api"
 import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,7 +27,7 @@ import { DisplayPreferencesPanel } from "@/components/dashboard/display-preferen
 
 export function UserMenu() {
   const { operator, logout, isLoading: authLoading } = useAuth()
-  const { data: health, isLoading: healthLoading } = useHealth()
+  const { data: health, isLoading: healthLoading, error: healthError } = useHealth()
   const router = useRouter()
   const [isLoggingOut, setIsLoggingOut] = useState(false)
   const [showPrefs, setShowPrefs] = useState(false)
@@ -43,6 +44,10 @@ export function UserMenu() {
     } finally {
       setIsLoggingOut(false)
     }
+  }
+
+  if (authLoading || (healthLoading && !healthError)) {
+    return <Skeleton role="status" aria-label="Loading operator menu" className="size-11 sm:size-9" />
   }
 
   return (
