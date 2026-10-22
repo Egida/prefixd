@@ -550,6 +550,7 @@ instead submits an attack event through `POST /v1/events`, which applies playboo
 | `victim_ip` | string | yes | IPv4 or IPv6 host address to protect (`/32` or `/128` scope) |
 | `protocol` | string | conditional | Required for `"discard"` and `"police"`: `"udp"`, `"tcp"`, `"icmp"` (IPv4 protocol 1), `"icmpv6"` (IPv6 protocol 58), or `"any"`; `""` also selects any protocol. Omit for `"blackhole"` |
 | `dst_ports` | array | no | Destination ports (default `[]`) |
+| `src_prefix` | string | no | Same-family source CIDR; requires `guardrails.allow_src_prefix_match`. Host bits are cleared. Discard and police only; see [source-prefix matches](#source-prefix-matches) |
 | `src_ports` | array | no | UDP source ports (default `[]`, which means not matched). Discard and police only; see [amplification matches](#amplification-matches) |
 | `fragment` | string | no | `"non_first"` matches non-first IP fragments. Discard and police only |
 | `packet_length` | object | no | `{"min": N, "max": M}`, an inclusive total IP packet length. Discard and police only |
@@ -593,6 +594,32 @@ below the configured minimum returns `422` without saving intent or announcing.
 Remaining time is never rounded upward; the ordinary TTL guardrails still apply.
 The cap applies to initial creation only. Subsequent detector events can extend
 the stored expiry, so pause all creation and extension inputs during maintenance.
+
+#### Source-prefix matches
+
+Manual discard and police rules may include `src_prefix`, for example
+`"198.51.100.99/24"` for an IPv4 victim, or `"2001:db8:1::/64"` for IPv6.
+The response echoes the canonical network (`"198.51.100.0/24"` in the first
+example), and mitigation list/detail responses expose `src_prefix: null` when
+absent. The source and victim must have the same address family. Invalid CIDRs
+are refused, and source-only rules are unavailable: `victim_ip` still selects
+one destination host. An explicit `/0` matches all sources and has its own rule
+identity; omit the field to leave the source component absent.
+
+Set `guardrails.allow_src_prefix_match: true` before use. Otherwise creation
+returns `422` before saving intent or calling the speaker, in either operation
+mode. Source prefixes alone support every existing protocol selector. Adding
+source ports, fragments or packet length keeps their UDP requirements below.
+Blackholes refuse `src_prefix`. This manual match does not select a scrubber or
+change the action to redirect; the supported actions remain discard and police.
+
+The encodings follow [RFC 8955 section 4.2.2.2](https://www.rfc-editor.org/rfc/rfc8955.html#section-4.2.2.2)
+and [RFC 8956 section 3.2](https://www.rfc-editor.org/rfc/rfc8956.html#section-3.2),
+with IPv6 offset zero only. Both speakers expose `flowspec_match.source_prefix`;
+speaker acceptance does not prove router installation or filtering. Sources may
+be spoofed, so this field is chosen manually and is not derived from detector
+samples. Follow the [downgrade procedure](../how-to/upgrading.md#source-prefix-matches-and-downgrade)
+before running an older controller against these rules.
 
 #### Amplification matches
 
@@ -681,7 +708,7 @@ than FlowSpec:
   character for character, and `reason` must be nonempty. Otherwise the request
   returns `400` without saving a row or audit entry.
 - **Host route only.** Omit `protocol` (or send `"any"` or `""`),
-  `dst_ports`, `src_ports`, `fragment`, `packet_length`, `rate_bps` and
+  `dst_ports`, `src_prefix`, `src_ports`, `fragment`, `packet_length`, `rate_bps` and
   `expires_at_cap`; any of them returns `400`. The
   route is the victim's `/32` or `/128`.
 - **Guardrails.** `blackhole.enabled` must be true, the victim must be owned in
@@ -1917,6 +1944,7 @@ cookie; native mTLS requires a client certificate. `none` requires no credential
       "blackhole_lease": false,
       "blackhole_export": true,
       "flowspec_match": {
+        "source_prefix": true,
         "source_ports": true,
         "fragment": true,
         "packet_length": true
@@ -1963,9 +1991,10 @@ Older daemons may omit it. Capabilities do not report recent read success or
 rule delivery. `blackhole` reports the unicast blackhole adapter and
 `blackhole_lease` its owner-scoped injection lease
 ([ADR 027](../adr/027-blackhole-mitigations.md)); both are false when absent.
-`flowspec_match` reports which amplification match components the speaker
-encodes ([ADR 028](../adr/028-amplification-matches.md)); each is false when
-absent. No API path creates these components yet. `detector_unleased` is true
+`flowspec_match` reports which match components the speaker encodes: source
+prefixes and the [amplification matches](../adr/028-amplification-matches.md).
+Each is false when absent. Manual requests can select all these components;
+playbooks select amplification components only. `detector_unleased` is true
 when enforced detector blackholes run without the injection lease
 (`blackhole.enabled`, a nonempty `blackhole.detector_sources` and
 `blackhole_lease` false): if prefixd stops while the speaker runs, they stay

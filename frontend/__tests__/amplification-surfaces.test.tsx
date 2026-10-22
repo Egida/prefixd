@@ -3,7 +3,8 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import MitigationDetailPage from "@/app/(dashboard)/mitigations/[id]/page"
 import { EventDetailPanel } from "@/components/dashboard/event-detail-panel"
-import { FlowSpecRuleDialog, validateRule, type RuleForm } from "@/components/dashboard/flowspec-rule-dialog"
+import { FlowSpecRuleDialog, toRequest, validateRule, type RuleForm } from "@/components/dashboard/flowspec-rule-dialog"
+import { describeMatch, formatFlowSpecRule } from "@/components/dashboard/flowspec-preview"
 import { MitigationsContentLive } from "@/components/dashboard/mitigations-content-live"
 import { PlaybookEditor } from "@/components/dashboard/playbook-editor"
 import { PlaybookYamlEditor } from "@/components/dashboard/playbook-yaml-editor"
@@ -27,7 +28,7 @@ function rule(id: string, fields: Partial<Mitigation>): Mitigation {
   }
 }
 
-const sourcePortRule = rule("00000000-0000-4000-8000-000000000123", { src_ports: [123, 389, 1900, 3702, 5353, 11211] })
+const sourcePortRule = rule("00000000-0000-4000-8000-000000000123", { src_prefix: "198.51.100.0/24", src_ports: [123, 389, 1900, 3702, 5353, 11211] })
 
 const fragmentRule = rule("00000000-0000-4000-8000-000000000012", { fragment: "non_first", action_type: "police", rate_bps: 20_000_000 })
 
@@ -65,7 +66,7 @@ describe("amplification match display", () => {
       renderApp(<MitigationsContentLive />, { url: "/mitigations" })
     })
     await settle()
-    const ports = await screen.findByText("UDP src 123, 389, 1900, 3702, 5353, 11211", { selector: "td" })
+    const ports = await screen.findByText("UDP from 198.51.100.0/24 src 123, 389, 1900, 3702, 5353, 11211", { selector: "td" })
     // A long port list wraps inside its cell instead of widening the table.
     expect(ports).toHaveClass("whitespace-normal", "break-words")
     expect(screen.getByText("UDP non-first fragments", { selector: "td" })).toBeInTheDocument()
@@ -84,8 +85,9 @@ describe("amplification match display", () => {
       )
     })
     await screen.findByText("FlowSpec rule")
+    expect(screen.getByText("Source prefix").nextSibling).toHaveTextContent("198.51.100.0/24")
     expect(screen.getByText("Source ports").nextSibling).toHaveTextContent("123, 389, 1900, 3702, 5353, 11211")
-    expect(screen.getByText("Matches").parentElement).toHaveTextContent("Matches UDP src 123, 389, 1900, 3702, 5353, 11211 → 203.0.113.10")
+    expect(screen.getByText("Matches").parentElement).toHaveTextContent("Matches UDP from 198.51.100.0/24 src 123, 389, 1900, 3702, 5353, 11211 → 203.0.113.10")
     expect(screen.getByText(/source-port 123,389,1900,3702,5353,11211 then discard/)).toBeInTheDocument()
 
     const siblings = await screen.findByTestId("sibling-rules")
@@ -128,11 +130,30 @@ describe("amplification match display", () => {
 
 const validForm: RuleForm = {
   victimIp: "203.0.113.10", protocol: "udp", action: "discard", rateBps: "", dstPorts: "", srcPorts: "123, 389",
+  srcPrefix: "",
   nonFirstFragments: false, lengthMin: "", lengthMax: "", ttl: "300", reason: "reflection",
 }
 
 describe("manual rule validation", () => {
   const guardrails = { maxPorts: 8, allowFragmentMatch: false, allowPacketLengthMatch: false }
+
+  it("keeps source CIDR independent of the UDP-only components and preserves it in requests and displays", () => {
+    for (const [victimIp, srcPrefix] of [["203.0.113.10", "198.51.100.9/24"], ["2001:db8::1", "2001:db8:1::/64"]]) {
+      const form = { ...validForm, victimIp, srcPrefix, protocol: "tcp", srcPorts: "" }
+      expect(validateRule(form, { maxPorts: 5, allowSrcPrefixMatch: true })).toEqual({})
+      expect(toRequest(form).src_prefix).toBe(srcPrefix)
+      expect(validateRule(form, { maxPorts: 5, allowSrcPrefixMatch: false }).srcPrefix).toContain("allow_src_prefix_match=false")
+      const fields = { dst_prefix: `${victimIp}/${victimIp.includes(":") ? 128 : 32}`, src_prefix: srcPrefix, protocol: 6, dst_ports: [], action_type: "discard", rate_bps: null }
+      expect(describeMatch(fields)).toBe(`TCP from ${srcPrefix}`)
+      expect(formatFlowSpecRule(fields)).toContain(`source ${srcPrefix} protocol tcp`)
+    }
+
+    expect(toRequest({ ...validForm, srcPrefix: "  " })).not.toHaveProperty("src_prefix")
+  })
+
+  it.each(["198.51.100.1", "198.51.100.1/33", "2001:db8::/64", "bad/24", "198.51.100.0/24/0", "1:2:3/64"])("refuses malformed or foreign-family source %s", (srcPrefix) => {
+    expect(validateRule({ ...validForm, srcPrefix }, { maxPorts: 5 }).srcPrefix).toBeTruthy()
+  })
 
   it.each<[string, Partial<RuleForm>, keyof RuleForm, string]>([
     ["source ports need UDP", { protocol: "tcp" }, "protocol", "require protocol UDP"],
@@ -181,10 +202,11 @@ describe("manual rule dialog", () => {
     await waitFor(() => expect(within(dialog).getByLabelText(/^Victim IP/)).toHaveFocus())
     const order = Array.from(dialog.querySelectorAll<HTMLElement>("input, button")).filter((element) => element.tabIndex >= 0)
     expect(order.map((element) => element.getAttribute("id") ?? element.textContent?.trim())).toEqual([
-      "fs-ip", "fs-protocol", "fs-action", "fs-dst", "fs-src", "fs-fragment", "fs-length-min", "fs-length-max",
+      "fs-ip", "fs-src-prefix", "fs-protocol", "fs-action", "fs-dst", "fs-src", "fs-fragment", "fs-length-min", "fs-length-max",
       "fs-ttl", "fs-reason", "Cancel", "Create rule", "Close",
     ])
     fill(/^Victim IP/, "203.0.113.10")
+    fill(/^Source prefix/, "198.51.100.0/24")
     fill(/^Source ports/, "389, 123")
     fill(/^Reason/, "NTP and CLDAP reflection")
     // Enter in a field submits the form.
@@ -192,7 +214,7 @@ describe("manual rule dialog", () => {
     await waitFor(() => expect(router?.push).toHaveBeenCalledWith(`/mitigations/${sourcePortRule.mitigation_id}`))
     expect(JSON.parse(controller.calls("POST", "/v1/mitigations")[0].body ?? "")).toEqual({
       victim_ip: "203.0.113.10", protocol: "udp", action: "discard", ttl_seconds: 300,
-      reason: "NTP and CLDAP reflection", src_ports: [389, 123],
+      reason: "NTP and CLDAP reflection", src_prefix: "198.51.100.0/24", src_ports: [389, 123],
     })
   })
 

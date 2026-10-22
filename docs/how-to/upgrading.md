@@ -283,6 +283,43 @@ ordinary idempotent TTL cleanup retires each row. New manual creation rejects
 an owned canonical scope before RPC; detector events extend exactly one owner
 and reject ambiguous ownership without consuming their external event ID.
 
+## Source-prefix matches and downgrade
+
+The next release adds optional `src_prefix` to manual FlowSpec matches. No
+migration is required. The flag `guardrails.allow_src_prefix_match` was reserved
+before this change; it now admits source CIDRs when true. Leave it false until
+the receiving routers are qualified. Existing source-free rules retain their
+stored JSON and rule identities.
+
+Before downgrading to a controller without source-prefix support, pause manual
+creation and withdraw every live source-prefix rule using the current binary:
+
+```sql
+SELECT mitigation_id, pop, victim_ip
+FROM mitigations
+WHERE status IN ('pending', 'active', 'escalated')
+  AND match_json::jsonb ->> 'src_prefix' IS NOT NULL;
+```
+
+Drain their pending withdrawals on the original speaker target; this query must
+return no rows:
+
+```sql
+SELECT pop, count(*) AS pending
+FROM withdrawal_requests
+WHERE completed_at IS NULL
+  AND rule_json::jsonb -> 'nlri' ->> 'src_prefix' IS NOT NULL
+GROUP BY pop;
+```
+
+Verify the speaker has no remaining local source-prefix intent, including leased
+state, before following [rollback](#rollback). Do not delete database rows to
+bypass cleanup. Earlier strict readers refuse the new key, while older readers
+may ignore it and withdraw a wider rule instead. Completed rows can also fail
+history reads on strict older binaries; retain a backup and verify the rollback
+binary against a restored copy before switching. Do not rewrite audit history or
+pending operation JSON.
+
 ## Amplification matches and downgrade
 
 Releases after 0.20.0 can install FlowSpec rules with source-port,

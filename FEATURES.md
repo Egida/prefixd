@@ -188,10 +188,12 @@ configuration. Both use the same policy and lifecycle logic and support IPv4 and
 IPv6 FlowSpec with discard or policing. Exact build, selection, transport and
 observation details are in the [backend reference](docs/reference/speaker-backends.md).
 
-The current rule scope is destination prefix, optional protocol and discrete
-destination-port equalities. Policy rates use bits/sec; adapters convert wire
-units. Automatic ICMP maps to protocol 1 for IPv4 and 58 for IPv6; the manual
-API's `icmp` selector currently means protocol 1.
+Rules match a victim destination host, optional protocol and discrete
+destination-port equalities, with source-port, fragment and packet-length
+components for amplification. Manual rules may also select a same-family source
+CIDR behind `guardrails.allow_src_prefix_match`. Policy rates use bits/sec;
+adapters convert wire units. Automatic ICMP maps to protocol 1 for IPv4 and 58
+for IPv6; manual requests use `icmp` or `icmpv6` for the matching family.
 
 Saved intent, successful speaker acceptance and local read-back do not prove
 router forwarding. The [backend checks](docs/reference/speaker-backends.md#readable-backend-qualification)
@@ -485,7 +487,7 @@ Real-time visibility into mitigation state:
 - **Overview** - Active mitigations, BGP session status, quota usage, 24h activity chart
 - **Mitigations** - List with filtering, sorting, pagination, inline withdraw, bulk withdraw (multi-select), CSV export
 - **Mitigate Now** - Operator modal (`n` shortcut, command palette action) posts policy-validated ban events
-- **Rule** - Operator form for one manual FlowSpec rule, including source ports, non-first fragments and packet length, with client checks that name the guardrail
+- **Rule** - Operator form for one manual FlowSpec rule, including source prefix, source ports, non-first fragments and packet length, with client checks that name the guardrail
 - **Events** - Attack event history with CSV export
 - **IP History** - Unified timeline per IP (events + mitigations + customer context), with incident report generation
 - **Audit Log** - Recorded operation history with actor attribution, CSV export
@@ -689,6 +691,6 @@ prefixd is focused on FlowSpec policy automation. These are explicitly out of sc
 - **L7/WAF analysis** - Focus is L3/L4 volumetric attacks
 - **Detection algorithms** - Use existing detectors (FastNetMon, etc.)
 - **Tbps-scale scrubbing** - Requires upstream/scrubber integration
-- **Source-prefix filtering** - Not supported: spoofed sources would let an attacker choose what is blocked. Amplification rules match UDP source *ports* only
+- **Automatic source-prefix filtering** - Detectors and playbooks do not choose source prefixes from potentially spoofed traffic. Operators may create an explicit same-family source CIDR match on manual discard/police rules behind `guardrails.allow_src_prefix_match`; the destination remains a single victim host
 
 See [ROADMAP](ROADMAP.md) for planned features.

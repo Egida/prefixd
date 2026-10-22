@@ -241,6 +241,8 @@ struct MitigationResponse {
     protocol: Option<u8>,
     #[serde(default)]
     dst_ports: Vec<u16>,
+    #[serde(default)]
+    src_prefix: Option<String>,
     /// ADR 028 match fields; absent from controllers that predate them.
     #[serde(default)]
     src_ports: Vec<u16>,
@@ -283,6 +285,9 @@ impl MitigationResponse {
             Some(58) => "icmpv6".into(),
             Some(other) => other.to_string(),
         }];
+        if let Some(prefix) = &self.src_prefix {
+            parts.push(format!("from {prefix}"));
+        }
         if !self.src_ports.is_empty() {
             parts.push(format!("src {}", join(&self.src_ports)));
         }
@@ -1098,6 +1103,10 @@ mod tests {
         };
         // An older controller sends none of the match fields.
         assert_eq!(summary(serde_json::json!({})), "any");
+        assert_eq!(
+            summary(serde_json::json!({ "protocol": 6, "src_prefix": "198.51.100.0/24" })),
+            "tcp from 198.51.100.0/24"
+        );
         assert_eq!(
             summary(
                 serde_json::json!({ "protocol": 17, "dst_ports": [], "src_ports": [123, 389] })

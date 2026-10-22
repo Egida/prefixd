@@ -103,6 +103,8 @@ export interface Mitigation {
   action_type: "police" | "discard" | "blackhole"
   rate_bps: number | null
   dst_prefix: string
+  /** Source CIDR; null or absent means no source constraint. */
+  src_prefix?: string | null
   protocol: number | null
   dst_ports: number[]
   /** UDP source ports (ADR 028), sorted; absent from controllers that predate them. */
@@ -384,6 +386,8 @@ export async function createBlackhole(request: CreateBlackholeRequest): Promise<
 
 export interface CreateFlowSpecRequest {
   victim_ip: string
+  /** Same-family source CIDR; requires guardrails.allow_src_prefix_match. */
+  src_prefix?: string
   /** udp, tcp, icmp, icmpv6 or any. Source ports, fragment and packet length need udp. */
   protocol: string
   action: "discard" | "police"

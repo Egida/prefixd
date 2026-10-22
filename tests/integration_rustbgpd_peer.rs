@@ -20,7 +20,7 @@ use prefixd::{
 };
 
 fn rules() -> Vec<FlowSpecRule> {
-    [
+    let mut rules: Vec<_> = [
         "192.0.2.240/32",
         "192.0.2.241/32",
         "2001:db8::240/128",
@@ -43,7 +43,9 @@ fn rules() -> Vec<FlowSpecRule> {
             },
         )
     })
-    .collect()
+    .collect();
+    rules.extend(contract::source_prefix_rules());
+    rules
 }
 
 #[tokio::test]
@@ -191,6 +193,7 @@ async fn released_peer_restart_reconciles_original_desired_state_without_extra_r
                 pop: settings.pop.clone(),
                 match_criteria: MatchCriteria {
                     dst_prefix: rule.nlri.dst_prefix.clone(),
+                    src_prefix: rule.nlri.src_prefix.clone(),
                     protocol: rule.nlri.protocol,
                     dst_ports: rule.nlri.dst_ports.clone(),
                     ..Default::default()

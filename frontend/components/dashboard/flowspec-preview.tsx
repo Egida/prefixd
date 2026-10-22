@@ -27,6 +27,7 @@ function ruleRate(bps: number | null): string {
 
 export interface FlowSpecFields {
   dst_prefix: string
+  src_prefix?: string | null
   protocol: number | null
   dst_ports: number[]
   src_ports?: number[]
@@ -41,6 +42,8 @@ export function describeMatch(fields: Omit<FlowSpecFields, "dst_prefix" | "rate_
   if (fields.action_type === "blackhole") return "all traffic"
   const proto = protocolName(fields.protocol).toUpperCase().replace("ICMPV6", "ICMPv6")
   const parts: string[] = []
+
+  if (fields.src_prefix) parts.push(`from ${fields.src_prefix}`)
 
   if (fields.src_ports?.length) parts.push(`src ${fields.src_ports.join(", ")}`)
 
@@ -57,6 +60,8 @@ export function describeMatch(fields: Omit<FlowSpecFields, "dst_prefix" | "rate_
 
 export function formatFlowSpecRule(fields: FlowSpecFields): string {
   const parts: string[] = ["match destination", fields.dst_prefix]
+
+  if (fields.src_prefix) parts.push("source", fields.src_prefix)
 
   const proto = protocolName(fields.protocol)
 

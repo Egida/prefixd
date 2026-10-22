@@ -297,6 +297,9 @@ export default function MitigationDetailPage({ params }: { params: Promise<{ id:
                   <Field label="Destination prefix"><span className="font-mono">{mitigation.dst_prefix}</span></Field>
                   <Field label="Protocol">{protocolName(mitigation.protocol)}</Field>
                   <Field label="Destination ports"><span className="font-mono">{mitigation.dst_ports.length > 0 ? mitigation.dst_ports.join(", ") : "any"}</span></Field>
+                  {mitigation.src_prefix ? (
+                    <Field label="Source prefix"><span className="font-mono break-all">{mitigation.src_prefix}</span></Field>
+                  ) : null}
                   {mitigation.src_ports?.length ? (
                     <Field label="Source ports"><span className="font-mono">{mitigation.src_ports.join(", ")}</span></Field>
                   ) : null}

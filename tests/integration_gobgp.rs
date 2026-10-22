@@ -23,6 +23,48 @@ async fn test_announce_and_list_active() {
 
 #[tokio::test]
 #[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
+async fn source_prefix_components_are_retained_in_both_families() {
+    use prefixd::bgp::apipb::{TableType, flow_spec_rule, nlri};
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    let rules = contract::source_prefix_rules();
+    for rule in &rules {
+        speaker.announce(rule).await.unwrap();
+    }
+    contract::wait_inventory(&speaker, &rules).await.unwrap();
+    for afi in [1, 2] {
+        let mut sources = Vec::new();
+        for path in fixture.paths(afi, TableType::Global).await {
+            let Some(nlri::Nlri::FlowSpec(nlri)) = path.nlri.unwrap().nlri else {
+                panic!("FlowSpec expected")
+            };
+            sources.push(nlri.rules.iter().find_map(|rule| match &rule.rule {
+                Some(flow_spec_rule::Rule::IpPrefix(prefix)) if prefix.r#type == 2 => {
+                    assert_eq!(prefix.offset, 0);
+                    Some(format!("{}/{}", prefix.prefix, prefix.prefix_len))
+                }
+                _ => None,
+            }));
+        }
+        sources.sort();
+        let mut expected: Vec<_> = rules
+            .iter()
+            .filter(|rule| rule.nlri.dst_prefix.contains(':') == (afi == 2))
+            .map(|rule| rule.nlri.src_prefix.clone())
+            .collect();
+        expected.sort();
+        assert_eq!(sources, expected);
+    }
+    for (index, rule) in rules.iter().enumerate() {
+        speaker.withdraw(rule).await.unwrap();
+        contract::wait_inventory(&speaker, &rules[index + 1..])
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
 async fn amplification_components_inject_read_and_delete() {
     use prefixd::bgp::apipb::{TableType, flow_spec_rule, nlri};
     let fixture = fixture::Speaker::start().await;

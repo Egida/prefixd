@@ -103,6 +103,13 @@ impl std::str::FromStr for ActionType {
 #[serde(deny_unknown_fields)]
 pub struct MatchCriteria {
     pub dst_prefix: String,
+    /// Optional conventional source CIDR. Absent keeps legacy rule identities.
+    #[serde(
+        default,
+        with = "canonical_source_prefix",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub src_prefix: Option<String>,
     pub protocol: Option<u8>,
     pub dst_ports: Vec<u16>,
     /// UDP source ports (RFC 8955 type 6), an equality set stored sorted and
@@ -137,6 +144,33 @@ pub(super) mod canonical_src_ports {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u16>, D::Error> {
         Ok(super::canonical_ports(&Vec::deserialize(deserializer)?))
+    }
+}
+
+/// Source CIDRs are canonical when persisted or restored; invalid input fails closed.
+pub(crate) mod canonical_source_prefix {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        prefix: &Option<String>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        prefix
+            .as_deref()
+            .map(super::super::canonical_source_prefix)
+            .transpose()
+            .map_err(serde::ser::Error::custom)?
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<String>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .as_deref()
+            .map(super::super::canonical_source_prefix)
+            .transpose()
+            .map_err(serde::de::Error::custom)
     }
 }
 

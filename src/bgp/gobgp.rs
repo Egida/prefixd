@@ -203,6 +203,10 @@ impl GoBgpAnnouncer {
     }
 
     fn build_flowspec_nlri_v4(&self, nlri: &FlowSpecNlri) -> Result<ProtoFlowSpecNlri> {
+        if nlri.src_prefix.is_some() {
+            nlri.validate()
+                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+        }
         let (prefix_u32, prefix_len) = self.parse_prefix_v4(&nlri.dst_prefix)?;
 
         // Build FlowSpec NLRI components per RFC 5575 using typed FlowSpecRule
@@ -225,6 +229,7 @@ impl GoBgpAnnouncer {
         rules.push(ProtoFlowSpecRule {
             rule: Some(flow_spec_rule::Rule::IpPrefix(dst_prefix)),
         });
+        push_source_prefix(&mut rules, nlri)?;
 
         // Type 3: IP Protocol (if specified)
         if let Some(proto) = nlri.protocol {
@@ -273,6 +278,10 @@ impl GoBgpAnnouncer {
     }
 
     fn build_flowspec_nlri_v6(&self, nlri: &FlowSpecNlri) -> Result<ProtoFlowSpecNlri> {
+        if nlri.src_prefix.is_some() {
+            nlri.validate()
+                .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+        }
         let (addr, prefix_len) = self.parse_prefix_v6(&nlri.dst_prefix)?;
 
         // Build FlowSpec NLRI components for IPv6 per RFC 8956
@@ -288,6 +297,7 @@ impl GoBgpAnnouncer {
         rules.push(ProtoFlowSpecRule {
             rule: Some(flow_spec_rule::Rule::IpPrefix(dst_prefix_component)),
         });
+        push_source_prefix(&mut rules, nlri)?;
 
         // Type 3: Next Header (equivalent to IP Protocol for IPv6)
         if let Some(proto) = nlri.protocol {
@@ -384,6 +394,26 @@ impl GoBgpAnnouncer {
         })?;
         Ok((ip, len))
     }
+}
+
+/// RFC 8955/8956 type 2, before protocol, with conventional IPv6 offset 0.
+fn push_source_prefix(rules: &mut Vec<ProtoFlowSpecRule>, nlri: &FlowSpecNlri) -> Result<()> {
+    if let Some(source) = &nlri.src_prefix {
+        let source = crate::domain::canonical_source_prefix(source)
+            .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))?;
+        let source: ipnet::IpNet = source
+            .parse()
+            .map_err(|_| PrefixdError::InvalidPrefix(source.clone()))?;
+        rules.push(ProtoFlowSpecRule {
+            rule: Some(flow_spec_rule::Rule::IpPrefix(FlowSpecIpPrefix {
+                r#type: 2,
+                prefix_len: source.prefix_len().into(),
+                prefix: source.addr().to_string(),
+                offset: 0,
+            })),
+        });
+    }
+    Ok(())
 }
 
 /// ADR 028 components, after destination ports so types stay ascending. GoBGP
@@ -707,6 +737,7 @@ impl GoBgpAnnouncer {
         };
 
         let mut dst_prefix = String::new();
+        let mut src_prefix = None;
         let mut protocol: Option<u8> = None;
         let mut dst_ports: Vec<u16> = Vec::new();
         let mut src_ports: Vec<u16> = Vec::new();
@@ -716,18 +747,34 @@ impl GoBgpAnnouncer {
         let mut previous_type = 0;
         for rule in &proto_nlri.rules {
             let component_type = match &rule.rule {
-                Some(flow_spec_rule::Rule::IpPrefix(prefix)) if prefix.r#type == 1 => {
+                Some(flow_spec_rule::Rule::IpPrefix(prefix)) if matches!(prefix.r#type, 1 | 2) => {
                     let address = prefix.prefix.parse::<std::net::IpAddr>().map_err(|_| {
-                        PrefixdError::Internal("GoBGP invalid destination address".into())
+                        PrefixdError::Internal("GoBGP invalid prefix address".into())
                     })?;
                     let max_len = if address.is_ipv4() { 32 } else { 128 };
                     if prefix.offset != 0 || prefix.prefix_len > max_len {
                         return Err(PrefixdError::Internal(
-                            "GoBGP unsupported destination prefix length/offset".into(),
+                            "GoBGP unsupported prefix length/offset".into(),
                         ));
                     }
-                    dst_prefix = format!("{}/{}", prefix.prefix, prefix.prefix_len);
-                    1
+                    let cidr = format!("{}/{}", prefix.prefix, prefix.prefix_len);
+                    if prefix.r#type == 1 {
+                        dst_prefix = cidr;
+                    } else {
+                        let source: ipnet::IpNet = cidr.parse().map_err(|_| {
+                            PrefixdError::Internal("GoBGP invalid source prefix".into())
+                        })?;
+                        if source != source.trunc() {
+                            return Err(PrefixdError::Internal(
+                                "GoBGP source prefix has host bits".into(),
+                            ));
+                        }
+                        src_prefix = Some(
+                            crate::domain::canonical_source_prefix(&cidr)
+                                .map_err(|error| PrefixdError::Internal(error.to_string()))?,
+                        );
+                    }
+                    prefix.r#type
                 }
                 Some(flow_spec_rule::Rule::Component(component))
                     if matches!(component.r#type, 3 | 5 | 6) =>
@@ -831,14 +878,21 @@ impl GoBgpAnnouncer {
             ));
         }
 
-        Ok(FlowSpecNlri {
+        let decoded = FlowSpecNlri {
             dst_prefix,
+            src_prefix,
             protocol,
             dst_ports,
             src_ports,
             fragment,
             packet_length,
-        })
+        };
+        if decoded.src_prefix.is_some() {
+            decoded
+                .validate()
+                .map_err(|error| PrefixdError::Internal(error.to_string()))?;
+        }
+        Ok(decoded)
     }
 
     /// Parse extended communities to extract the FlowSpec action (traffic-rate)
