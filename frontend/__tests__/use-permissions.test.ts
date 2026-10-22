@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { renderHook, waitFor } from "@testing-library/react"
+import { act, renderHook, waitFor } from "@testing-library/react"
 import { usePermissions } from "@/hooks/use-permissions"
 import type { OperatorRole } from "@/lib/auth"
 import { appWrapper, deferred, failure, json, operatorResponse, useFakeController } from "./support/fake-controller"
@@ -92,5 +92,38 @@ describe("usePermissions", () => {
     expect(perms.isViewer).toBe(false)
     expect(perms.canWithdraw).toBe(false)
     expect(perms.canManageUsers).toBe(false)
+  })
+
+  it.each(["health", "auth"])("waits for initial %s before allowing anonymous mode", async (pending) => {
+    session("none", null)
+    controller.route("GET", pending === "health" ? "/v1/health" : "/v1/auth/me", () => deferred<Response>().promise)
+    const { result } = renderHook(() => usePermissions(), appWrapper())
+    await act(async () => {})
+    expect(result.current.settled).toBe(false)
+    expect(result.current.authDisabled).toBe(false)
+    expect(result.current.canWithdraw).toBe(false)
+    expect(result.current.canManageUsers).toBe(false)
+  })
+
+  it.each([null, "viewer", "operator", "admin"] as const)("keeps %s permissions unchanged during a failed-health retry", async (role) => {
+    session("credentials", role)
+    controller.route("GET", "/v1/health", () => failure(503))
+    const { wrapper, handles } = appWrapper()
+    const { result } = renderHook(() => usePermissions(), { wrapper })
+    await waitFor(() => expect(result.current.settled).toBe(true))
+    const permissions = result.current
+    expect(permissions.authDisabled).toBe(false)
+    expect(permissions.role).toBe(role ?? undefined)
+    const response = deferred<Response>()
+    controller.route("GET", "/v1/health", () => response.promise)
+    let revalidation: Promise<unknown> | undefined
+    await act(async () => { revalidation = handles.mutate()("health") })
+    await waitFor(() => expect(controller.calls("GET", "/v1/health")).toHaveLength(2))
+    expect(result.current).toEqual(permissions)
+    await act(async () => {
+      response.resolve(failure(503))
+      await revalidation
+    })
+    expect(result.current).toEqual(permissions)
   })
 })

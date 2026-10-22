@@ -2,6 +2,7 @@ import { act } from "react"
 import { describe, expect, it } from "vitest"
 import { fireEvent, screen, waitFor } from "@testing-library/react"
 import { TimeZoneProvider } from "@/components/time-zone-provider"
+import { RequireAuth } from "@/components/require-auth"
 import { UserMenu } from "@/components/user-menu"
 import { deferred, failure, json, operatorResponse, renderApp, settle, useFakeController } from "./support/fake-controller"
 
@@ -116,9 +117,9 @@ describe("operator menu authentication mode", () => {
     expect(controller.calls("GET", "/v1/preferences")).toHaveLength(0)
   })
 
-  it.each([false, true])("keeps preferences mounted while retrying failed health (recovered: %s)", async (recovered) => {
+  it.each([false, true])("keeps dashboard preferences mounted while retrying failed health (recovered: %s)", async (recovered) => {
     session({ health: "failed" })
-    const { mutate } = renderApp(<TimeZoneProvider><UserMenu /></TimeZoneProvider>)
+    const { mutate } = renderApp(<TimeZoneProvider><RequireAuth><UserMenu /></RequireAuth></TimeZoneProvider>)
     fireEvent.click(await screen.findByRole("button", { name: "Preferences" }))
     const dialog = await screen.findByRole("dialog", { name: "Preferences" })
     const timeZone = screen.getByRole("combobox", { name: "Display timezone" })
@@ -148,6 +149,24 @@ describe("operator menu authentication mode", () => {
     await waitFor(() => expect(screen.getByRole("button", {
       name: recovered ? "Operator menu for alice" : "Preferences",
     })).toHaveFocus())
+  })
+
+  it("does not grant dashboard access to an anonymous user after health fails or retries", async () => {
+    session({ health: "failed", operator: false })
+    const { router, mutate } = renderApp(<RequireAuth><UserMenu /></RequireAuth>)
+    await waitFor(() => expect(router.push).toHaveBeenCalledWith("/login"))
+    expect(screen.queryByRole("button", { name: "Preferences" })).not.toBeInTheDocument()
+    const response = deferred<Response>()
+    controller.route("GET", "/v1/health", () => response.promise)
+    let revalidation: Promise<unknown> | undefined
+    await act(async () => { revalidation = mutate()("health") })
+    await waitFor(() => expect(controller.calls("GET", "/v1/health")).toHaveLength(2))
+    expect(screen.queryByRole("button", { name: "Preferences" })).not.toBeInTheDocument()
+    await act(async () => {
+      response.resolve(failure(503))
+      await revalidation
+    })
+    expect(screen.queryByRole("button", { name: "Preferences" })).not.toBeInTheDocument()
   })
 
   it("has no named controls without an authenticated operator", async () => {

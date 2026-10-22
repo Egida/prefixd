@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The operator menu now waits for authentication and health to resolve before
   showing controls, avoiding a flash of anonymous browser preferences for
   signed-in operators. Browser preferences remain available when health fails,
-  including while a failed health request is being retried.
+  and a retry keeps the signed-in dashboard and open preferences mounted.
 
 ## [0.22.1] - 2026-10-22
 
