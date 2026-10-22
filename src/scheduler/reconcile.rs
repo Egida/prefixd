@@ -1438,6 +1438,9 @@ mod tests {
         fn peer_observer(&self) -> Option<&dyn PeerObserver> {
             Some(self)
         }
+        fn match_support(&self) -> crate::bgp::FlowSpecMatchSupport {
+            self.inner.match_support()
+        }
     }
 
     #[async_trait::async_trait]
@@ -2186,6 +2189,127 @@ mod tests {
                     assert_eq!(wire_action(found).unwrap(), wire_action(rule).unwrap());
                 }
                 assert_eq!((successes.get(), errors.get(), announcements.get()), before);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn source_prefix_delete_failure_preserves_frozen_intent_and_siblings() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        for failure in [1, 2] {
+            let repo = Arc::new(MockRepository::new());
+            let speaker = action_speaker(failure);
+            let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+            let mut owner = action_mitigation("192.0.2.1/32", FlowSpecAction::discard());
+            owner.match_criteria.src_prefix = Some("198.51.100.0/24".into());
+            owner.scope_hash = owner.match_criteria.compute_scope_hash();
+            let mut sibling = owner.clone();
+            sibling.mitigation_id = uuid::Uuid::new_v4();
+            sibling.match_criteria.src_prefix = Some("198.51.100.0/25".into());
+            sibling.scope_hash = sibling.match_criteria.compute_scope_hash();
+            for mitigation in [&owner, &sibling] {
+                repo.insert_mitigation(mitigation).await.unwrap();
+                speaker
+                    .inner
+                    .announce(&crate::domain::mitigation_rule(mitigation).unwrap())
+                    .await
+                    .unwrap();
+            }
+            let request = request_withdrawal(
+                repo.as_ref(),
+                &owner,
+                false,
+                "operator",
+                "alice",
+                "source attack ended".into(),
+                true,
+                None,
+            )
+            .await
+            .unwrap();
+            assert!(
+                execute_withdrawal(repo.as_ref(), speaker.as_ref(), false, &request, None)
+                    .await
+                    .is_err()
+            );
+            for _ in 0..2 {
+                assert!(reconciler.reconcile().await.is_err());
+                assert_eq!(speaker.announcements.load(SeqCst), 0);
+                let pending = repo.pending_withdrawals(None).await.unwrap();
+                assert_eq!(pending.len(), 1);
+                let retained = &pending[0];
+                assert_eq!(
+                    (
+                        retained.operation_id,
+                        retained.actor.as_str(),
+                        retained.reason.as_str(),
+                        retained.rule_json.as_str()
+                    ),
+                    (
+                        request.operation_id,
+                        "alice",
+                        "source attack ended",
+                        request.rule_json.as_str()
+                    )
+                );
+                assert_eq!(
+                    retained.flowspec_rule().unwrap().nlri.src_prefix,
+                    owner.match_criteria.src_prefix
+                );
+                let actual = speaker.inner.list_active().await.unwrap();
+                assert_eq!(actual.len(), if failure == 1 { 2 } else { 1 });
+                assert!(actual.iter().any(|rule| {
+                    rule.nlri_hash()
+                        == crate::domain::mitigation_rule(&sibling)
+                            .unwrap()
+                            .nlri_hash()
+                }));
+            }
+            speaker.mode.store(0, SeqCst);
+            execute_withdrawal(repo.as_ref(), speaker.as_ref(), false, &request, None)
+                .await
+                .unwrap();
+            assert!(repo.pending_withdrawals(None).await.unwrap().is_empty());
+            assert_eq!(speaker.inner.list_active().await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn source_prefix_siblings_do_not_hide_missing_rules_or_get_deleted() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = action_speaker(0);
+        let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
+        let mut expected = Vec::new();
+        for (destination, source, sibling) in [
+            ("192.0.2.1/32", "198.51.100.0/24", "198.51.100.0/25"),
+            ("2001:db8::1/128", "2001:db8:1::/48", "2001:db8:1::/64"),
+        ] {
+            let mut owner = action_mitigation(destination, FlowSpecAction::discard());
+            owner.match_criteria.src_prefix = Some(source.into());
+            owner.scope_hash = owner.match_criteria.compute_scope_hash();
+            repo.insert_mitigation(&owner).await.unwrap();
+            let desired = reconciler.build_flowspec_rule(&owner).unwrap();
+            for source in [None, Some(sibling)] {
+                let mut unknown = desired.clone();
+                unknown.nlri.src_prefix = source.map(str::to_owned);
+                unknown.actions = vec![FlowSpecAction::police(7)];
+                speaker.inner.announce(&unknown).await.unwrap();
+                expected.push(unknown);
+            }
+            expected.push(desired);
+        }
+        for _ in 0..3 {
+            reconciler.sync_announcements().await.unwrap();
+            assert_eq!(speaker.announcements.load(SeqCst), 2);
+            let actual = speaker.inner.list_active().await.unwrap();
+            assert_eq!(actual.len(), expected.len());
+            for rule in &expected {
+                let found = actual
+                    .iter()
+                    .find(|found| found.nlri_hash() == rule.nlri_hash())
+                    .unwrap();
+                assert_eq!(wire_action(found).unwrap(), wire_action(rule).unwrap());
             }
         }
     }

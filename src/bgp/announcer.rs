@@ -47,6 +47,13 @@ pub trait FlowSpecWriter: Send + Sync {
     /// Whether both matches address the same backend-local route for upsert and delete.
     /// Writers that normalize match terms must use the same normalization here.
     fn matches_nlri(&self, left: &FlowSpecNlri, right: &FlowSpecNlri) -> Result<bool> {
+        for nlri in [left, right] {
+            if nlri.src_prefix.is_some() {
+                nlri.validate().map_err(|error| {
+                    crate::error::PrefixdError::BgpAnnouncementFailed(error.to_string())
+                })?;
+            }
+        }
         let prefix = |nlri: &FlowSpecNlri| {
             nlri.dst_prefix.parse::<ipnet::IpNet>().map_err(|_| {
                 crate::error::PrefixdError::BgpAnnouncementFailed(
@@ -54,7 +61,17 @@ pub trait FlowSpecWriter: Send + Sync {
                 )
             })
         };
+        let source = |nlri: &FlowSpecNlri| {
+            nlri.src_prefix
+                .as_deref()
+                .map(crate::domain::canonical_source_prefix)
+                .transpose()
+                .map_err(|error| {
+                    crate::error::PrefixdError::BgpAnnouncementFailed(error.to_string())
+                })
+        };
         Ok(prefix(left)? == prefix(right)?
+            && source(left)? == source(right)?
             && left.protocol == right.protocol
             && left.dst_ports == right.dst_ports
             // Source ports are an equality set; speakers read them back ascending.
@@ -386,6 +403,7 @@ pub trait FlowSpecAnnouncer: FlowSpecWriter {
 )]
 #[serde(default)]
 pub struct FlowSpecMatchSupport {
+    pub source_prefix: bool,
     pub source_ports: bool,
     pub fragment: bool,
     pub packet_length: bool,
@@ -393,6 +411,7 @@ pub struct FlowSpecMatchSupport {
 
 impl FlowSpecMatchSupport {
     pub const ALL: Self = Self {
+        source_prefix: true,
         source_ports: true,
         fragment: true,
         packet_length: true,
@@ -402,6 +421,11 @@ impl FlowSpecMatchSupport {
     /// encode. Dropping the component instead would widen the rule.
     pub fn require(self, nlri: &FlowSpecNlri) -> Result<()> {
         for (present, supported, component) in [
+            (
+                nlri.src_prefix.is_some(),
+                self.source_prefix,
+                "source prefix",
+            ),
             (!nlri.src_ports.is_empty(), self.source_ports, "source port"),
             (nlri.fragment.is_some(), self.fragment, "fragment"),
             (
@@ -497,7 +521,7 @@ mod tests {
         let json = serde_json::to_value(FlowSpecMatchSupport::ALL).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({"source_ports": true, "fragment": true, "packet_length": true})
+            serde_json::json!({"source_prefix": true, "source_ports": true, "fragment": true, "packet_length": true})
         );
         let base = FlowSpecNlri {
             dst_prefix: "192.0.2.1/32".into(),
@@ -505,6 +529,13 @@ mod tests {
             ..Default::default()
         };
         let cases = [
+            (
+                FlowSpecNlri {
+                    src_prefix: Some("198.51.100.0/24".into()),
+                    ..base.clone()
+                },
+                "source prefix",
+            ),
             (
                 FlowSpecNlri {
                     src_ports: vec![123],
@@ -537,6 +568,10 @@ mod tests {
         let all = FlowSpecMatchSupport::ALL;
         let lacking = [
             FlowSpecMatchSupport {
+                source_prefix: false,
+                ..all
+            },
+            FlowSpecMatchSupport {
                 source_ports: false,
                 ..all
             },
@@ -556,7 +591,7 @@ mod tests {
             let error = support.require(nlri).unwrap_err().to_string();
             assert!(error.contains(&format!("{component} match")), "{error}");
         }
-        lacking[2].require(&cases[0].0).unwrap();
+        lacking[3].require(&cases[1].0).unwrap();
     }
 
     #[test]

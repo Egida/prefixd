@@ -14571,6 +14571,162 @@ async fn prefixdctl_lists_gets_and_withdraws_a_blackhole() {
 mod manual_amplification_match {
     use super::*;
 
+    fn source_state(
+        enabled: bool,
+        mode: prefixd::config::OperationMode,
+        speaker: MockAnnouncer,
+    ) -> (Arc<AppState>, Arc<MockRepository>, Arc<MockAnnouncer>) {
+        let mut settings = test_settings();
+        settings.mode = mode;
+        settings.guardrails.allow_src_prefix_match = enabled;
+        let repo = Arc::new(MockRepository::new());
+        let speaker = Arc::new(speaker);
+        let state = AppState::new(
+            settings,
+            test_inventory(),
+            test_playbooks(),
+            repo.clone(),
+            speaker.clone(),
+            ".".into(),
+        )
+        .unwrap();
+        (state, repo, speaker)
+    }
+
+    #[tokio::test]
+    async fn source_prefix_is_opt_in_in_both_modes_and_never_widens_a_rule() {
+        use prefixd::config::OperationMode;
+        for mode in [OperationMode::DryRun, OperationMode::Enforced] {
+            let (state, repo, speaker) = source_state(false, mode, MockAnnouncer::new());
+            let (status, body) = post(
+                state,
+                payload(serde_json::json!({"src_prefix": "198.51.100.0/24"})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert!(
+                body["error"].as_str().unwrap().contains("source prefix"),
+                "{body}"
+            );
+            assert_eq!(repo.count_active_global().await.unwrap(), 0);
+            assert!(speaker.list_active().await.unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn source_prefix_round_trips_in_both_families_and_dry_run_sends_no_rpc() {
+        use prefixd::config::OperationMode;
+        for mode in [OperationMode::DryRun, OperationMode::Enforced] {
+            for (victim, source, canonical) in [
+                ("203.0.113.10", "198.51.100.199/24", "198.51.100.0/24"),
+                ("2001:db8::10", "2001:db8:1::abcd/64", "2001:db8:1::/64"),
+            ] {
+                let (state, repo, speaker) = source_state(true, mode, MockAnnouncer::new());
+                let (status, body) = post(state, payload(serde_json::json!({"victim_ip": victim, "protocol": "tcp", "src_prefix": source}))).await;
+                assert_eq!(status, StatusCode::CREATED, "{body}");
+                assert_eq!(body["src_prefix"], canonical);
+                let saved = repo
+                    .get_mitigation(body["mitigation_id"].as_str().unwrap().parse().unwrap())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(saved.match_criteria.src_prefix.as_deref(), Some(canonical));
+                let rules = speaker.list_active().await.unwrap();
+                if mode == OperationMode::DryRun {
+                    assert!(rules.is_empty());
+                } else {
+                    assert_eq!(rules.len(), 1);
+                    assert_eq!(rules[0].nlri.src_prefix.as_deref(), Some(canonical));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn different_sources_and_no_source_have_independent_owners_and_withdrawals() {
+        let (state, repo, speaker) = source_state(
+            true,
+            prefixd::config::OperationMode::Enforced,
+            MockAnnouncer::new(),
+        );
+        let mut ids = vec![];
+        let mut scopes = std::collections::HashSet::new();
+        for source in [None, Some("198.51.100.0/24"), Some("192.0.2.0/24")] {
+            let (status, body) = post(
+                state.clone(),
+                payload(serde_json::json!({"src_prefix": source})),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+            assert!(scopes.insert(body["scope_hash"].as_str().unwrap().to_string()));
+            ids.push(body["mitigation_id"].as_str().unwrap().to_string());
+        }
+        let (status, body) = post(
+            state.clone(),
+            payload(serde_json::json!({"src_prefix": "198.51.100.99/24"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        let response = create_test_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/v1/mitigations/{}/withdraw", ids[1]))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"reason":"source control"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let active = speaker.list_active().await.unwrap();
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().any(|r| r.nlri.src_prefix.is_none()));
+        assert!(
+            active
+                .iter()
+                .any(|r| r.nlri.src_prefix.as_deref() == Some("192.0.2.0/24"))
+        );
+        assert_eq!(repo.count_active_global().await.unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn unsupported_or_invalid_source_is_refused_before_saving() {
+        use prefixd::config::OperationMode;
+        let (state, repo, _) = source_state(
+            true,
+            OperationMode::Enforced,
+            MockAnnouncer::without_match_support(),
+        );
+        let (status, body) = post(
+            state,
+            payload(serde_json::json!({"src_prefix": "198.51.100.0/24"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["error"].as_str().unwrap().contains("source prefix"),
+            "{body}"
+        );
+        assert_eq!(repo.count_active_global().await.unwrap(), 0);
+        for source in [
+            "",
+            "bad",
+            "198.51.100.1",
+            "198.51.100.0/33",
+            "2001:db8::/64",
+            "198.51.100.0/24/0",
+        ] {
+            let (state, repo, speaker) =
+                source_state(true, OperationMode::Enforced, MockAnnouncer::new());
+            let (status, body) =
+                post(state, payload(serde_json::json!({"src_prefix": source}))).await;
+            assert!(status.is_client_error(), "{source}: {status} {body}");
+            assert_eq!(repo.count_active_global().await.unwrap(), 0);
+            assert!(speaker.list_active().await.unwrap().is_empty());
+        }
+    }
+
     fn state(
         allow_fragment: bool,
         allow_length: bool,
@@ -14757,6 +14913,7 @@ mod manual_amplification_match {
     #[tokio::test]
     async fn a_blackhole_takes_no_match_fields() {
         for extra in [
+            serde_json::json!({ "src_prefix": "198.51.100.0/24" }),
             serde_json::json!({ "src_ports": [123] }),
             serde_json::json!({ "fragment": "non_first" }),
             serde_json::json!({ "packet_length": { "min": 1000, "max": 65535 } }),

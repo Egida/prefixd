@@ -271,6 +271,8 @@ pub struct MitigationResponse {
     pub rate_bps: Option<u64>,
     /// Destination prefix (CIDR)
     pub dst_prefix: String,
+    /// Source network (same-family CIDR), or null when not matched
+    pub src_prefix: Option<String>,
     /// IP protocol number (6=TCP, 17=UDP, 1=ICMP)
     pub protocol: Option<u8>,
     /// Destination ports
@@ -367,6 +369,7 @@ impl From<&Mitigation> for MitigationResponse {
             action_type: m.action_type.to_string(),
             rate_bps: m.action_params.rate_bps,
             dst_prefix: m.match_criteria.dst_prefix.clone(),
+            src_prefix: m.match_criteria.src_prefix.clone(),
             protocol: m.match_criteria.protocol,
             dst_ports: m.match_criteria.dst_ports.clone(),
             src_ports: crate::domain::canonical_ports(&m.match_criteria.src_ports),
@@ -517,6 +520,10 @@ pub struct CreateMitigationRequest {
     protocol: Option<String>,
     #[serde(default)]
     dst_ports: Vec<u16>,
+    /// Source CIDR in the victim's address family. Requires
+    /// `guardrails.allow_src_prefix_match`; host bits are cleared. Discard/police only.
+    #[serde(default)]
+    src_prefix: Option<String>,
     /// UDP source ports (ADR 028), stored sorted and deduplicated; empty means absent.
     /// Needs protocol `udp`, never shares a rule with `fragment`, and is capped by
     /// `guardrails.max_ports` separately from `dst_ports`. Discard and police only.
@@ -1944,7 +1951,7 @@ pub async fn get_mitigation(
         (status = 400, description = "Invalid input, including an unsupported action/rate, protocol/address-family mismatch, a match component the selected speaker cannot encode, or a blackhole whose confirm_victim_ip differs from victim_ip or that carries match fields"),
         (status = 403, description = "A blackhole requires the Admin role; bearer tokens map to Operator"),
         (status = 409, description = "Conflicting owner, pending withdrawal, an untracked local blackhole route at the prefix, or a FlowSpec match held at the speaker by another injection owner or by none"),
-        (status = 422, description = "Guardrail rejection, including ADR 028 match invariants, the fragment and packet-length opt-ins, max_ports per port list, disabled blackholes and blackhole victim, TTL and quota checks"),
+        (status = 422, description = "Guardrail rejection, including match invariants, the source-prefix, fragment and packet-length opt-ins, max_ports per port list, disabled blackholes and blackhole victim, TTL and quota checks"),
     )
 )]
 pub async fn create_mitigation(
@@ -2043,6 +2050,17 @@ pub async fn create_mitigation(
     let customer_id = inventory.lookup_ip(&req.victim_ip).map(|c| c.customer_id);
     drop(inventory);
     let prefix_len = if victim_ip.is_ipv6() { 128 } else { 32 };
+    let src_prefix = match req
+        .src_prefix
+        .as_deref()
+        .map(crate::domain::canonical_source_prefix)
+        .transpose()
+    {
+        Ok(prefix) => prefix,
+        Err(error) => {
+            return Ok(AppError(PrefixdError::InvalidRequest(error.to_string())).into_response());
+        }
+    };
     let intent = MitigationIntent {
         event_id: Uuid::new_v4(),
         customer_id,
@@ -2050,6 +2068,7 @@ pub async fn create_mitigation(
         pop: state.settings.pop.clone(),
         match_criteria: MatchCriteria {
             dst_prefix: format!("{}/{}", req.victim_ip, prefix_len),
+            src_prefix,
             protocol,
             dst_ports: req.dst_ports,
             src_ports: crate::domain::canonical_ports(&req.src_ports),
@@ -2207,6 +2226,7 @@ async fn create_blackhole(
         Some("a blackhole requires a reason")
     } else if !matches!(req.protocol.as_deref(), None | Some("" | "any"))
         || !req.dst_ports.is_empty()
+        || req.src_prefix.is_some()
         || !req.src_ports.is_empty()
         || req.fragment.is_some()
         || req.packet_length.is_some()
@@ -2214,7 +2234,7 @@ async fn create_blackhole(
         || req.expires_at_cap.is_some()
     {
         Some(
-            "a blackhole takes no protocol, dst_ports, src_ports, fragment, packet_length, rate_bps or expires_at_cap",
+            "a blackhole takes no protocol, dst_ports, src_prefix, src_ports, fragment, packet_length, rate_bps or expires_at_cap",
         )
     } else {
         None

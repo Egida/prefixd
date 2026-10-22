@@ -82,6 +82,113 @@ fn rate(path: &mut Path) -> &mut TrafficRateExtended {
 }
 
 #[test]
+fn source_prefix_encodes_before_protocol_and_strictly_decodes() {
+    for (destination, source, canonical) in [
+        ("192.0.2.1/32", "198.51.100.129/24", "198.51.100.0/24"),
+        ("2001:db8::1/128", "2001:DB8:1::1/48", "2001:db8:1::/48"),
+        ("192.0.2.1/32", "0.0.0.0/0", "0.0.0.0/0"),
+        ("2001:db8::1/128", "::/0", "::/0"),
+    ] {
+        let mut wanted = rule(destination);
+        wanted.nlri.src_prefix = Some(source.into());
+        // TCP is valid with source prefixes; ADR028's UDP restriction is independent.
+        wanted.nlri.protocol = Some(6);
+        let mut path = speaker().build_flowspec_path(&wanted).unwrap();
+        let withdrawal = speaker()
+            .build_flowspec_withdraw_path(&wanted.nlri)
+            .unwrap();
+        assert_eq!(path.nlri, withdrawal.nlri);
+        let source = components(&mut path)[1].clone();
+        let Some(flow_spec_rule::Rule::IpPrefix(prefix)) = source.rule else {
+            panic!("source prefix expected")
+        };
+        let net: ipnet::IpNet = canonical.parse().unwrap();
+        assert_eq!(
+            (
+                prefix.r#type,
+                prefix.prefix_len,
+                prefix.offset,
+                prefix.prefix.as_str()
+            ),
+            (
+                2,
+                u32::from(net.prefix_len()),
+                0,
+                net.addr().to_string().as_str()
+            )
+        );
+        let decoded = speaker().parse_flowspec_path(&path).unwrap();
+        assert_eq!(decoded.nlri.src_prefix.as_deref(), Some(canonical));
+        assert_eq!(decoded.nlri_hash(), wanted.nlri_hash());
+        assert!(speaker().matches_nlri(&wanted.nlri, &decoded.nlri).unwrap());
+        let base = path;
+        for case in 0..8 {
+            let mut bad = base.clone();
+            let Some(flow_spec_rule::Rule::IpPrefix(prefix)) = &mut components(&mut bad)[1].rule
+            else {
+                unreachable!()
+            };
+            match case {
+                0 => prefix.offset = 1,
+                1 => prefix.prefix_len = 129,
+                2 => prefix.prefix = "invalid".into(),
+                3 => {
+                    prefix.prefix = if destination.contains(':') {
+                        "198.51.100.0"
+                    } else {
+                        "2001:db8::"
+                    }
+                    .into()
+                }
+                4 => prefix.r#type = 4,
+                5 => {
+                    prefix.prefix = if destination.contains(':') {
+                        "2001:db8:1::1"
+                    } else {
+                        "198.51.100.1"
+                    }
+                    .into()
+                }
+                6 => {
+                    let duplicate = components(&mut bad)[1].clone();
+                    components(&mut bad).insert(2, duplicate);
+                }
+                7 => {
+                    components(&mut bad).remove(0);
+                }
+                _ => unreachable!(),
+            }
+            // /0 with a nonzero address is also rejected as noncanonical read-back.
+            assert!(
+                speaker().parse_flowspec_path(&bad).is_err(),
+                "{destination} source mutation {case}"
+            );
+        }
+        let mut absent = wanted.clone();
+        absent.nlri.src_prefix = None;
+        assert!(!speaker().matches_nlri(&wanted.nlri, &absent.nlri).unwrap());
+        for source in [
+            "invalid",
+            "192.0.2.0/33",
+            if destination.contains(':') {
+                "198.51.100.0/24"
+            } else {
+                "2001:db8::/64"
+            },
+        ] {
+            wanted.nlri.src_prefix = Some(source.into());
+            assert!(speaker().build_flowspec_path(&wanted).is_err());
+            assert!(
+                speaker()
+                    .build_flowspec_withdraw_path(&wanted.nlri)
+                    .is_err()
+            );
+            assert!(speaker().matches_nlri(&wanted.nlri, &absent.nlri).is_err());
+        }
+    }
+}
+
+#[test]
 fn rejects_unrepresentable_local_matches() {
     let mutations: &[fn(&mut Path)] = &[
         |p| p.nlri = None,
@@ -133,6 +240,23 @@ fn rejects_unrepresentable_local_matches() {
     let mut p = path("2001:db8::1/128");
     prefix(&mut p).prefix_len = 129;
     assert!(speaker().parse_flowspec_path(&p).is_err());
+}
+
+#[tokio::test]
+async fn malformed_source_prefix_fails_the_complete_inventory() {
+    let mut wanted = rule("192.0.2.1/32");
+    wanted.nlri.src_prefix = Some("198.51.100.0/24".into());
+    let mut bad = speaker().build_flowspec_path(&wanted).unwrap();
+    let Some(flow_spec_rule::Rule::IpPrefix(source)) = &mut components(&mut bad)[1].rule else {
+        unreachable!()
+    };
+    source.offset = 1;
+    let fake = inventory(vec![
+        (AFI_IP, Ok(vec![row(vec![path("192.0.2.2/32"), bad])])),
+        (AFI_IP6, Ok(vec![])),
+    ]);
+    let (speaker, _server) = serve(fake).await;
+    assert!(speaker.list_active().await.is_err());
 }
 
 #[test]

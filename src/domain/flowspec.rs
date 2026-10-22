@@ -15,6 +15,13 @@ pub enum IpVersion {
 #[serde(deny_unknown_fields)]
 pub struct FlowSpecNlri {
     pub dst_prefix: String,
+    /// Conventional source CIDR (RFC 8955/8956 type 2), with IPv6 offset 0.
+    #[serde(
+        default,
+        with = "super::mitigation::canonical_source_prefix",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub src_prefix: Option<String>,
     pub protocol: Option<u8>,
     pub dst_ports: Vec<u16>,
     /// UDP source ports (RFC 8955 type 6), an equality set stored sorted and
@@ -46,6 +53,18 @@ pub enum FlowSpecMatchError {
     InvalidPacketLength { min: u16, max: u16, floor: u16 },
     #[error("destination must be one IPv4 /32 or IPv6 /128 host")]
     NotHostPrefix,
+    #[error("source prefix must be an IPv4 or IPv6 CIDR")]
+    InvalidSourcePrefix,
+    #[error("source and destination prefixes must use the same address family")]
+    SourcePrefixFamilyMismatch,
+}
+
+/// Canonical network CIDR. Explicit /0 remains a component and an identity of its own.
+pub fn canonical_source_prefix(prefix: &str) -> Result<String, FlowSpecMatchError> {
+    prefix
+        .parse::<ipnet::IpNet>()
+        .map(|prefix| prefix.trunc().to_string())
+        .map_err(|_| FlowSpecMatchError::InvalidSourcePrefix)
 }
 
 impl FlowSpecNlri {
@@ -65,7 +84,7 @@ impl FlowSpecNlri {
 
     /// The ADR 028 rule invariants. Rules without new components are not checked here.
     pub fn validate(&self) -> Result<(), FlowSpecMatchError> {
-        if !self.is_extended() {
+        if !self.is_extended() && self.src_prefix.is_none() {
             return Ok(());
         }
         let prefix: ipnet::IpNet = self
@@ -74,6 +93,18 @@ impl FlowSpecNlri {
             .map_err(|_| FlowSpecMatchError::NotHostPrefix)?;
         if prefix.prefix_len() != prefix.max_prefix_len() {
             return Err(FlowSpecMatchError::NotHostPrefix);
+        }
+        if let Some(source) = &self.src_prefix {
+            let source: ipnet::IpNet = source
+                .parse()
+                .map_err(|_| FlowSpecMatchError::InvalidSourcePrefix)?;
+            if source.addr().is_ipv4() != prefix.addr().is_ipv4() {
+                return Err(FlowSpecMatchError::SourcePrefixFamilyMismatch);
+            }
+        }
+        // Source-prefix matching also applies to TCP, ICMP and any-protocol rules.
+        if !self.is_extended() {
+            return Ok(());
         }
         if self.protocol != Some(17) {
             return Err(FlowSpecMatchError::RequiresUdp);
@@ -94,20 +125,30 @@ impl FlowSpecNlri {
         Ok(())
     }
 
-    /// ADR 028 identity, shared by the scope hash, NLRI hash and ownership key of a rule
-    /// with any new component. `None` keeps the legacy hashes byte for byte. The tag
-    /// keeps this input apart from legacy input, which starts with the prefix.
+    /// Shared scope, NLRI and ownership identity. Source-prefix rules use v3;
+    /// ADR 028 rules without source keep v2 byte for byte. `None` preserves the
+    /// original legacy hashes. Tags separate both namespaces from legacy input.
     pub(crate) fn extended_identity(&self) -> Option<String> {
-        if !self.is_extended() {
+        if !self.is_extended() && self.src_prefix.is_none() {
             return None;
         }
         let mut hasher = Sha256::new();
-        hasher.update(b"prefixd:flowspec-match:v2\0");
+        hasher.update(if self.src_prefix.is_some() {
+            b"prefixd:flowspec-match:v3\0"
+        } else {
+            b"prefixd:flowspec-match:v2\0"
+        });
         match self.dst_prefix.parse::<ipnet::IpNet>() {
             Ok(prefix) => hasher.update(prefix.to_string().as_bytes()),
             Err(_) => hasher.update(self.dst_prefix.as_bytes()),
         }
         hasher.update(b"\0");
+        if let Some(source) = &self.src_prefix {
+            let source = canonical_source_prefix(source).unwrap_or_else(|_| source.clone());
+            hasher.update([2]);
+            hasher.update((source.len() as u32).to_be_bytes());
+            hasher.update(source.as_bytes());
+        }
         if let Some(protocol) = self.protocol {
             hasher.update([3, protocol]);
         }
@@ -158,6 +199,10 @@ impl From<&MatchCriteria> for FlowSpecNlri {
     fn from(criteria: &MatchCriteria) -> Self {
         Self {
             dst_prefix: criteria.dst_prefix.clone(),
+            src_prefix: criteria
+                .src_prefix
+                .as_ref()
+                .map(|source| canonical_source_prefix(source).unwrap_or_else(|_| source.clone())),
             protocol: criteria.protocol,
             dst_ports: criteria.dst_ports.clone(),
             src_ports: canonical_ports(&criteria.src_ports),
@@ -498,5 +543,102 @@ mod tests {
         assert_eq!(nlri.compute_hash(), hash);
         nlri.dst_prefix = "2001:db8::2/128".into();
         assert_ne!(nlri.compute_hash(), hash);
+    }
+
+    #[test]
+    fn source_prefix_is_canonical_and_does_not_require_udp() {
+        for (destination, source, canonical) in [
+            ("192.0.2.1/32", "198.51.100.129/24", "198.51.100.0/24"),
+            (
+                "2001:db8::1/128",
+                "2001:0DB8:ABCD::1/48",
+                "2001:db8:abcd::/48",
+            ),
+            ("192.0.2.1/32", "198.51.100.1/0", "0.0.0.0/0"),
+            ("2001:db8::1/128", "2001:db8::1/0", "::/0"),
+        ] {
+            for protocol in [None, Some(1), Some(6), Some(17), Some(58)] {
+                let nlri = FlowSpecNlri {
+                    dst_prefix: destination.into(),
+                    src_prefix: Some(source.into()),
+                    protocol,
+                    ..Default::default()
+                };
+                nlri.validate().unwrap();
+                assert!(!nlri.is_extended());
+                let encoded = serde_json::to_value(&nlri).unwrap();
+                assert_eq!(encoded["src_prefix"], canonical);
+                let restored: FlowSpecNlri = serde_json::from_value(encoded.clone()).unwrap();
+                let criteria: MatchCriteria = serde_json::from_value(encoded).unwrap();
+                assert_eq!(restored.src_prefix.as_deref(), Some(canonical));
+                assert_eq!(restored.compute_hash(), nlri.compute_hash());
+                assert_eq!(criteria.compute_scope_hash(), nlri.compute_hash());
+                let absent = FlowSpecNlri {
+                    src_prefix: None,
+                    ..nlri
+                };
+                assert_ne!(restored.compute_hash(), absent.compute_hash());
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_source_matches_fail_closed_and_keep_amplification_invariants() {
+        let base = FlowSpecNlri {
+            dst_prefix: "192.0.2.1/32".into(),
+            src_prefix: Some("198.51.100.0/24".into()),
+            protocol: Some(6),
+            ..Default::default()
+        };
+        for source in [
+            "",
+            "198.51.100.1",
+            "198.51.100.0/33",
+            "2001:db8::/129",
+            "192.0.2.0/8-24",
+            "bad",
+        ] {
+            let nlri = FlowSpecNlri {
+                src_prefix: Some(source.into()),
+                ..base.clone()
+            };
+            assert_eq!(
+                nlri.validate(),
+                Err(FlowSpecMatchError::InvalidSourcePrefix)
+            );
+            let json = serde_json::json!({"dst_prefix":"192.0.2.1/32", "src_prefix":source, "protocol":6, "dst_ports":[]});
+            assert!(serde_json::from_value::<FlowSpecNlri>(json.clone()).is_err());
+            assert!(serde_json::from_value::<MatchCriteria>(json).is_err());
+        }
+        let mixed = FlowSpecNlri {
+            src_prefix: Some("2001:db8::/64".into()),
+            ..base.clone()
+        };
+        assert_eq!(
+            mixed.validate(),
+            Err(FlowSpecMatchError::SourcePrefixFamilyMismatch)
+        );
+        for destination in ["", "192.0.2.0/24", "invalid"] {
+            let nlri = FlowSpecNlri {
+                dst_prefix: destination.into(),
+                ..base.clone()
+            };
+            assert_eq!(nlri.validate(), Err(FlowSpecMatchError::NotHostPrefix));
+        }
+        let mut amplification = FlowSpecNlri {
+            src_ports: vec![123],
+            ..base
+        };
+        assert_eq!(
+            amplification.validate(),
+            Err(FlowSpecMatchError::RequiresUdp)
+        );
+        amplification.protocol = Some(17);
+        amplification.validate().unwrap();
+        amplification.fragment = Some(FragmentMatch::NonFirst);
+        assert_eq!(
+            amplification.validate(),
+            Err(FlowSpecMatchError::SourcePortsWithFragment)
+        );
     }
 }

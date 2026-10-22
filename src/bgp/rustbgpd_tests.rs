@@ -1753,6 +1753,74 @@ async fn flowspec_speaker() -> (RustBgpdAnnouncer, Fake, tokio::task::JoinHandle
 }
 
 #[tokio::test]
+async fn source_prefix_rpc_identity_delete_and_whole_inventory_failure() {
+    let (speaker, fake, server) = flowspec_speaker().await;
+    let mut rules = Vec::new();
+    for (destination, sources) in [
+        (
+            "192.0.2.1/32",
+            [
+                None,
+                Some("0.0.0.0/0"),
+                Some("198.51.100.129/24"),
+                Some("198.51.100.128/25"),
+            ],
+        ),
+        (
+            "2001:db8::1/128",
+            [
+                None,
+                Some("::/0"),
+                Some("2001:DB8:1::1/48"),
+                Some("2001:db8:1::/64"),
+            ],
+        ),
+    ] {
+        for source in sources {
+            let mut rule = rule(destination, 0);
+            rule.nlri.src_prefix = source.map(str::to_owned);
+            speaker.announce(&rule).await.unwrap();
+            speaker.announce(&rule).await.unwrap();
+            rules.push(rule);
+        }
+    }
+    let active = speaker.list_active().await.unwrap();
+    assert_eq!(active.len(), rules.len());
+    for rule in &rules {
+        let read = active
+            .iter()
+            .find(|read| read.nlri_hash() == rule.nlri_hash())
+            .unwrap();
+        assert!(speaker.matches_nlri(&rule.nlri, &read.nlri).unwrap());
+    }
+    // A malformed source at the end of an otherwise valid view fails the whole read.
+    let index = fake
+        .rules
+        .lock()
+        .unwrap()
+        .iter()
+        .position(|rule| rule.components.iter().any(|c| c.r#type == 2))
+        .unwrap();
+    fake.rules.lock().unwrap()[index].components[1].offset = 1;
+    assert!(speaker.list_active().await.is_err());
+    fake.rules.lock().unwrap()[index].components[1].offset = 0;
+    for (index, rule) in rules.iter().enumerate() {
+        speaker.withdraw(rule).await.unwrap();
+        speaker.withdraw(rule).await.unwrap();
+        let active = speaker.list_active().await.unwrap();
+        assert_eq!(active.len(), rules.len() - index - 1);
+        for remaining in &rules[index + 1..] {
+            assert!(
+                active
+                    .iter()
+                    .any(|read| read.nlri_hash() == remaining.nlri_hash())
+            );
+        }
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn leased_flowspec_adds_reads_and_deletes_under_the_recorded_owner() {
     let (speaker, fake, server) = flowspec_speaker().await;
     let leased = rule("192.0.2.1/32", 0).with_owner(LEASE_OWNER);
