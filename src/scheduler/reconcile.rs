@@ -1266,6 +1266,9 @@ impl ReconciliationLoop {
         &self,
         sessions: Option<&crate::error::Result<Vec<crate::bgp::PeerStatus>>>,
     ) {
+        use crate::observability::metrics::BGP_SESSION_UP;
+        use prometheus::core::Collector;
+
         let Some(sessions) = sessions else {
             return;
         };
@@ -1273,17 +1276,34 @@ impl ReconciliationLoop {
             Ok(peers) => {
                 let backend =
                     crate::observability::metrics::backend_label(self.announcer.backend());
-                // Only a complete successful inventory can retire deleted peers.
-                crate::observability::metrics::BGP_SESSION_UP.reset();
+                let observed: std::collections::HashSet<_> =
+                    peers.iter().map(|peer| peer.name.as_str()).collect();
                 for peer in peers {
                     let value = if peer.state.is_established() {
                         1.0
                     } else {
                         0.0
                     };
-                    crate::observability::metrics::BGP_SESSION_UP
+                    BGP_SESSION_UP
                         .with_label_values(&[backend, &peer.name])
                         .set(value);
+                }
+                // Keep retained children registered throughout concurrent scrapes.
+                for family in BGP_SESSION_UP.collect() {
+                    for metric in family.get_metric() {
+                        let labels = metric.get_label();
+                        if labels
+                            .iter()
+                            .any(|label| label.name() == "backend" && label.value() == backend)
+                            && let Some(peer) = labels.iter().find(|label| label.name() == "peer")
+                            && !observed.contains(peer.value())
+                            && let Err(error) =
+                                BGP_SESSION_UP.remove_label_values(&[backend, peer.value()])
+                        {
+                            tracing::warn!(error = %error, backend, peer = peer.value(),
+                                "failed to retire BGP session metric");
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -1707,7 +1727,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_complete_peer_inventory_retires_omitted_series() {
+    async fn successful_complete_peer_inventory_preserves_retained_and_retires_omitted_series() {
         let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
         use crate::observability::metrics::{BGP_SESSION_UP, gather_metrics};
         let reconciler = ReconciliationLoop::new(
@@ -1723,23 +1743,34 @@ mod tests {
             state,
         };
         let samples = || {
-            gather_metrics()
+            let mut samples = gather_metrics()
                 .lines()
                 .filter(|line| line.starts_with("prefixd_bgp_session_up{"))
                 .map(str::to_owned)
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            samples.sort();
+            samples
         };
         reconciler.update_bgp_session_metrics(Some(&Ok(vec![
             peer("retired-peer", crate::bgp::SessionState::Established),
             peer("retained-peer", crate::bgp::SessionState::Established),
         ])));
         assert_eq!(samples().len(), 2);
+        let retained = BGP_SESSION_UP.with_label_values(&["mock", "retained-peer"]);
+        BGP_SESSION_UP
+            .with_label_values(&["gobgp", "other-backend-peer"])
+            .set(1.0);
         reconciler.update_bgp_session_metrics(Some(&Ok(vec![peer(
             "retained-peer",
             crate::bgp::SessionState::Idle,
         )])));
-        let expected =
-            vec![r#"prefixd_bgp_session_up{backend="mock",peer="retained-peer"} 0"#.to_owned()];
+        assert_eq!(retained.get(), 0.0, "retained child must stay registered");
+        let other_backend =
+            r#"prefixd_bgp_session_up{backend="gobgp",peer="other-backend-peer"} 1"#.to_owned();
+        let expected = vec![
+            other_backend.clone(),
+            r#"prefixd_bgp_session_up{backend="mock",peer="retained-peer"} 0"#.to_owned(),
+        ];
         assert_eq!(samples(), expected);
         // Failed, including partial-stream, and unsupported observations retain the snapshot.
         reconciler.update_bgp_session_metrics(Some(&Err(PrefixdError::Internal(
@@ -1748,7 +1779,10 @@ mod tests {
         reconciler.update_bgp_session_metrics(None);
         assert_eq!(samples(), expected);
         reconciler.update_bgp_session_metrics(Some(&Ok(vec![])));
-        assert!(samples().is_empty());
+        assert_eq!(samples(), vec![other_backend]);
+        BGP_SESSION_UP
+            .remove_label_values(&["gobgp", "other-backend-peer"])
+            .unwrap();
     }
 
     #[tokio::test]

@@ -33,9 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A successful complete peer observation retires deleted-peer metrics, including
-  after an empty inventory. Failed or unsupported reads retain prior samples;
-  malformed GoBGP peer rows fail the whole observation instead of appearing empty
-  or inventing an Idle state.
+  after an empty inventory, while keeping retained peers registered during
+  scrapes. Failed or unsupported reads retain prior samples; malformed GoBGP
+  peer rows fail the whole observation instead of appearing empty or inventing
+  an Idle state.
 
 - The operator menu now waits for authentication and health to resolve before
   showing controls, avoiding a flash of anonymous browser preferences for
