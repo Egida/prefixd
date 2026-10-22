@@ -4,7 +4,8 @@
 #
 # IMPORTANT: vJunos-router cannot run inside a VM (no nested virtualization).
 #            Requires bare-metal server with KVM (Intel VMX or AMD-V).
-#            If running in a VM, use cjunos-flowspec.clab.yml or frr-flowspec.clab.yml instead.
+#            If running in a VM, use cjunos-flowspec.clab.yml or the maintained
+#            FRR interop lab in interop/; see README.md.
 #
 # Prerequisites:
 #   1. Intel CPU with nested virt: cat /sys/module/kvm_intel/parameters/nested
