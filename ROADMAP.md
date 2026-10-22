@@ -78,9 +78,14 @@ requirement and their own qualification.
 
 Diverting attack traffic to an external scrubber is later work. prefixd would
 orchestrate BGP diversion routes or FlowSpec redirect so the victim stays
-reachable while traffic is scrubbed elsewhere. It depends on the blackhole
-unicast contract, the injection lease and the controller fence, and needs its
-own design, including scrubber health and leak prevention.
+reachable while traffic is scrubbed elsewhere.
+[ADR 030](docs/adr/030-scrubber-diversion.md) proposes guarded redirect-to-IP,
+with fresh scrubber readiness, independent profile leases, export isolation,
+clean-return prerequisites and separate router/data-path qualification. It
+builds on the shipped blackhole unicast contract, injection lease and controller
+fence; the redirect action and scrubber workflow remain unimplemented. VRF
+redirect, whole-victim unicast diversion and automatic escalation are later
+slices, each requiring its own qualification.
 
 [ADR 026](docs/adr/026-facelift-framework-scope.md) defers framework adoption.
 Loco or an ORM migration is not a prerequisite for these changes.
