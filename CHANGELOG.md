@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The operator menu now waits for authentication and health to resolve before
+  showing controls, avoiding a flash of anonymous browser preferences for
+  signed-in operators. Browser preferences remain available when health fails.
+
 ## [0.22.1] - 2026-10-22
 
 prefixd 0.22.1 makes `PrefixdBlackholeReplaced` clear an hour after the last

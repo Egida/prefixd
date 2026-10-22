@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import { useAuth } from "@/hooks/use-auth"
 import { useHealth } from "@/hooks/use-api"
 import { Button } from "@/components/ui/button"
+import { Skeleton } from "@/components/ui/skeleton"
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -43,6 +44,10 @@ export function UserMenu() {
     } finally {
       setIsLoggingOut(false)
     }
+  }
+
+  if (authLoading || healthLoading) {
+    return <Skeleton role="status" aria-label="Loading operator menu" className="size-11 sm:size-9" />
   }
 
   return (

@@ -30,6 +30,31 @@ async function openMenu() {
 
 describe("operator menu authentication mode", () => {
   it.each([
+    { pending: "health", mode: "credentials" },
+    { pending: "auth", mode: "credentials" },
+    { pending: "health", mode: "none" },
+    { pending: "auth", mode: "none" },
+  ])("waits for $pending before showing the resolved $mode menu", async ({ pending, mode }) => {
+    session({ mode })
+    const response = deferred<Response>()
+    controller.route("GET", pending === "health" ? "/v1/health" : "/v1/auth/me", () => response.promise)
+    renderApp(<TimeZoneProvider><UserMenu /></TimeZoneProvider>)
+    await settle()
+    expect(screen.getByRole("status", { name: "Loading operator menu" })).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Preferences" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "Operator menu for alice" })).not.toBeInTheDocument()
+    expect(controller.calls("GET", "/v1/preferences")).toHaveLength(0)
+
+    await act(async () => response.resolve(pending === "health"
+      ? json({ status: "ok", version: "test", auth_mode: mode })
+      : json(operatorResponse("admin", "alice"))))
+    expect(await screen.findByRole("button", {
+      name: mode === "none" ? "Preferences" : "Operator menu for alice",
+    })).toBeInTheDocument()
+    expect(screen.queryByRole("status", { name: "Loading operator menu" })).not.toBeInTheDocument()
+  })
+
+  it.each([
     { label: "mode is none", mode: "none", health: "ok", auth: "ok" },
     { label: "health is loading", mode: undefined, health: "pending", auth: "ok" },
     { label: "health failed", mode: undefined, health: "failed", auth: "ok" },
@@ -68,6 +93,27 @@ describe("operator menu authentication mode", () => {
     fireEvent.click(await screen.findByRole("menuitem", { name: "Sign out" }))
     await waitFor(() => expect(controller.calls("POST", "/v1/auth/logout")).toHaveLength(1))
     await waitFor(() => expect(router.push).toHaveBeenCalledWith("/login"))
+  })
+
+  it("restores focus to the named menu after closing preferences", async () => {
+    session({})
+    renderApp(<TimeZoneProvider><UserMenu /></TimeZoneProvider>)
+    await openMenu()
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Preferences" }))
+    expect(await screen.findByText("Quiet hours (UTC)")).toBeInTheDocument()
+    fireEvent.keyDown(screen.getByRole("dialog", { name: "Preferences" }), { key: "Escape" })
+    await waitFor(() => expect(screen.getByRole("button", { name: "Operator menu for alice" })).toHaveFocus())
+  })
+
+  it("keeps browser preferences available after health fails", async () => {
+    session({ health: "failed" })
+    renderApp(<TimeZoneProvider><UserMenu /></TimeZoneProvider>)
+    const trigger = await screen.findByRole("button", { name: "Preferences" })
+    fireEvent.click(trigger)
+    expect(await screen.findByRole("dialog", { name: "Preferences" })).toBeInTheDocument()
+    expect(screen.getByRole("combobox", { name: "Display timezone" })).toBeInTheDocument()
+    expect(screen.queryByText("Quiet hours (UTC)")).not.toBeInTheDocument()
+    expect(controller.calls("GET", "/v1/preferences")).toHaveLength(0)
   })
 
   it("has no named controls without an authenticated operator", async () => {
