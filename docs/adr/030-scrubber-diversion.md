@@ -238,8 +238,15 @@ mitigation renewal during a database outage.
 
 For each profile, serialize readiness transitions, admission, add, renewal and
 withdrawal eligibility. Recheck the latched state immediately before dispatch.
-A last in-flight leased add can extend the profile owner's deadline: bound RPC
-time, record the last possible extension and report that uncertainty. On lease
+A last in-flight leased add can extend the profile owner's deadline. A client
+RPC timeout does not cancel an already-enqueued mutation: rustbgpd 0.79.0's
+[leased-add handler](https://github.com/lance0/rustbgpd/blob/v0.79.0/crates/api/src/injection_service.rs#L688-L700)
+enqueues RIB work before awaiting its reply. Qualification must establish a
+server-side expiry/cancellation or bounded mutation-age guarantee that prevents
+arbitrarily delayed adds from extending or recreating the lease after shutdown.
+Until that guarantee or confirmed server-side quiescence exists, the last
+possible lease extension is unknown; do not derive a withdrawal deadline from
+the client timeout. Record and expose that uncertainty. On lease
 loss or speaker restart, re-add only unexpired, still-authorized desired intent
 under a fresh owner generation, after a complete inventory and fresh readiness;
 never replay withdrawn or latched diversion.
@@ -328,7 +335,7 @@ required gates for its family/backend/profile pass.
 | --- | --- |
 | 1. Speaker contract | Agree and pin typed redirect-to-IP add/read-back for both target families, owner-scoped leased mutation and lossless action preservation; test exact bytes, copy/reserved-bit refusal, incompatible actions, idempotent owner-checked delete and restart/generation behavior. A qualified IPv4-only alternative must be described explicitly if chosen. |
 | 2. Durable model and profiles | Add the action/profile snapshot and independent profile lease owners; replay existing migrations/rows, retain pending withdrawal data, refuse conflicts and configuration changes with outstanding intent. Prove concurrent admission cannot replace a live action. |
-| 3. Readiness and failure | Add the bounded monitor, profile latch and serialized health/add/renew/delete path. Test startup unknown, stale/replayed/wrong-revision reports, failed writes, database loss, monitor loss during an in-flight add, controller death, foreign owner and speaker restart. A healthy unrelated profile must not renew a failed profile's routes. |
+| 3. Readiness and failure | Add the bounded monitor, profile latch and serialized health/add/renew/delete path. Test startup unknown, stale/replayed/wrong-revision reports, failed writes, database loss, monitor loss during an in-flight add, delayed queue execution after client timeout, controller death, foreign owner and speaker restart. A healthy unrelated profile must not renew a failed profile's routes. |
 | 4. Operator workflow | Add manual API/OpenAPI, CLI, UI, audit and metrics with dry-run and expiry behavior. Exercise preview, conflict, confirmation, readiness loss/re-arm and observation failure. No detector/playbook enablement yet. |
 | 5. FRR receipt | Use an isolated pinned FRR router plus Linux scrubber/canary host, identified installation driver, kernel/netfilter tools, backend digest and full topology. Qualify each target family independently; record unsupported cases rather than inventing a working driver. |
 | 6. Additional platforms and policy | Qualify exact vendor/software/hardware, encoding, ingress scope and scrubber mode before adding profile support. Only then consider detector playbooks, fallback, VRF or whole-victim unicast diversion. |
