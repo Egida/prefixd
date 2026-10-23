@@ -178,10 +178,10 @@ export function AuditLogContentLive() {
   }, [searchQuery, actionFilter, actorFilter])
 
   useEffect(() => {
-    if (totalPages > 0 && currentPage > totalPages) {
-      setCurrentPage(totalPages)
+    if (totalPages > 0) {
+      setCurrentPage((page) => Math.min(page, totalPages))
     }
-  }, [currentPage, totalPages])
+  }, [totalPages])
 
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return null

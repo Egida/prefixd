@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useMemo } from "react"
+import { useState, useMemo, useEffect } from "react"
 import Link from "next/link"
 import { Eye, Search, ChevronDown, ChevronUp, Filter, RefreshCw, Download } from "lucide-react"
 import { Tag } from "@/components/dashboard/status-pill"
@@ -110,6 +110,16 @@ export function EventsContentLive({ initialEventId }: EventsContentLiveProps = {
     (currentPage - 1) * itemsPerPage,
     currentPage * itemsPerPage
   )
+
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [searchQuery, sourceFilter, vectorFilter])
+
+  useEffect(() => {
+    if (totalPages > 0) {
+      setCurrentPage((page) => Math.min(page, totalPages))
+    }
+  }, [totalPages])
 
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return null
