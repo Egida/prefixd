@@ -26,7 +26,8 @@ drift for uniquely owned intent. This assumes one running controller per POP and
 exclusive administration of its physical speaker target.
 
 Manual and detector blackholes have shipped on rustbgpd behind the stricter
-guardrails in [ADR 027](docs/adr/027-blackhole-mitigations.md). A PostgreSQL
+guardrails in [ADR 027](docs/adr/027-blackhole-mitigations.md). Detector-driven
+blackholes remain an explicit opt-in. A PostgreSQL
 advisory-lock fence keeps a second controller for the same owner in standby when
 both share the database. Separate databases are outside that fence.
 
