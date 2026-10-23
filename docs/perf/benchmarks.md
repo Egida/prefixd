@@ -194,9 +194,9 @@ measurement.
 
 The original report listed 17/17 passing checks with `scripts/chaos-test.sh`.
 The table preserves those reported outcomes, without dated raw receipts or
-failed attempts that could qualify them. The helper uses fixed pre-profile
-container names and GoBGP assumptions; it is not qualified for the current
-Compose stack and was not run for this documentation correction.
+failed attempts that could qualify them. The helper uses fixed container names
+and assumes GoBGP. It is not qualified for the current selected profiles and
+was not run for this documentation correction.
 
 | Scenario | Result |
 |----------|--------|
