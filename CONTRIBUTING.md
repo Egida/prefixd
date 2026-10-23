@@ -82,8 +82,8 @@ Prose-only changes need affected-link checks and `git diff --check`.
 Use `just --list` for focused checks such as `just fmt`, `just python`,
 `just clippy`, `just test-fast`, `just msrv` or `just frontend`. Recipes expose ordinary
 commands, and CI shares them while retaining separate jobs and speaker versions.
-The Rust advisory recipe keeps CI's explicit unfixed `rsa` exception; warnings
-remain visible.
+The Rust advisory recipe audits both the controller and separate fuzz lockfiles
+with CI's explicit unfixed `rsa` exception; warnings remain visible.
 
 The gate preserves caller `CARGO_BUILD_JOBS` and `CARGO_TARGET_DIR`. On a shared
 host, allocate CPUs and set existing worker controls such as
@@ -94,6 +94,23 @@ yourself.
 This manual gate is broader than the optional hooks below. Image builds and
 publication, release/SBOM operations, long labs, performance/fuzz work and
 owned authenticated browser qualification remain separate checks.
+
+### Scheduled smoke checks
+
+`just bench-smoke` executes each existing Criterion benchmark body once. It
+uses the in-memory repository and records no performance baseline or measurement.
+`just fuzz-smoke` runs the two existing GoBGP parser fuzz targets for 30 seconds
+each, using `nightly-2026-07-07` and `cargo-fuzz` 0.13.2. Install those tools
+explicitly before running it; both recipes preserve `CARGO_BUILD_JOBS`, and
+neither needs Docker, PostgreSQL or a running speaker.
+
+The [Quality smoke workflow](.github/workflows/quality-smoke.yml) runs nightly,
+on demand and on PRs changing these checks or their inputs. It retains command
+logs, compiler versions, generated fuzz corpora and crash artifacts after a
+failure. The fuzz recipe checks its lockfile before running; CI also checks
+both lockfiles afterwards, even on failure, because cargo-fuzz has no `--locked`
+option. These are execution and crash checks, not performance measurements or
+proof that an input is valid.
 
 ### Branch Naming
 
@@ -168,7 +185,8 @@ visible as warnings. Reassess the exact certificate-data license exceptions on
 version changes. The separate full-lock Rust advisory audit retains the RSA exception for SQLx's
 optional, uncompiled MySQL dependency. Cargo-deny's selected graph does not
 currently include it; passing cargo-deny is not an exception-free full-lock audit.
-The Rust advisory and frontend `bun audit` checks remain required in CI.
+The Rust advisory checks cover both `Cargo.lock` and `fuzz/Cargo.lock`; they
+and the frontend `bun audit` check remain required in CI.
 
 ### Optional Git hooks
 

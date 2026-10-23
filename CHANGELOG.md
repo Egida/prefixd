@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Nightly and manually triggered smoke checks execute the existing benchmark
+  bodies once and run both parser fuzz targets with bounded input, time and
+  memory budgets. Logs and fuzz artifacts are retained after failures; these
+  checks make no performance claim. Release preparation keeps the fuzz
+  lockfile's package version aligned with the controller.
+
 - `prefixd_speaker_capability{backend,capability}` exposes the selected speaker's
   runtime capabilities without probing on scrape. An unprobed lease is
   unconfirmed, distinct from current health or router installation.
@@ -39,6 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   described in the upgrade guide. No database migration is required.
 
 ### Fixed
+
+- The separate fuzz lockfile now follows the current controller dependencies
+  and includes compatible fixes for its outdated vulnerable dependencies.
+  Local and CI advisory checks now audit both locked graphs.
 
 - A successful complete peer observation retires deleted-peer metrics, including
   after an empty inventory, while keeping retained peers registered during
