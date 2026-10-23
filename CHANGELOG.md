@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- HTTP load checks reject request errors, non-2xx responses and incomplete output
+  before qualifying latency or throughput, retain foreground/background results,
+  and authenticate every probe. Historical benchmark claims now state their
+  missing qualification and distinguish HTTP success from mitigation enforcement.
+
 - Routine PostgreSQL NOTICE messages are quiet by default in native, Compose
   and systemd deployments. Warnings, errors and controller INFO remain enabled;
   custom logging filters retain their chosen levels and can restore notice
