@@ -822,13 +822,16 @@ impl ReconciliationLoop {
                         );
                         repair_error = Some(e);
                     } else {
+                        let backend =
+                            crate::observability::metrics::backend_label(self.announcer.backend());
                         crate::observability::metrics::RECONCILIATION_REPAIRS
                             .with_label_values(&["success"])
                             .inc();
                         crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                            .with_label_values(&["announced"])
+                            .with_label_values(&[backend, "announced"])
                             .inc();
                         crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+                            .with_label_values(&[backend])
                             .observe(start.elapsed().as_secs_f64());
                     }
                 }
@@ -1263,20 +1266,44 @@ impl ReconciliationLoop {
         &self,
         sessions: Option<&crate::error::Result<Vec<crate::bgp::PeerStatus>>>,
     ) {
+        use crate::observability::metrics::BGP_SESSION_UP;
+        use prometheus::core::Collector;
+
         let Some(sessions) = sessions else {
             return;
         };
         match sessions {
             Ok(peers) => {
+                let backend =
+                    crate::observability::metrics::backend_label(self.announcer.backend());
+                let observed: std::collections::HashSet<_> =
+                    peers.iter().map(|peer| peer.name.as_str()).collect();
                 for peer in peers {
                     let value = if peer.state.is_established() {
                         1.0
                     } else {
                         0.0
                     };
-                    crate::observability::metrics::BGP_SESSION_UP
-                        .with_label_values(&[&peer.name])
+                    BGP_SESSION_UP
+                        .with_label_values(&[backend, &peer.name])
                         .set(value);
+                }
+                // Keep retained children registered throughout concurrent scrapes.
+                for family in BGP_SESSION_UP.collect() {
+                    for metric in family.get_metric() {
+                        let labels = metric.get_label();
+                        if labels
+                            .iter()
+                            .any(|label| label.name() == "backend" && label.value() == backend)
+                            && let Some(peer) = labels.iter().find(|label| label.name() == "peer")
+                            && !observed.contains(peer.value())
+                            && let Err(error) =
+                                BGP_SESSION_UP.remove_label_values(&[backend, peer.value()])
+                        {
+                            tracing::warn!(error = %error, backend, peer = peer.value(),
+                                "failed to retire BGP session metric");
+                        }
+                    }
                 }
             }
             Err(e) => {
@@ -1591,8 +1618,8 @@ mod tests {
         )
         .await
         .unwrap();
-        let peer =
-            crate::observability::metrics::BGP_SESSION_UP.with_label_values(&["write-only-peer"]);
+        let peer = crate::observability::metrics::BGP_SESSION_UP
+            .with_label_values(&["mock", "write-only-peer"]);
         peer.set(1.0);
         let reconciler = ReconciliationLoop::new(repo.clone(), speaker.clone(), 30, false);
         for _ in 0..2 {
@@ -1693,10 +1720,69 @@ mod tests {
         reconciler.update_bgp_session_metrics(Some(&failed));
         assert_eq!(
             crate::observability::metrics::BGP_SESSION_UP
-                .with_label_values(&["failed-peer-observation"])
+                .with_label_values(&["mock", "failed-peer-observation"])
                 .get(),
             1.0
         );
+    }
+
+    #[tokio::test]
+    async fn successful_complete_peer_inventory_preserves_retained_and_retires_omitted_series() {
+        let _metrics_guard = RECONCILIATION_TEST_LOCK.lock().await;
+        use crate::observability::metrics::{BGP_SESSION_UP, gather_metrics};
+        let reconciler = ReconciliationLoop::new(
+            Arc::new(MockRepository::new()),
+            Arc::new(MockAnnouncer::new()),
+            30,
+            false,
+        );
+        BGP_SESSION_UP.reset();
+        let peer = |name: &str, state| PeerStatus {
+            name: name.into(),
+            address: "192.0.2.1".into(),
+            state,
+        };
+        let samples = || {
+            let mut samples = gather_metrics()
+                .lines()
+                .filter(|line| line.starts_with("prefixd_bgp_session_up{"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            samples.sort();
+            samples
+        };
+        reconciler.update_bgp_session_metrics(Some(&Ok(vec![
+            peer("retired-peer", crate::bgp::SessionState::Established),
+            peer("retained-peer", crate::bgp::SessionState::Established),
+        ])));
+        assert_eq!(samples().len(), 2);
+        let retained = BGP_SESSION_UP.with_label_values(&["mock", "retained-peer"]);
+        BGP_SESSION_UP
+            .with_label_values(&["gobgp", "other-backend-peer"])
+            .set(1.0);
+        reconciler.update_bgp_session_metrics(Some(&Ok(vec![peer(
+            "retained-peer",
+            crate::bgp::SessionState::Idle,
+        )])));
+        assert_eq!(retained.get(), 0.0, "retained child must stay registered");
+        let other_backend =
+            r#"prefixd_bgp_session_up{backend="gobgp",peer="other-backend-peer"} 1"#.to_owned();
+        let expected = vec![
+            other_backend.clone(),
+            r#"prefixd_bgp_session_up{backend="mock",peer="retained-peer"} 0"#.to_owned(),
+        ];
+        assert_eq!(samples(), expected);
+        // Failed, including partial-stream, and unsupported observations retain the snapshot.
+        reconciler.update_bgp_session_metrics(Some(&Err(PrefixdError::Internal(
+            "partial peer stream".into(),
+        ))));
+        reconciler.update_bgp_session_metrics(None);
+        assert_eq!(samples(), expected);
+        reconciler.update_bgp_session_metrics(Some(&Ok(vec![])));
+        assert_eq!(samples(), vec![other_backend]);
+        BGP_SESSION_UP
+            .remove_label_values(&["gobgp", "other-backend-peer"])
+            .unwrap();
     }
 
     #[tokio::test]
@@ -2025,10 +2111,15 @@ mod tests {
         let failures = metrics.with_label_values(&["error"]).get();
         let successes = metrics.with_label_values(&["success"]).get();
         let peer_up = crate::observability::metrics::BGP_SESSION_UP
-            .with_label_values(&["failed-repair-peer"]);
+            .with_label_values(&["mock", "failed-repair-peer"]);
         peer_up.set(1.0);
         assert!(reconciler.reconcile().await.is_err());
-        assert_eq!(peer_up.get(), 0.0);
+        assert_eq!(
+            crate::observability::metrics::BGP_SESSION_UP
+                .with_label_values(&["mock", "failed-repair-peer"])
+                .get(),
+            0.0
+        );
         assert_eq!(speaker.announcements.load(SeqCst), 2);
         let actual = speaker.list_active().await.unwrap();
         assert_eq!(actual.len(), 1);
@@ -2120,7 +2211,7 @@ mod tests {
             let success = crate::observability::metrics::RECONCILIATION_REPAIRS
                 .with_label_values(&["success"]);
             let announced = crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                .with_label_values(&["announced"]);
+                .with_label_values(&["mock", "announced"]);
             let before = (success.get(), announced.get());
             reconciler.sync_announcements().await.unwrap();
             assert_eq!(speaker.announcements.load(SeqCst), 2);
@@ -2173,7 +2264,7 @@ mod tests {
             let errors =
                 crate::observability::metrics::RECONCILIATION_REPAIRS.with_label_values(&["error"]);
             let announcements = crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-                .with_label_values(&["announced"]);
+                .with_label_values(&["mock", "announced"]);
             let before = (successes.get(), errors.get(), announcements.get());
             for _ in 0..2 {
                 assert!(reconciler.sync_announcements().await.is_err());

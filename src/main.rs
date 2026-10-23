@@ -223,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
         ));
     }
     let blackhole_lease = announcer.capabilities().blackhole_lease;
+    prefixd::observability::metrics::update_speaker_metrics(announcer.as_ref());
     let detector_unleased =
         prefixd::guardrails::detector_unleased(&config.settings, blackhole_lease);
     prefixd::observability::metrics::BLACKHOLE_DETECTOR_UNLEASED

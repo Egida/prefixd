@@ -976,54 +976,23 @@ curl -v http://localhost/v1/health 2>&1 | grep x-request-id
 
 ## Lab Environment
 
-For testing FlowSpec without production routers, see the [lab/](../../lab/) directory:
-
-| Lab | Router | Requirements | Status |
-|-----|--------|--------------|--------|
-| `cjunos-flowspec.clab.yml` | cJunosEvolved (PTX) | KVM (Intel or AMD) | **Verified** |
-| `frr-flowspec.clab.yml` | FRR | Any Linux | **Verified** |
-| `vjunos-flowspec.clab.yml` | vJunos-router (MX) | Bare metal only | Untested |
-
-### cJunosEvolved (Recommended for Juniper Testing)
-
-Full end-to-end tested: event → prefixd → GoBGP → Junos `inetflow.0`.
+Use the [maintained FRR interop lab](../../lab/README.md#flowspec-interop-lab-maintained)
+to test prefixd's API through a speaker to a receiving router. From the
+repository root, with Docker and containerlab installed:
 
 ```bash
-# Load image (download free from Juniper)
-docker load -i cJunosEvolved-25.4R1.13-EVO.tar.gz
-
-# Deploy
-cd lab
-sudo clab deploy -t cjunos-flowspec.clab.yml
-
-# Connect prefixd-gobgp to clab network
-docker network connect clab-mgmt-evo prefixd-gobgp --ip 172.30.31.10
-
-# Restart GoBGP to load cJunos neighbor
-docker restart prefixd-gobgp
-
-# Verify (wait ~3-5 min for cJunos to boot)
-docker exec prefixd-gobgp gobgp neighbor
-# 172.30.31.3 should show Established
-
-# Test with a real event
-curl -X POST http://localhost/v1/events \
-  -H "Content-Type: application/json" \
-  -d '{"source":"test","victim_ip":"203.0.113.10","vector":"udp_flood","bps":1000000000,"pps":1000000,"top_dst_ports":[53],"confidence":0.9}'
-
-# Verify on cJunos (admin/admin@123)
-ssh admin@172.30.31.3
-show route table inetflow.0
+just interop-frr          # rustbgpd and GoBGP
+just interop-frr gobgp    # GoBGP only
+# Set CLAB="sudo containerlab" if required by your containerlab installation.
 ```
 
-### FRR (No Special Hardware)
+The runner owns its isolated containers and network, checks exact IPv4 and IPv6
+FlowSpec receipt, withdrawal, TTL expiry and speaker restart, and retains dated
+receipts. It does not attach to the Compose stack. FRR FlowSpec receipt is
+control-plane evidence; it does not prove packet filtering.
 
-```bash
-cd lab
-sudo clab deploy -t frr-flowspec.clab.yml
-docker network connect clab-mgmt prefixd-gobgp --ip 172.30.30.10
-docker restart prefixd-gobgp
-docker exec prefixd-gobgp gobgp neighbor
-```
-
-See [lab/README.md](../../lab/README.md) for full instructions.
+Juniper-specific setup remains in the
+[legacy topology instructions](../../lab/README.md#legacy-topologies), including
+cJunosEvolved and the untested, bare-metal vJunos-router lab. Historical Juniper
+results used GoBGP; see the [vendor matrix](../reference/vendors.md) for their
+scope and the dated FRR results.

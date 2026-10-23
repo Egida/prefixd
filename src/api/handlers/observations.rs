@@ -109,6 +109,7 @@ pub async fn list_audit(
 }
 
 pub async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    crate::observability::metrics::update_speaker_metrics(state.announcer.as_ref());
     if let Some(pool) = &state.db_pool {
         crate::observability::metrics::update_db_pool_metrics(pool);
     }

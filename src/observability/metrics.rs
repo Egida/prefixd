@@ -1,8 +1,7 @@
 use once_cell::sync::Lazy;
 use prometheus::{
-    Counter, CounterVec, Encoder, Gauge, GaugeVec, Histogram, HistogramVec, TextEncoder,
-    register_counter, register_counter_vec, register_gauge, register_gauge_vec, register_histogram,
-    register_histogram_vec,
+    Counter, CounterVec, Encoder, Gauge, GaugeVec, HistogramVec, TextEncoder, register_counter,
+    register_counter_vec, register_gauge, register_gauge_vec, register_histogram_vec,
 };
 
 // Event metrics
@@ -66,15 +65,16 @@ pub static ANNOUNCEMENTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
     register_counter_vec!(
         "prefixd_announcements_total",
         "Total number of BGP announcements",
-        &["status"]
+        &["backend", "status"]
     )
     .unwrap()
 });
 
-pub static ANNOUNCEMENTS_LATENCY: Lazy<Histogram> = Lazy::new(|| {
-    register_histogram!(
+pub static ANNOUNCEMENTS_LATENCY: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
         "prefixd_announcements_latency_seconds",
         "BGP announcement latency in seconds",
+        &["backend"],
         vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0]
     )
     .unwrap()
@@ -84,10 +84,64 @@ pub static BGP_SESSION_UP: Lazy<GaugeVec> = Lazy::new(|| {
     register_gauge_vec!(
         "prefixd_bgp_session_up",
         "BGP session state (1 = established, 0 = down)",
-        &["peer"]
+        &["backend", "peer"]
     )
     .unwrap()
 });
+
+pub static SPEAKER_CAPABILITY: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "prefixd_speaker_capability",
+        "Selected speaker capability (1 = available, 0 = unsupported or unconfirmed); not current health or router enforcement",
+        &["backend", "capability"]
+    )
+    .unwrap()
+});
+
+/// Bound labels even when a third-party adapter supplies its own backend name.
+pub fn backend_label(backend: &str) -> &'static str {
+    match backend {
+        "rustbgpd" => "rustbgpd",
+        "gobgp" => "gobgp",
+        "mock" => "mock",
+        _ => "other",
+    }
+}
+
+/// Cheap local capability reads only; a scrape never probes the speaker.
+pub fn update_speaker_metrics(speaker: &dyn crate::bgp::FlowSpecAnnouncer) {
+    let backend = backend_label(speaker.backend());
+    for status in ["announced", "withdrawn"] {
+        ANNOUNCEMENTS_TOTAL.with_label_values(&[backend, status]);
+    }
+    ANNOUNCEMENTS_LATENCY.with_label_values(&[backend]);
+    let capabilities = speaker.capabilities();
+    for (capability, available) in [
+        ("rule_reader", capabilities.rule_reader),
+        ("peer_observer", capabilities.peer_observer),
+        ("daemon_health", capabilities.daemon_health),
+        ("blackhole", capabilities.blackhole),
+        ("blackhole_lease", capabilities.blackhole_lease),
+        ("blackhole_export", capabilities.blackhole_export),
+        (
+            "flowspec_source_prefix",
+            capabilities.flowspec_match.source_prefix,
+        ),
+        (
+            "flowspec_source_ports",
+            capabilities.flowspec_match.source_ports,
+        ),
+        ("flowspec_fragment", capabilities.flowspec_match.fragment),
+        (
+            "flowspec_packet_length",
+            capabilities.flowspec_match.packet_length,
+        ),
+    ] {
+        SPEAKER_CAPABILITY
+            .with_label_values(&[backend, capability])
+            .set(f64::from(u8::from(available)));
+    }
+}
 
 // Guardrail metrics
 pub static GUARDRAIL_REJECTIONS: Lazy<CounterVec> = Lazy::new(|| {
@@ -433,6 +487,7 @@ pub fn init_metrics(pop: &str) {
     Lazy::force(&ANNOUNCEMENTS_TOTAL);
     Lazy::force(&ANNOUNCEMENTS_LATENCY);
     Lazy::force(&BGP_SESSION_UP);
+    Lazy::force(&SPEAKER_CAPABILITY);
     Lazy::force(&GUARDRAIL_REJECTIONS);
     Lazy::force(&EVENT_RULE_QUOTA_REJECTIONS);
     Lazy::force(&CONTROLLER_FENCE_ACTIVE);
@@ -491,10 +546,91 @@ pub fn update_db_pool_metrics(pool: &sqlx::PgPool) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::bgp::{FlowSpecAnnouncer, FlowSpecWriter, InjectionLeases, MockAnnouncer};
+
     #[test]
     fn init_exports_the_configured_pop_replacement_counter_at_zero() {
         super::init_metrics("init-zero-pop");
         let expected = r#"prefixd_blackhole_replaced_total{pop="init-zero-pop"} 0"#;
         assert!(super::gather_metrics().lines().any(|line| line == expected));
+    }
+
+    #[tokio::test]
+    async fn speaker_metrics_bound_labels_and_report_actual_capabilities_without_probing() {
+        let _guard = METRICS_TEST_LOCK.lock().await;
+        struct WriteOnly;
+        impl FlowSpecAnnouncer for WriteOnly {
+            fn backend(&self) -> &'static str {
+                "third-party-speaker"
+            }
+        }
+        #[async_trait::async_trait]
+        impl FlowSpecWriter for WriteOnly {
+            async fn announce(&self, _: &crate::domain::FlowSpecRule) -> crate::error::Result<()> {
+                unreachable!("a scrape must not mutate the speaker")
+            }
+            async fn withdraw(&self, _: &crate::domain::FlowSpecRule) -> crate::error::Result<()> {
+                unreachable!("a scrape must not mutate the speaker")
+            }
+        }
+        for backend in ["rustbgpd", "gobgp", "mock"] {
+            assert_eq!(backend_label(backend), backend);
+        }
+        assert_eq!(backend_label("third-party-speaker"), "other");
+        assert_eq!(backend_label("another-private-name"), "other");
+        update_speaker_metrics(&WriteOnly);
+        for capability in [
+            "rule_reader",
+            "peer_observer",
+            "blackhole",
+            "blackhole_lease",
+        ] {
+            assert_eq!(
+                SPEAKER_CAPABILITY
+                    .with_label_values(&["other", capability])
+                    .get(),
+                0.0
+            );
+        }
+        let speaker = MockAnnouncer::new();
+        update_speaker_metrics(&speaker);
+        assert!(!speaker.lease_confirmed(), "a scrape must not probe leases");
+        for (capability, expected) in [
+            ("rule_reader", 1.0),
+            ("peer_observer", 1.0),
+            ("daemon_health", 0.0),
+            ("blackhole", 1.0),
+            ("blackhole_lease", 0.0),
+            ("blackhole_export", 1.0),
+            ("flowspec_source_prefix", 1.0),
+            ("flowspec_source_ports", 1.0),
+            ("flowspec_fragment", 1.0),
+            ("flowspec_packet_length", 1.0),
+        ] {
+            assert_eq!(
+                SPEAKER_CAPABILITY
+                    .with_label_values(&["mock", capability])
+                    .get(),
+                expected
+            );
+        }
+        speaker.live_lease("metrics-test").await.unwrap();
+        update_speaker_metrics(&speaker);
+        assert_eq!(
+            SPEAKER_CAPABILITY
+                .with_label_values(&["mock", "blackhole_lease"])
+                .get(),
+            1.0
+        );
+        let scrape = gather_metrics();
+        assert!(
+            scrape.contains(r#"prefixd_announcements_total{backend="other",status="announced"} 0"#)
+        );
+        assert!(
+            scrape.contains(r#"prefixd_announcements_latency_seconds_count{backend="other"} 0"#)
+        );
+        assert!(!scrape.contains("third-party-speaker"));
+        assert!(!scrape.contains("another-private-name"));
     }
 }

@@ -1662,17 +1662,28 @@ async fn leased_blackhole_add_read_renew_and_delete_carry_the_owner() {
 
 #[tokio::test]
 async fn older_daemon_leased_rpcs_create_nothing_and_never_fall_back() {
+    let _metrics = crate::observability::metrics::METRICS_TEST_LOCK
+        .lock()
+        .await;
+    use crate::observability::metrics::{SPEAKER_CAPABILITY, update_speaker_metrics};
     let (speaker, fake, server) = unicast_speaker().await;
+    let lease_capability = SPEAKER_CAPABILITY.with_label_values(&["rustbgpd", "blackhole_lease"]);
+    update_speaker_metrics(&speaker);
+    assert_eq!(lease_capability.get(), 0.0);
     let route = blackhole("192.0.2.1/32", "192.0.2.66", 1).with_owner(LEASE_OWNER);
     // Confirmed by a successful probe, then the daemon is rolled back.
     assert_eq!(speaker.live_lease(LEASE_OWNER).await.unwrap(), Some(None));
     assert!(speaker.lease_confirmed());
+    update_speaker_metrics(&speaker);
+    assert_eq!(lease_capability.get(), 1.0);
     fake.mode.store(LEASE_UNIMPLEMENTED, SeqCst);
     assert!(speaker.announce_leased_blackhole(&route, 60).await.is_err());
     assert!(
         !speaker.lease_confirmed(),
         "UNIMPLEMENTED withdraws the capability"
     );
+    update_speaker_metrics(&speaker);
+    assert_eq!(lease_capability.get(), 0.0);
     assert_eq!(fake.plain_adds.load(SeqCst), 0, "no AddPath fallback");
     assert!(fake.paths.lock().unwrap().is_empty());
     assert_eq!(speaker.live_lease(LEASE_OWNER).await.unwrap(), None);

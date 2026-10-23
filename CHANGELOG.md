@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks make no performance claim. Release preparation keeps the fuzz
   lockfile's package version aligned with the controller.
 
+- `prefixd_speaker_capability{backend,capability}` exposes the selected speaker's
+  runtime capabilities without probing on scrape. An unprobed lease is
+  unconfirmed, distinct from current health or router installation.
+
 - `prefixdctl speaker list-routes` and authenticated `GET /v1/speaker/routes`
   expose the selected speaker's complete local IPv4/IPv6 FlowSpec inventory,
   including match, action, rate and injection owner. Backend and observation
@@ -30,6 +34,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Announcement counters, announcement latency histograms and BGP session gauges
+  add a bounded `backend` label. The operations dashboard identifies backend and
+  peer, preserves backend latency groups and shows capability availability.
+
 - `guardrails.allow_src_prefix_match` now enables manual source-prefix matches
   instead of logging that it has no effect. It still defaults to false. Rules
   without a source prefix keep their existing identity and JSON storage. Before
@@ -42,10 +50,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and includes compatible fixes for its outdated vulnerable dependencies.
   Local and CI advisory checks now audit both locked graphs.
 
+- A successful complete peer observation retires deleted-peer metrics, including
+  after an empty inventory, while keeping retained peers registered during
+  scrapes. Failed or unsupported reads retain prior samples; malformed GoBGP
+  peer rows fail the whole observation instead of appearing empty or inventing
+  an Idle state.
+
 - The operator menu now waits for authentication and health to resolve before
   showing controls, avoiding a flash of anonymous browser preferences for
   signed-in operators. Browser preferences remain available when health fails,
   and a retry keeps the signed-in dashboard and open preferences mounted.
+
+### Removed
+
+- The obsolete GoBGP-only lab helper and standalone FRR topology. Use
+  `just interop-frr` for maintained rustbgpd and GoBGP router receipt tests with
+  isolated fixtures and dated results. The Juniper topologies remain available.
 
 ## [0.22.1] - 2026-10-22
 
