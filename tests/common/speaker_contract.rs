@@ -518,7 +518,8 @@ pub async fn run_action_reconciliation_contract(
             .context("prove action-only drift before reconciliation")?;
         let successes = metrics::RECONCILIATION_REPAIRS.with_label_values(&["success"]);
         let errors = metrics::RECONCILIATION_REPAIRS.with_label_values(&["error"]);
-        let announcements = metrics::ANNOUNCEMENTS_TOTAL.with_label_values(&["announced"]);
+        let announcements = metrics::ANNOUNCEMENTS_TOTAL
+            .with_label_values(&[metrics::backend_label(speaker.backend()), "announced"]);
         let before = (successes.get(), errors.get(), announcements.get());
         reconciler.reconcile().await?;
         wait_inventory(speaker.as_ref(), &desired)

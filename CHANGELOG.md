@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `prefixd_speaker_capability{backend,capability}` exposes the selected speaker's
+  runtime capabilities without probing on scrape. An unprobed lease is
+  unconfirmed, distinct from current health or router installation.
+
 - `prefixdctl speaker list-routes` and authenticated `GET /v1/speaker/routes`
   expose the selected speaker's complete local IPv4/IPv6 FlowSpec inventory,
   including match, action, rate and injection owner. Backend and observation
@@ -16,12 +20,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Unsupported and failed observations return errors, never an empty inventory.
   These reads also work in dry-run and standby; they do not list blackholes or
   prove router enforcement.
+
 - Manual FlowSpec discard and police rules accept a same-family `src_prefix`
   CIDR through the API and dashboard. Both speakers encode and read IPv4 and
   offset-zero IPv6 source prefixes; list/detail, CLI and rule previews show the
   source scope. `speaker.capabilities.flowspec_match` adds `source_prefix`.
 
 ### Changed
+
+- Announcement counters, announcement latency histograms and BGP session gauges
+  add a bounded `backend` label. The operations dashboard identifies backend and
+  peer, preserves backend latency groups and shows capability availability.
 
 - `guardrails.allow_src_prefix_match` now enables manual source-prefix matches
   instead of logging that it has no effect. It still defaults to false. Rules
@@ -30,6 +39,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   described in the upgrade guide. No database migration is required.
 
 ### Fixed
+
+- A successful complete peer observation retires deleted-peer metrics, including
+  after an empty inventory, while keeping retained peers registered during
+  scrapes. Failed or unsupported reads retain prior samples; malformed GoBGP
+  peer rows fail the whole observation instead of appearing empty or inventing
+  an Idle state.
 
 - The operator menu now waits for authentication and health to resolve before
   showing controls, avoiding a flash of anonymous browser preferences for

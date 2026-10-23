@@ -177,10 +177,13 @@ pub async fn announce_blackhole(
         lease.observe_add(generation);
         outcome
     };
+    let backend = crate::observability::metrics::backend_label(announcer.backend());
     crate::observability::metrics::ANNOUNCEMENTS_TOTAL
-        .with_label_values(&["announced"])
+        .with_label_values(&[backend, "announced"])
         .inc();
-    crate::observability::metrics::ANNOUNCEMENTS_LATENCY.observe(start.elapsed().as_secs_f64());
+    crate::observability::metrics::ANNOUNCEMENTS_LATENCY
+        .with_label_values(&[backend])
+        .observe(start.elapsed().as_secs_f64());
     record_announcement(repo, mitigation, &rule, outcome).await;
     Ok(BlackholeAnnouncement::Announced(outcome))
 }
