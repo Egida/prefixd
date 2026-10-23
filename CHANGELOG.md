@@ -46,6 +46,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Routine PostgreSQL NOTICE messages are quiet by default in native, Compose
+  and systemd deployments. Warnings, errors and controller INFO remain enabled;
+  custom logging filters retain their chosen levels and can restore notice
+  diagnostics.
+
 - Document Compose recovery after enforced startup refuses remaining dry-run
   intent, keeping PostgreSQL and the original speaker running.
 

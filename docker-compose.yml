@@ -4,7 +4,7 @@ x-controller: &controller
   container_name: prefixd
   user: "999:999"
   environment:
-    RUST_LOG: info
+    RUST_LOG: sqlx::postgres::notice=warn,info
     PREFIXD_API_TOKEN: ${PREFIXD_API_TOKEN:-}
     DATABASE_URL: postgres://prefixd:${POSTGRES_PASSWORD:-prefixd_secret}@postgres:5432/prefixd
   restart: unless-stopped

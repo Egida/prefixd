@@ -395,7 +395,7 @@ observability:
   # Log format: json or pretty
   log_format: json
   
-  # Log level: trace, debug, info, warn, error
+  # Tracing filter: trace, debug, info, warn, error or per-target directives
   log_level: info
 ```
 
@@ -403,6 +403,15 @@ Only these logging settings are accepted in `observability`; unknown keys fail
 configuration loading, and the [removed keys](#removed-keys) fail it with a
 message naming them. Audit records are stored in PostgreSQL and available
 through the dashboard or `GET /v1/audit`.
+
+When `RUST_LOG` is unset, the default `log_level: info` quiets routine PostgreSQL
+NOTICE messages with `sqlx::postgres::notice=warn`. PostgreSQL warnings/errors
+and ordinary controller INFO remain enabled. Any other configured filter
+replaces this default unchanged, including `debug`, `error`, `off` and
+per-target directives. To restore notices, use `log_level: debug` or
+`log_level: "info,sqlx::postgres::notice=info"`. A valid `RUST_LOG` replaces the
+whole configured filter unchanged. The shipped Compose and systemd examples
+set `RUST_LOG=sqlx::postgres::notice=warn,info` explicitly.
 
 Prometheus scrapes unauthenticated `/metrics` on the same `http.listen` API
 listener. There is no separate metrics listener. Keep that listener on a trusted
@@ -1273,7 +1282,7 @@ to alert destinations as needed.
 |----------|-------------|---------|
 | `PREFIXD_API_TOKEN` | Bearer token for auth | Required if mode=bearer |
 | `PREFIXD_API` | API URL for prefixdctl | `http://127.0.0.1` |
-| `RUST_LOG` | Log level override | Config value |
+| `RUST_LOG` | Complete tracing filter override | Configured filter; default `info` quiets PostgreSQL notices |
 | `DATABASE_URL` | PostgreSQL connection | Config value |
 
 ### Using Environment Variables in Config

@@ -593,6 +593,12 @@ observability:
   log_level: debug
 ```
 
+Setting `debug` also restores PostgreSQL NOTICE messages. For NOTICE diagnostics
+while keeping other logging at INFO, use
+`RUST_LOG=info,sqlx::postgres::notice=info` and restart or recreate the controller.
+See the [logging filter reference](../reference/configuration.md#observability)
+for configuration precedence and the quiet defaults.
+
 ### Key Log Messages
 
 **Successful flow:**
