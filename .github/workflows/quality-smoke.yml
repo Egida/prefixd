@@ -9,6 +9,7 @@ on:
       - ".github/workflows/quality-smoke.yml"
       - "benches/**"
       - "fuzz/**"
+      - "src/**"
       - "scripts/release-prepare.sh"
       - "scripts/release-notes.py"
       - "justfile"
