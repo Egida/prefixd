@@ -100,6 +100,16 @@ successful JSON remains the peer map. Status and dashboard clients tolerate olde
 health responses without `speaker` metadata. The dashboard distinguishes
 unsupported observation, observation errors, and a successful empty peer list.
 
+[`prefixdctl speaker list-routes`](cli.md#speaker-routes) reads the
+[local FlowSpec inventory API](api.md#local-flowspec-inventory) directly, without
+depending on peer or daemon health. It lists both families, including untracked
+local rules, with backend and observation scope: retained injection intent for
+rustbgpd, accepted local RIB after import policy for GoBGP, or adapter read-back
+for mock/custom speakers. Unicast routes and blackholes are excluded. Unsupported
+observation, a failed or partial read, and a successful empty inventory remain
+distinct. Read-only access works in dry-run and standby; it does not establish
+export or enforcement.
+
 | Backend | Runtime selection | Read-back / peers | Status |
 |---------|-------------------|-------------------|--------|
 | rustbgpd | `backend: rustbgpd` (default without `gobgp_grpc`) | Retained local intent / neighbor states | Primary profile; released controller qualification below |

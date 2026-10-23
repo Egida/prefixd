@@ -44,6 +44,7 @@ fn session_routes() -> Router<Arc<AppState>> {
 /// State-changing requests return 503 while the controller is in standby.
 fn api_routes(state: &Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
+        .route("/v1/speaker/routes", get(handlers::list_speaker_routes))
         .route(
             "/v1/events",
             get(handlers::list_events).post(handlers::ingest_event),

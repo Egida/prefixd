@@ -56,6 +56,12 @@ pub use health::{
     health, health_detail, ready,
 };
 
+mod speaker;
+pub use speaker::{
+    __path_list_speaker_routes, FlowSpecObservationScope, SpeakerRoutesResponse,
+    list_speaker_routes,
+};
+
 use axum::{
     Json,
     extract::{Path, Query, State},
