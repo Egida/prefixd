@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Prepare the release PR's changes for X.Y.Z in the current checkout:
-#   - set the Cargo.toml [package] version and refresh Cargo.lock, which must
-#     then change only the prefixd entry;
+#   - set the Cargo.toml [package] version and refresh both Cargo.lock files,
+#     which must then change only the prefixd entry;
 #   - roll CHANGELOG.md's [Unreleased] entries into `## [X.Y.Z] - <UTC date>`
 #     under a fresh empty [Unreleased], and move the compare links at the end;
 #   - preview the release body with scripts/release-notes.py;
@@ -81,7 +81,9 @@ EOF
         fail "selftest: prepare $next failed"
     }
     [ "$(package_version)" = "$next" ] || fail "selftest: Cargo.toml version is not $next"
-    [ "$(git diff --numstat Cargo.lock)" = "$(printf '1\t1\tCargo.lock')" ] || fail "selftest: Cargo.lock diff"
+    for lock in Cargo.lock fuzz/Cargo.lock; do
+        [ "$(git diff --numstat -- "$lock")" = "$(printf '1\t1\t%s' "$lock")" ] || fail "selftest: $lock diff"
+    done
     python3 - "$cur" "$next" "$(date -u +%F)" <<'EOF' || fail "selftest: CHANGELOG.md roll"
 import sys
 cur, new, day = sys.argv[1:]
@@ -165,11 +167,14 @@ sed -i "0,/^version = \"$cur\"\$/s//version = \"$new\"/" Cargo.toml
 [ "$(package_version)" = "$new" ] || fail "could not set the Cargo.toml [package] version to $new"
 
 cargo update --workspace --quiet
-lock_diff="$(git diff -U1 Cargo.lock)"
-if [ "$(git diff --numstat Cargo.lock)" != "$(printf '1\t1\tCargo.lock')" ] ||
-    [[ "$lock_diff" != *$'\n name = "prefixd"\n-version = '* ]]; then
-    fail "Cargo.lock changed more than the prefixd version; inspect git diff Cargo.lock"
-fi
+cargo update --workspace --quiet --manifest-path fuzz/Cargo.toml
+for lock in Cargo.lock fuzz/Cargo.lock; do
+    lock_diff="$(git diff -U1 -- "$lock")"
+    if [ "$(git diff --numstat -- "$lock")" != "$(printf '1\t1\t%s' "$lock")" ] ||
+        [[ "$lock_diff" != *$'\n name = "prefixd"\n-version = '* ]]; then
+        fail "$lock changed more than the prefixd version; inspect git diff $lock"
+    fi
+done
 
 echo "--- release body preview (scripts/release-notes.py $new) ---"
 "$scripts/release-notes.py" "$new"
