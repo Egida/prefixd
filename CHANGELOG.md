@@ -48,8 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - HTTP load checks reject request errors, non-2xx responses and incomplete output
   before qualifying latency or throughput, retain foreground/background results,
-  and authenticate every probe. Historical benchmark claims now state their
-  missing qualification and distinguish HTTP success from mitigation enforcement.
+  authenticate every probe, and reap aborted background generators. Response
+  counts must reconcile; sampled or short fixed-request runs cannot qualify.
+  Historical benchmark claims now state their missing qualification and
+  distinguish HTTP success from mitigation enforcement.
 
 - Events, mitigations and audit log filters return to the first matching page.
   Refreshed events keep pagination within the available pages instead of falsely

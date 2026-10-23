@@ -73,8 +73,9 @@ scripts/test-gobgp.sh
 
 Run `just gate` before opening a PR with substantive code changes. It runs
 Rust and Python formatting, Python lint, the loopback HTTP load-script regression,
-the Prometheus alert rules and their promtool tests, the pinned rustbgpd proto checksum, both locked Rust test
-and Clippy feature combinations, minimum-compiler checks, the release build,
+the Prometheus alert rules and their promtool tests, the pinned rustbgpd proto
+checksum, both locked Rust test and Clippy feature combinations,
+minimum-compiler checks, the release build,
 frozen dashboard install/types/tests/build, advisory checks and the owned GoBGP
 and rustbgpd 0.79.0 fixtures, sequentially. It needs Docker and the tools
 listed above; it does not install missing tools or Rust toolchains.

@@ -44,7 +44,8 @@ check_prereqs() {
 # Keep raw workloads (including failures); only request bodies are temporary.
 cleanup() {
     if [ -n "$BG_PID" ]; then
-        kill "$BG_PID" 2>/dev/null || true
+        # An aborted workload cannot qualify; do not wait for SIGTERM handling.
+        kill -KILL "$BG_PID" 2>/dev/null || true
         local status=0
         wait "$BG_PID" 2>/dev/null || status=$?
         printf '%s\n' "$status" > "${BG_OUTPUT%.log}.exit"
@@ -67,14 +68,14 @@ _hey_latency_p99=""
 # hey exits successfully for HTTP failures and some transport failures. Qualify
 # metrics only after validating its complete status/error distribution.
 parse_hey() {
-    local output="$1" status="${2:-0}" metrics
+    local output="$1" status="${2:-0}" expected="${3:-0}" metrics
     _hey_rps=""
     _hey_latency_avg=""
     _hey_latency_p99=""
     if [ "$status" -ne 0 ]; then
         return 1
     fi
-    if ! metrics=$(awk '
+    if ! metrics=$(awk -v expected="$expected" '
         function number(value) {
             return value ~ /^[0-9]+([.][0-9]+)?$/
         }
@@ -92,6 +93,17 @@ parse_hey() {
             if (NF != 4 || $2 != "in" || $4 != "secs" || !number(p99)) bad=1
         }
         /^Error distribution:/ { bad=1 }
+        /^Response time histogram:$/ { histograms++; histogram=1; next }
+        histogram && !NF { histogram=0; next }
+        histogram {
+            if (NF != 3 || !number($1) || $2 !~ /^\[[0-9]+\]$/ || $3 !~ /^\|/) {
+                bad=1
+            } else {
+                buckets++
+                completed += substr($2, 2, length($2)-2)+0
+            }
+            next
+        }
         /^Status code distribution:$/ { distributions++; statuses=1; next }
         statuses && NF {
             if (NF != 3 || $1 !~ /^\[[0-9][0-9][0-9]\]$/ ||
@@ -104,8 +116,12 @@ parse_hey() {
             }
         }
         END {
+            # hey 0.1.4 retains at most 1M response statuses; its tail is unobservable.
             if (bad || summaries != 1 || rates != 1 || averages != 1 ||
-                percentiles != 1 || distributions != 1 || responses <= 0) exit 1
+                percentiles != 1 || histograms != 1 || buckets != 11 ||
+                distributions != 1 || responses <= 0 || completed >= 1000000 ||
+                responses != completed ||
+                (expected > 0 && responses != expected)) exit 1
             print rate, average, p99
         }
     ' "$output"); then
@@ -119,14 +135,14 @@ parse_hey() {
 }
 
 run_hey() {
-    local label="$1" status=0
-    shift
+    local label="$1" expected="$2" status=0
+    shift 2
     next_output "$label"
     local output="$HEY_OUTPUT"
     hey -disable-redirects "$@" > "$output" 2>&1 || status=$?
     printf '%s\n' "$status" > "${output%.log}.exit"
     log "Raw workload output: $output"
-    parse_hey "$output" "$status"
+    parse_hey "$output" "$status" "$expected"
 }
 
 # --- test functions ---
@@ -137,7 +153,7 @@ test_health_throughput() {
     local concurrency=${2:-10}
 
     log "Health endpoint: ${concurrency}c x ${duration}s"
-    if ! run_hey health -z "${duration}s" -c "$concurrency" "${AUTH_ARGS[@]}" "$API/v1/health"; then
+    if ! run_hey health 0 -z "${duration}s" -c "$concurrency" "${AUTH_ARGS[@]}" "$API/v1/health"; then
         fail "Health workload failed or contained invalid/non-2xx responses"
         return
     fi
@@ -155,7 +171,7 @@ test_read_throughput() {
     local concurrency=${2:-10}
 
     log "GET /v1/mitigations: ${concurrency}c x ${duration}s"
-    if ! run_hey mitigations -z "${duration}s" -c "$concurrency" "${AUTH_ARGS[@]}" "$API/v1/mitigations"; then
+    if ! run_hey mitigations 0 -z "${duration}s" -c "$concurrency" "${AUTH_ARGS[@]}" "$API/v1/mitigations"; then
         fail "Mitigations workload failed or contained invalid/non-2xx responses"
         return
     fi
@@ -182,7 +198,7 @@ test_ingestion_throughput() {
     ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     echo "{\"source\":\"load-test\",\"timestamp\":\"$ts\",\"victim_ip\":\"198.51.100.1\",\"vector\":\"udp_flood\",\"bps\":1000000000,\"pps\":1000000,\"top_dst_ports\":[53],\"confidence\":0.95}" > "$body_file"
 
-    if ! run_hey ingestion -z "${duration}s" -c "$concurrency" \
+    if ! run_hey ingestion 0 -z "${duration}s" -c "$concurrency" \
         -m POST -H "Content-Type: application/json" "${AUTH_ARGS[@]}" \
         -D "$body_file" "$API/v1/events"; then
         rm -f "$body_file"
@@ -217,7 +233,7 @@ test_burst() {
     ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     echo "{\"source\":\"load-test\",\"timestamp\":\"$ts\",\"victim_ip\":\"198.51.100.2\",\"vector\":\"syn_flood\",\"bps\":5000000000,\"pps\":5000000,\"top_dst_ports\":[80,443],\"confidence\":0.98}" > "$body_file"
 
-    if ! run_hey burst -n "$requests" -c "$concurrency" \
+    if ! run_hey burst "$requests" -n "$requests" -c "$concurrency" \
         -m POST -H "Content-Type: application/json" "${AUTH_ARGS[@]}" \
         -D "$body_file" "$API/v1/events"; then
         rm -f "$body_file"
@@ -256,7 +272,7 @@ test_metrics_under_load() {
     sleep 2
 
     local metrics_ok=0 metrics_p99="" ingestion_ok=0 background_status=0
-    if run_hey metrics -z "$((duration - 3))s" -c 2 "${AUTH_ARGS[@]}" "$API/metrics"; then
+    if run_hey metrics 0 -z "$((duration - 3))s" -c 2 "${AUTH_ARGS[@]}" "$API/metrics"; then
         metrics_ok=1
         metrics_p99="$_hey_latency_p99"
     fi
@@ -291,7 +307,7 @@ test_sustained() {
     ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     echo "{\"source\":\"load-test\",\"timestamp\":\"$ts\",\"victim_ip\":\"198.51.100.4\",\"vector\":\"udp_flood\",\"bps\":2000000000,\"pps\":2000000,\"top_dst_ports\":[53,123],\"confidence\":0.92}" > "$body_file"
 
-    if ! run_hey sustained -z "${duration}s" -c "$concurrency" \
+    if ! run_hey sustained 0 -z "${duration}s" -c "$concurrency" \
         -m POST -H "Content-Type: application/json" "${AUTH_ARGS[@]}" \
         -D "$body_file" "$API/v1/events"; then
         rm -f "$body_file"

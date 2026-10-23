@@ -4,6 +4,7 @@
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -103,29 +104,38 @@ class LoadWorkloads(unittest.TestCase):
             **kwargs,
         )
 
-    def qualify(self, path, status=0):
+    def qualify(self, path, status=0, expected=0):
         return self.shell(
-            'if parse_hey "$2" "$3"; then exit 0; fi\n'
+            'if parse_hey "$2" "$3" "$4"; then exit 0; fi\n'
             'test -z "$_hey_rps$_hey_latency_avg$_hey_latency_p99" || exit 2\nexit 1',
             path,
             status,
+            expected,
         )
 
     def test_actual_loopback_status_and_transport_controls(self):
         for status, path in self.samples.items():
             with self.subTest(status=status):
-                result = self.qualify(path)
+                result = self.qualify(path, expected=100)
                 self.assertEqual(result.returncode, 0 if status in (200, 202) else 1, result.stderr)
                 self.assertEqual("Requests/sec:" in result.stdout, status in (200, 202))
 
     def test_empty_malformed_and_mixed_outputs_never_qualify(self):
         success = self.samples[200].read_text()
+        histogram = success.split("Response time histogram:", 1)[1].split("\n\n", 1)[0]
         controls = {
             "empty": "",
             "noise": "Requests/sec: 999999\n",
-            "mixed": success + "  [429] 1 responses\n",
+            "mixed": re.sub(
+                r"(\[200\]\s+)100 responses", r"\g<1>50 responses\n  [429] 50 responses", success
+            ),
             "redirect": success.replace("[200]", "[302]"),
             "missing-status": success.split("Status code distribution:")[0],
+            "truncated-success-prefix": re.sub(r"(\[200\]\s+)100", r"\g<1>50", success),
+            "missing-histogram": success.replace("Response time histogram:", "Missing:"),
+            "duplicate-histogram": success + "Response time histogram:" + histogram + "\n\n",
+            "missing-bucket": success.replace(histogram.splitlines()[1] + "\n", "", 1),
+            "malformed-bucket": success.replace(histogram.splitlines()[1], "  NaN [100] |"),
             "missing-p99": "\n".join(line for line in success.splitlines() if "99%" not in line),
             "zero-responses": re.sub(r"(\[200\]\s+)100 responses", r"\g<1>0 responses", success),
             "bad-latency": success.replace("Average:", "Average: NaN"),
@@ -139,12 +149,23 @@ class LoadWorkloads(unittest.TestCase):
                 self.assertEqual(self.qualify(path).returncode, 1, label)
         self.assertEqual(self.qualify(self.samples[200], 7).returncode, 1)
 
+    def test_report_sampling_limit_cannot_qualify_an_unobserved_tail(self):
+        success = self.fast_success.read_text()
+        zero_histogram = re.sub(r"(?m)^(\s+[0-9.]+\s+)\[[0-9]+\]", r"\g<1>[0]", success)
+        for count in (999999, 1000000):
+            with self.subTest(count=count):
+                output = zero_histogram.replace("[0]", f"[{count}]", 1)
+                output = re.sub(r"(\[200\]\s+)100 responses", rf"\g<1>{count} responses", output)
+                path = self.receipts / f"control-report-limit-{count}.log"
+                path.write_text(output)
+                self.assertEqual(self.qualify(path).returncode, 0 if count < 1000000 else 1)
+
     def test_foreground_command_failure_retains_raw_output_and_exit(self):
         with tempfile.TemporaryDirectory() as directory:
             result = self.shell(
                 "RESULTS_DIR=$2; fixture=$3\n"
                 'hey() { [[ "$1" == -disable-redirects ]] || return 99; cat "$fixture"; return 7; }\n'
-                "if run_hey failed-command; then exit 9; fi\n"
+                "if run_hey failed-command 0; then exit 9; fi\n"
                 'test -z "$_hey_rps$_hey_latency_avg$_hey_latency_p99"',
                 directory,
                 self.samples[200],
@@ -155,6 +176,22 @@ class LoadWorkloads(unittest.TestCase):
                 self.samples[200].read_text(),
             )
             self.assertEqual((Path(directory) / "01-failed-command.exit").read_text(), "7\n")
+
+    def test_fixed_request_burst_requires_every_requested_response(self):
+        self.assertEqual(self.qualify(self.fast_success, expected=100).returncode, 0)
+        self.assertEqual(self.qualify(self.fast_success, expected=200).returncode, 1)
+        for requested in (100, 200):
+            with self.subTest(requested=requested), tempfile.TemporaryDirectory() as directory:
+                result = self.shell(
+                    "RESULTS_DIR=$2; WORK_DIR=$2; fixture=$3\n"
+                    'hey() { cat "$fixture"; }\n'
+                    'test_burst "$4" 1\nprintf "FAILURES=%s\\n" "$FAIL"',
+                    directory,
+                    self.fast_success,
+                    requested,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"FAILURES={0 if requested == 100 else 1}", result.stdout)
 
     def test_metrics_require_both_foreground_and_background_success(self):
         for foreground, background in ((200, 200), (200, 401), (429, 200)):
@@ -202,29 +239,77 @@ class LoadWorkloads(unittest.TestCase):
             self.assertFalse(list(Path(directory).glob("prefixd-load-body-*")))
 
     def test_failure_cleans_body_files_and_reaps_owned_background(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            work = root / "body"
-            work.mkdir()
-            (work / "request.json").write_text("temporary")
-            pid_file = root / "pid"
-            try:
-                result = self.shell(
+        for mode in ("immediate", "ignore-term"):
+            with self.subTest(mode=mode):
+                self.check_failed_workload_cleanup(mode)
+
+    def check_failed_workload_cleanup(self, mode):
+        root = self.receipts / f"cleanup-{mode}"
+        root.mkdir()
+        work = root / "body"
+        work.mkdir()
+        (work / "request.json").write_text("temporary")
+        ready = root / "ready"
+        if mode == "ignore-term":
+            os.mkfifo(ready)
+        pid_file = root / "pid"
+        with (root / "parent.log").open("w") as log:
+            process = subprocess.Popen(
+                [
+                    "bash",
+                    "-c",
+                    'source "$1"\n'
                     "RESULTS_DIR=$2; WORK_DIR=$2/body; BG_OUTPUT=$2/background.log\n"
-                    'trap cleanup EXIT\n: > "$BG_OUTPUT"\nsleep 60 > "$BG_OUTPUT" 2>&1 &\n'
-                    'BG_PID=$!\nprintf "%s\\n" "$BG_PID" > "$2/pid"\nexit 1',
-                    directory,
-                )
-                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-                self.assertFalse(work.exists())
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(int(pid_file.read_text()), 0)
-                self.assertTrue((root / "background.log").exists())
-                self.assertNotEqual((root / "background.exit").read_text(), "0\n")
+                    'trap cleanup EXIT\n: > "$BG_OUTPUT"\n'
+                    'if [[ "$3" == ignore-term ]]; then\n'
+                    '  (trap "" TERM; printf "partial workload\\n"; '
+                    'printf "ready\\n" > "$2/ready"; exec sleep 60) '
+                    '> "$BG_OUTPUT" 2>&1 &\n'
+                    'else sleep 60 > "$BG_OUTPUT" 2>&1 & fi\n'
+                    'BG_PID=$!\nprintf "%s\\n" "$BG_PID" > "$2/pid"\n'
+                    'if [[ "$3" == ignore-term ]]; then\n'
+                    '  read -r ready < "$2/ready"\n'
+                    '  kill -TERM "$BG_PID"\n  kill -0 "$BG_PID"\n'
+                    '  printf "survived TERM\\n" > "$2/term-survived"\nfi\nexit 1',
+                    "load-selftest",
+                    str(SCRIPT),
+                    str(root),
+                    mode,
+                ],
+                cwd=ROOT,
+                start_new_session=True,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+            )
+            (root / "parent.pid").write_text(f"{process.pid}\n")
+            try:
+                self.assertEqual(process.wait(timeout=10), 1)
             finally:
+                # Keep Bash alive to reap its child even when the regression fails.
                 if pid_file.exists():
+                    pid = int(pid_file.read_text())
                     with suppress(ProcessLookupError):
-                        os.kill(int(pid_file.read_text()), 15)
+                        if os.getpgid(pid) == process.pid:
+                            os.kill(pid, signal.SIGKILL)
+                if process.poll() is None:
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        with suppress(ProcessLookupError):
+                            os.killpg(process.pid, signal.SIGKILL)
+                        process.wait(timeout=10)
+                ready.unlink(missing_ok=True)
+                (root / "parent.exit").write_text(f"{process.returncode}\n")
+        self.assertFalse(work.exists())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), 0)
+        self.assertTrue((root / "background.log").exists())
+        status = int((root / "background.exit").read_text())
+        self.assertEqual(status, 137)
+        self.assertEqual(self.qualify(root / "background.log", status).returncode, 1)
+        if mode == "ignore-term":
+            self.assertEqual((root / "term-survived").read_text(), "survived TERM\n")
+            self.assertEqual((root / "background.log").read_text(), "partial workload\n")
 
     def test_unavailable_pool_observation_is_not_reported_as_zero(self):
         for mode in ("missing", "curl-error", "malformed", "zero"):
