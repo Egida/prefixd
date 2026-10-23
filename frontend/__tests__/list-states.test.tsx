@@ -1,9 +1,10 @@
-import { describe, expect, it } from "vitest"
-import { fireEvent, screen, waitFor } from "@testing-library/react"
-import type { Mitigation } from "@/lib/api"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
+import type { AuditEntry, Event, Mitigation } from "@/lib/api"
 import { formatTimestamp } from "@/lib/format"
 import { MitigationsContentLive } from "@/components/dashboard/mitigations-content-live"
 import { EventsContentLive } from "@/components/dashboard/events-content-live"
+import { AuditLogContentLive } from "@/components/dashboard/audit-log-content-live"
 import { deferred, failure, json, operatorResponse, renderApp, signIn, useFakeController } from "./support/fake-controller"
 
 const controller = useFakeController()
@@ -108,5 +109,165 @@ describe("list states", () => {
     renderApp(<EventsContentLive />, { withoutAuth: true })
     expect(await screen.findByRole("alert")).toHaveTextContent("Unable to load events")
     expect(screen.queryByText("No events yet")).not.toBeInTheDocument()
+  })
+
+  it("reports events as loading until a successful empty response arrives", async () => {
+    const pending = deferred<Response>()
+    controller.route("GET", "/v1/events", () => pending.promise)
+    renderApp(<EventsContentLive />, { withoutAuth: true })
+    expect(await screen.findByRole("status", { name: "Loading events" })).toBeInTheDocument()
+    expect(screen.queryByText("No events yet")).not.toBeInTheDocument()
+    expect(screen.getByRole("textbox", { name: "Search events by IP" })).toBeEnabled()
+    pending.resolve(json({ events: [], count: 0, next_cursor: null, has_more: false }))
+    expect(await screen.findByText("No events yet")).toBeInTheDocument()
+  })
+})
+
+describe("list pagination", () => {
+  const events: Event[] = Array.from({ length: 41 }, (_, index) => ({
+    event_id: `event-${index + 1}`, external_event_id: null,
+    source: index === 0 ? "suricata" : "fastnetmon",
+    event_timestamp: new Date(Date.UTC(2026, 9, 22, 12) - index * 1000).toISOString(),
+    ingested_at: new Date(Date.UTC(2026, 9, 22, 12) - index * 1000).toISOString(),
+    victim_ip: `203.0.113.${index + 1}`, vector: index === 0 ? "syn_flood" : "udp_flood",
+    protocol: 17, bps: 1000, pps: 10, top_dst_ports_json: "[]", confidence: 0.9,
+  }))
+
+  const response = (rows: Event[]) => json({ events: rows, count: rows.length, next_cursor: null, has_more: false })
+  // jsdom lacks the pointer-capture and scrolling APIs used by Radix Select.
+  const pointerApis = ["hasPointerCapture", "releasePointerCapture", "scrollIntoView"] as const
+  const originals = new Map(pointerApis.map((name) => [name, Object.getOwnPropertyDescriptor(Element.prototype, name)]))
+
+  beforeEach(() => {
+    for (const name of pointerApis) Object.defineProperty(Element.prototype, name, { configurable: true, value: vi.fn(() => false) })
+    vi.stubGlobal("matchMedia", vi.fn((media: string) => ({ media, matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })))
+    vi.stubGlobal("ResizeObserver", class { observe() {} unobserve() {} disconnect() {} })
+    controller.route("GET", "/v1/events", () => response(events))
+  })
+
+  afterEach(() => {
+    for (const [name, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(Element.prototype, name, descriptor)
+      else Reflect.deleteProperty(Element.prototype, name)
+    }
+  })
+
+  it.each(["IP", "Source", "Vector"])("returns to the first page when the %s filter narrows the results", async (filter) => {
+    const target = filter === "IP" ? "203.0.113.41" : "203.0.113.1"
+    renderApp(<EventsContentLive />, { withoutAuth: true })
+    await screen.findByText("Page 1 of 3")
+    fireEvent.click(screen.getByRole("button", { name: "Next" }))
+    expect(screen.getByText("Page 2 of 3")).toBeInTheDocument()
+
+    if (filter === "IP") {
+      fireEvent.change(screen.getByRole("textbox", { name: "Search events by IP" }), { target: { value: target } })
+    } else {
+      fireEvent.keyDown(screen.getByRole("combobox", { name: filter }), { key: "Enter" })
+      fireEvent.click(await screen.findByRole("option", { name: filter === "Source" ? "suricata" : "syn flood" }))
+    }
+
+    expect(await screen.findByText("Page 1 of 1")).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: target })).toHaveAttribute("href", `/ip-history?ip=${target}`)
+    expect(screen.queryByText("No matching events")).not.toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "Previous" })).toBeDisabled()
+    expect(screen.getByRole("button", { name: "Next" })).toBeDisabled()
+  })
+
+  it("keeps polled results within the last available page and recovers after a genuine empty result", async () => {
+    let rows = events
+    controller.route("GET", "/v1/events", () => response(rows))
+    vi.useFakeTimers()
+
+    try {
+      renderApp(<EventsContentLive />, { withoutAuth: true })
+      await act(() => vi.advanceTimersByTimeAsync(0))
+      fireEvent.click(screen.getByRole("button", { name: "Next" }))
+      fireEvent.click(screen.getByRole("button", { name: "Next" }))
+      expect(screen.getByText("Page 3 of 3")).toBeInTheDocument()
+
+      rows = events.slice(0, 21)
+      await act(() => vi.advanceTimersByTimeAsync(5000))
+      expect(screen.getByText("Page 2 of 2")).toBeInTheDocument()
+      expect(screen.getByRole("link", { name: "203.0.113.21" })).toBeInTheDocument()
+      expect(screen.getByRole("button", { name: "Next" })).toBeDisabled()
+
+      rows = []
+      await act(() => vi.advanceTimersByTimeAsync(5000))
+      expect(screen.getByText("No events yet")).toBeInTheDocument()
+      expect(screen.queryByRole("button", { name: "Previous" })).not.toBeInTheDocument()
+
+      rows = events.slice(0, 1)
+      await act(() => vi.advanceTimersByTimeAsync(5000))
+      expect(screen.getByText("Page 1 of 1")).toBeInTheDocument()
+      expect(screen.getByRole("link", { name: "203.0.113.1" })).toBeInTheDocument()
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
+  it("returns to the first matching page when filtering leaves multiple pages", async () => {
+    renderApp(<EventsContentLive />, { withoutAuth: true })
+    await screen.findByText("Page 1 of 3")
+    fireEvent.click(screen.getByRole("button", { name: "Next" }))
+    fireEvent.click(screen.getByRole("button", { name: "Next" }))
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Source" }), { key: "Enter" })
+    fireEvent.click(await screen.findByRole("option", { name: "fastnetmon" }))
+    expect(await screen.findByText("Page 1 of 2")).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: "203.0.113.2" })).toBeInTheDocument()
+  })
+
+  it("returns to the first matching page when mitigation search leaves multiple pages", async () => {
+    const mitigations: Mitigation[] = events.map((event, index) => ({
+      mitigation_id: `mitigation-${index + 1}`, scope_hash: `scope-${index + 1}`, status: "active",
+      customer_id: null, service_id: null, pop: "iad1", victim_ip: index === 0 ? "198.51.100.1" : event.victim_ip,
+      vector: "udp_flood", action_type: "discard", rate_bps: null, dst_prefix: `${index === 0 ? "198.51.100.1" : event.victim_ip}/32`,
+      protocol: 17, dst_ports: [], created_at: event.event_timestamp, updated_at: event.event_timestamp,
+      expires_at: "2026-10-24T12:00:00Z", withdrawn_at: null, triggering_event_id: event.event_id,
+      last_event_id: event.event_id, reason: "flood", acknowledged_at: null, acknowledged_by: null,
+    }))
+
+    serveMitigations(loaded(mitigations))
+    renderApp(<MitigationsContentLive />)
+    await screen.findByText("Page 1 of 3")
+    fireEvent.click(screen.getByRole("button", { name: "Next" }))
+    fireEvent.click(screen.getByRole("button", { name: "Next" }))
+    fireEvent.change(screen.getByRole("textbox", { name: "Search mitigations" }), { target: { value: "203.0.113." } })
+    expect(await screen.findByText("Page 1 of 2")).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: "203.0.113.2" })).toBeInTheDocument()
+  })
+
+  it("returns to the first matching page when audit search leaves multiple pages", async () => {
+    const entries: AuditEntry[] = events.map((event, index) => ({
+      audit_id: `audit-${index + 1}`, timestamp: event.event_timestamp, schema_version: 1,
+      actor_type: "operator", actor_id: "alice", action: "mitigation.withdrawn",
+      target_type: "mitigation", target_id: `route-${index + 1}`, details: { group: index === 0 ? "outside" : "matching" },
+    }))
+
+    controller.route("GET", "/v1/audit", () => json({ entries, count: entries.length, next_cursor: null, has_more: false }))
+    renderApp(<AuditLogContentLive />, { withoutAuth: true })
+    await screen.findByText("Page 1 of 3")
+    fireEvent.click(screen.getByRole("button", { name: "Next" }))
+    fireEvent.click(screen.getByRole("button", { name: "Next" }))
+    fireEvent.change(screen.getByRole("textbox", { name: "Search audit log" }), { target: { value: "matching" } })
+    expect(await screen.findByText("Page 1 of 2")).toBeInTheDocument()
+    expect(screen.getByRole("link", { name: "route-2" })).toHaveAttribute("href", "/mitigations/route-2")
+  })
+
+  it("keeps ordinary navigation and event selection usable after a genuine unmatched search", async () => {
+    renderApp(<EventsContentLive />, { withoutAuth: true })
+    await screen.findByText("Page 1 of 3")
+    fireEvent.click(screen.getByRole("button", { name: "Next" }))
+    fireEvent.click(screen.getByRole("button", { name: "Previous" }))
+    expect(screen.getByText("Page 1 of 3")).toBeInTheDocument()
+    fireEvent.change(screen.getByRole("textbox", { name: "Search events by IP" }), { target: { value: "198.51.100.9" } })
+    expect(screen.getByText("No matching events")).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "Clear search and filters" }))
+
+    const row = screen.getByRole("link", { name: "203.0.113.1" }).closest("tr")!
+    fireEvent.click(within(row).getByRole("button", { name: "View event details" }))
+    expect(await screen.findByRole("button", { name: "Close panel" })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "Close panel" }))
+    expect(screen.getByText("Page 1 of 3")).toBeInTheDocument()
   })
 })

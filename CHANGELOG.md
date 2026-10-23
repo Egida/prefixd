@@ -46,6 +46,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Events, mitigations and audit log filters return to the first matching page.
+  Refreshed events keep pagination within the available pages instead of falsely
+  showing an empty list.
+
 - Routine PostgreSQL NOTICE messages are quiet by default in native, Compose
   and systemd deployments. Warnings, errors and controller INFO remain enabled;
   custom logging filters retain their chosen levels and can restore notice
