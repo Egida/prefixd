@@ -636,7 +636,7 @@ ReadWritePaths=/var/lib/prefixd /var/log/prefixd
 PrivateTmp=yes
 
 # Environment
-Environment=RUST_LOG=info
+Environment=RUST_LOG=sqlx::postgres::notice=warn,info
 EnvironmentFile=-/etc/prefixd/env
 
 [Install]

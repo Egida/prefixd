@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Routine PostgreSQL NOTICE messages are quiet by default in native, Compose
+  and systemd deployments. Warnings, errors and controller INFO remain enabled;
+  explicit logging filters can restore notice diagnostics.
+
 - A successful complete peer observation retires deleted-peer metrics, including
   after an empty inventory, while keeping retained peers registered during
   scrapes. Failed or unsupported reads retain prior samples; malformed GoBGP
