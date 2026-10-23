@@ -118,17 +118,30 @@ curl -sS -b cookies.txt http://localhost/v1/config/settings | jq .settings.mode
 ```
 
 If rehearsal mitigations remain, the controller exits instead. Its log names the
-count and `--retire-dry-run-intent`. Run the flag once with the same
-configuration. It withdraws each rehearsal mitigation locally, with an audit
-entry, and exits without contacting the speaker. Then start the controller
-again:
+count and `--retire-dry-run-intent`. Compose's `unless-stopped` policy can leave
+the container in `Restarting`, repeating that refusal. Inspect its logs, stop
+only the controller, then run the flag once with the same configuration. Keep
+PostgreSQL and the original speaker running:
 
 ```bash
 docker compose --profile rustbgpd logs --tail 20 prefixd-rustbgpd
+docker compose --profile rustbgpd stop prefixd-rustbgpd
 docker compose --profile rustbgpd run --rm --no-deps prefixd-rustbgpd \
   --config /etc/prefixd --retire-dry-run-intent
-docker compose --profile rustbgpd up -d prefixd-rustbgpd
 ```
+
+The one-shot withdraws each rehearsal mitigation locally, with an audit entry,
+and exits without contacting the speaker. `--rm` overrides the service's restart
+policy and removes the one-shot container. After it succeeds, start only the
+controller:
+
+```bash
+docker compose --profile rustbgpd up -d --no-deps --no-build prefixd-rustbgpd
+```
+
+For GoBGP, use profile `gobgp` and service `prefixd-gobgp` in these commands;
+keep the original `gobgp` service running. Keep the same POP, speaker target and
+configuration throughout; see [mitigation origin mode](../how-to/upgrading.md#mitigation-origin-mode).
 
 Sessions are stored in PostgreSQL, so your cookie survives the restart. From
 now on, new mitigations are announced.

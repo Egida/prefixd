@@ -406,6 +406,11 @@ reconciliation loop. Repeating it retires nothing new. Then start normally.
 Expired dry-run rows and pending dry-run withdrawals don't block startup; the
 scheduler completes them locally.
 
+With Compose, `unless-stopped` can leave a refused controller in `Restarting`.
+Follow the [profile-specific recovery steps](../cookbook/dry-run-rollout.md#5-switch-to-enforced)
+to stop only the selected controller and run the one-shot with the same
+configuration while PostgreSQL and the original speaker remain running.
+
 prefixd reads `mode` only at startup. `POST /v1/config/reload` doesn't change
 it, so every mode switch passes through this check.
 
