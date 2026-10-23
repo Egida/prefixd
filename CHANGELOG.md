@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- GoBGP FlowSpec paths now carry their injection timestamp, so route age starts
+  at announcement instead of Unix epoch.
+
 - A successful complete peer observation retires deleted-peer metrics, including
   after an empty inventory, while keeping retained peers registered during
   scrapes. Failed or unsupported reads retain prior samples; malformed GoBGP

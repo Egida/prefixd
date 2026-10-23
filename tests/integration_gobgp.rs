@@ -23,6 +23,40 @@ async fn test_announce_and_list_active() {
 
 #[tokio::test]
 #[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
+async fn injected_paths_have_recent_age_across_reannouncement_and_withdrawal() {
+    use prefixd::bgp::apipb::TableType;
+    let fixture = fixture::Speaker::start().await;
+    let speaker = fixture.connect().await;
+    let rules: Vec<_> = contract::contract_rules().into_iter().take(2).collect();
+    for _ in 0..2 {
+        let before = chrono::Utc::now().timestamp();
+        for rule in &rules {
+            speaker.announce(rule).await.unwrap();
+            speaker.announce(rule).await.unwrap();
+        }
+        contract::wait_inventory(&speaker, &rules).await.unwrap();
+        for afi in [1, 2] {
+            let paths = fixture.paths(afi, TableType::Global).await;
+            assert_eq!(paths.len(), 1, "duplicate announcement must keep one path");
+            let age = paths[0].age.as_ref().expect("GoBGP path timestamp");
+            let after = chrono::Utc::now().timestamp();
+            eprintln!(
+                "GoBGP injected path timestamp: afi={afi}, age={}, before={before}, after={after}",
+                age.seconds
+            );
+            assert!((before..=after).contains(&age.seconds));
+        }
+        for (index, rule) in rules.iter().enumerate() {
+            speaker.withdraw(rule).await.unwrap();
+            contract::wait_inventory(&speaker, &rules[index + 1..])
+                .await
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires Docker on Linux; run scripts/test-gobgp.sh"]
 async fn source_prefix_components_are_retained_in_both_families() {
     use prefixd::bgp::apipb::{TableType, flow_spec_rule, nlri};
     let fixture = fixture::Speaker::start().await;
