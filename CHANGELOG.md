@@ -46,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Document Compose recovery after enforced startup refuses remaining dry-run
+  intent, keeping PostgreSQL and the original speaker running.
+
 - GoBGP FlowSpec paths now carry their injection timestamp, so route age starts
   at announcement instead of Unix epoch.
 
