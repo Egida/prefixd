@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Inventory page shows the selected speaker's local IPv4/IPv6 FlowSpec
+  routes, complete matches, actions and injection owners. Observation scope
+  distinguishes rustbgpd retained intent from GoBGP accepted local RIB;
+  unsupported or failed reads stay unknown and never appear as an empty table.
+  Customer inventory remains independently available. This view does not prove
+  export or router enforcement and does not include blackholes.
+
 - Nightly and manually triggered smoke checks execute the existing benchmark
   bodies once and run both parser fuzz targets with bounded input, time and
   memory budgets. Logs and fuzz artifacts are retained after failures; these
