@@ -1,0 +1,123 @@
+name: Quality smoke
+
+on:
+  schedule:
+    - cron: "47 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/quality-smoke.yml"
+      - "benches/**"
+      - "fuzz/**"
+      - "scripts/release-prepare.sh"
+      - "scripts/release-notes.py"
+      - "justfile"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: "3"
+  RUST_BACKTRACE: "1"
+  RUSTUP_AUTO_INSTALL: "0"
+
+jobs:
+  bench:
+    name: Benchmark bodies and release preparation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/debug
+          key: ${{ runner.os }}-quality-smoke-stable-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.lock') }}
+      - name: Record compiler versions
+        run: |
+          mkdir -p target/qualification/quality-smoke
+          { rustc --version --verbose; cargo --version; } 2>&1 | tee target/qualification/quality-smoke/bench-versions.log
+      - name: Execute benchmark bodies without measuring
+        timeout-minutes: 15
+        run: just bench-smoke 2>&1 | tee target/qualification/quality-smoke/bench.log
+      - name: Check release preparation and both lockfiles
+        timeout-minutes: 5
+        run: scripts/release-prepare.sh --selftest 2>&1 | tee target/qualification/quality-smoke/release-prepare.log
+      - name: Retain benchmark and release preparation logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: bench-smoke-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            target/qualification/quality-smoke/bench*.log
+            target/qualification/quality-smoke/release-prepare.log
+
+  fuzz:
+    name: Parser fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: extractions/setup-just@v4
+        with:
+          just-version: "1"
+      - name: Install protobuf compiler
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: nightly-2026-07-07
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/fuzz-smoke
+          key: ${{ runner.os }}-quality-smoke-nightly-2026-07-07-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.lock') }}
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+      - name: Record compiler and fuzzer versions
+        run: |
+          mkdir -p target/qualification/quality-smoke
+          { rustc --version --verbose; cargo --version; cargo fuzz --version; } 2>&1 | tee target/qualification/quality-smoke/fuzz-versions.log
+      - name: Run both parser targets with bounded budgets
+        timeout-minutes: 20
+        run: just fuzz-smoke 2>&1 | tee target/qualification/quality-smoke/fuzz.log
+      - name: Require unchanged lockfiles after fuzzing
+        if: always()
+        run: |
+          mkdir -p target/qualification/quality-smoke
+          git diff --exit-code -- Cargo.lock fuzz/Cargo.lock 2>&1 | tee target/qualification/quality-smoke/fuzz-locks.log
+      - name: Retain fuzz logs, corpora and crash artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-smoke-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          retention-days: 14
+          path: |
+            target/qualification/quality-smoke/fuzz*.log
+            fuzz/corpus/
+            fuzz/artifacts/

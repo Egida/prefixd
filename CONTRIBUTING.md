@@ -95,6 +95,23 @@ This manual gate is broader than the optional hooks below. Image builds and
 publication, release/SBOM operations, long labs, performance/fuzz work and
 owned authenticated browser qualification remain separate checks.
 
+### Scheduled smoke checks
+
+`just bench-smoke` executes each existing Criterion benchmark body once. It
+uses the in-memory repository and records no performance baseline or measurement.
+`just fuzz-smoke` runs the two existing GoBGP parser fuzz targets for 30 seconds
+each, using `nightly-2026-07-07` and `cargo-fuzz` 0.13.2. Install those tools
+explicitly before running it; both recipes preserve `CARGO_BUILD_JOBS`, and
+neither needs Docker, PostgreSQL or a running speaker.
+
+The [Quality smoke workflow](.github/workflows/quality-smoke.yml) runs nightly,
+on demand and on PRs changing these checks or their inputs. It retains command
+logs, compiler versions, generated fuzz corpora and crash artifacts after a
+failure. The fuzz recipe checks its lockfile before running; CI also checks
+both lockfiles afterwards, even on failure, because cargo-fuzz has no `--locked`
+option. These are execution and crash checks, not performance measurements or
+proof that an input is valid.
+
 ### Branch Naming
 
 - `feature/description` - New features
