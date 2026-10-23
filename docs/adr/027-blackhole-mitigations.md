@@ -519,7 +519,7 @@ blackholes. The owner identity also keys the
   anyway, it is handled as an untracked route: the leased add is not retried
   unleased and the unleased route is not deleted.
 - **FlowSpec.** Leasing FlowSpec rules too, through `AddLeasedFlowSpec`, would
-  close the AGENTS.md gap that rules can persist if prefixd stops. That is a
+  prevent rules from persisting if prefixd stops. That is a
   later decision and is outside every slice below; it is now made in the
   [leased FlowSpec amendment](#amendment-leased-flowspec).
 
@@ -593,8 +593,8 @@ enabled. The owner name is derived as above in every deployment.
 ### Amendment: leased FlowSpec
 
 Amended 2026-10-20 by the owner's decision to exercise the lease for FlowSpec
-as well, which closes the AGENTS.md gap that FlowSpec rules persist while
-prefixd is stopped and the speaker runs. It replaces the "later decision" in
+as well, so FlowSpec rules expire when prefixd stops and the speaker keeps
+running. It replaces the "later decision" in
 the FlowSpec bullet of [Owner and lease](#owner-and-lease) and the
 corresponding slice 9 item.
 
