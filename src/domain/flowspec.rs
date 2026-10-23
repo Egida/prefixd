@@ -11,7 +11,7 @@ pub enum IpVersion {
 }
 
 /// Unknown keys fail closed: ignoring a match key would widen the rule (ADR 028).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FlowSpecNlri {
     pub dst_prefix: String,
@@ -212,7 +212,7 @@ impl From<&MatchCriteria> for FlowSpecNlri {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct FlowSpecAction {
     pub action_type: ActionType,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -271,7 +271,7 @@ impl FlowSpecAction {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct FlowSpecRule {
     pub nlri: FlowSpecNlri,
     pub actions: Vec<FlowSpecAction>,

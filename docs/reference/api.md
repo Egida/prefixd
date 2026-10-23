@@ -1864,6 +1864,65 @@ Admins can change any operator's password without supplying the current password
 
 ## Operational Endpoints
 
+### Local FlowSpec Inventory
+
+```http
+GET /v1/speaker/routes
+Authorization: Bearer <token>
+```
+
+Requires the configured authentication; viewer sessions may read it. This
+read-only endpoint is available in dry-run and standby, without an active
+controller fence or mitigation database query. It observes the selected
+speaker directly, without a health preflight or a route mutation.
+
+**Response (200):**
+
+```json
+{
+  "backend": "rustbgpd",
+  "observation_scope": "retained_local_flow_spec_intent",
+  "routes": [
+    {
+      "nlri": {
+        "dst_prefix": "203.0.113.10/32",
+        "src_prefix": "198.51.100.0/24",
+        "protocol": 17,
+        "dst_ports": [443]
+      },
+      "actions": [{ "action_type": "police", "rate_bps": 125000 }],
+      "owner": "<injection-owner>"
+    }
+  ]
+}
+```
+
+This is the complete local **FlowSpec** inventory for IPv4 and IPv6, including
+untracked rules. It excludes unicast routes and blackholes. The match, actions
+and rate in bits per second are preserved; `owner` is present for owned rules
+and omitted for unleased rules. Optional source-prefix, source-port, fragment
+and packet-length matches retain their existing JSON representation.
+
+| `observation_scope` | Meaning |
+| --- | --- |
+| `retained_local_flow_spec_intent` | rustbgpd's retained local injection intent |
+| `accepted_local_flow_spec_rib` | GoBGP's accepted local RIB after import policy |
+| `adapter_local_flow_spec` | Mock or custom adapter's local read-back |
+
+None of these observations proves selected RIB state, export, router receipt
+or enforcement. A successful empty observation returns `routes: []`. A failed
+or partial inventory returns no routes, rather than presenting it as empty.
+
+| Status | Meaning |
+| --- | --- |
+| 401 | Authentication required |
+| 501 | Local FlowSpec observation is unsupported by this speaker |
+| 502 | Local FlowSpec observation failed; inventory is unavailable |
+
+The 501 and 502 responses use the [error format](#error-responses) and omit
+upstream diagnostic details. See also
+[`prefixdctl speaker list-routes`](cli.md#speaker-routes).
+
 ### Health Check (Public)
 
 ```http

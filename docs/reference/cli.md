@@ -106,6 +106,26 @@ prefixdctl peers
 # 192.0.2.2                       established
 ```
 
+### Speaker Routes
+
+```bash
+prefixdctl speaker list-routes
+prefixdctl --format json speaker list-routes
+```
+
+Lists the selected speaker's complete local FlowSpec inventory for IPv4 and
+IPv6, including untracked rules. It does not list unicast routes or blackholes,
+or prove router enforcement. The table shows backend, observation scope,
+destination, full match, actions, rate in bits per second and injection owner
+(`-` for unleased rules). JSON preserves `backend`, `observation_scope` and
+`routes` from the [authenticated API](api.md#local-flowspec-inventory).
+
+rustbgpd observes retained local injection intent; GoBGP observes accepted local
+RIB state after import policy. Unsupported observation and failed or partial
+reads produce an error on stderr and a nonzero exit status, in both formats.
+Only a successful empty read returns `routes: []` in JSON. Reads also work in
+dry-run and standby, without a health preflight or route mutations.
+
 ---
 
 ## Mitigations
