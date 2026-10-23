@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `prefixdctl speaker list-routes` and authenticated `GET /v1/speaker/routes`
+  expose the selected speaker's complete local IPv4/IPv6 FlowSpec inventory,
+  including match, action, rate and injection owner. Backend and observation
+  scope distinguish rustbgpd retained intent from GoBGP accepted local RIB.
+  Unsupported and failed observations return errors, never an empty inventory.
+  These reads also work in dry-run and standby; they do not list blackholes or
+  prove router enforcement.
 - Manual FlowSpec discard and police rules accept a same-family `src_prefix`
   CIDR through the API and dashboard. Both speakers encode and read IPv4 and
   offset-zero IPv6 source prefixes; list/detail, CLI and rule previews show the
