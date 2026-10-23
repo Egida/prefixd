@@ -1,7 +1,12 @@
-# Benchmark Results
+# Historical benchmark report
 
-Historical measurement snapshot: v0.15.0. Values below have not been remeasured
-for the current daemon or the rustbgpd adapter.
+This preserves the numbers reported for v0.15.0. The original measurement date,
+hardware, exact workloads and dated raw receipts are not recorded here. These
+values have not been remeasured for the current controller or rustbgpd adapter.
+The old load helper could count HTTP errors as throughput and discarded its
+background ingestion output, so its numbers cannot qualify successful ingestion
+or current capacity. The microbenchmarks and recovery reports have the separate
+limits described below.
 
 ## How to Run
 
@@ -9,21 +14,48 @@ for the current daemon or the rustbgpd adapter.
 # Micro-benchmarks (criterion, in-memory MockRepository)
 cargo bench
 
-# HTTP load tests (requires running Docker Compose stack + hey)
+# Regression of the helper itself; only tiny owned loopback fixtures, requires hey
+just test-load-script
+
+# HTTP load tests: only against your own isolated Compose stack, requires hey
 ./scripts/load-test.sh          # default suite
 ./scripts/load-test.sh quick    # fast smoke test
 ./scripts/load-test.sh burst    # high concurrency spike
 ./scripts/load-test.sh sustained # 60s sustained ingestion
-
-# Chaos/resilience tests
-./scripts/chaos-test.sh
 ```
+
+The load helper targets `http://localhost` and writes attack events. Use an
+isolated deployment you own. Set the existing `PREFIXD_API_TOKEN` when the API
+requires a bearer token; it is used for workloads and health/stats/metrics probes
+without printing the header. Do not run this against another operator's stack.
+
+Each run prints a retained result directory containing raw `hey` output and its
+exit status for every foreground and background workload. Empty/malformed
+output, missing latency data, request errors or any non-2xx response reject the
+workload before throughput/latency checks. Status totals must match the complete
+histogram and the exact attempt count in a generator-written completion record
+after the error section. Fixed-request bursts must account for every requested
+response. Interrupted foreground and background workloads retain their exit
+status and partial output without qualifying.
+[`hey` 0.1.4 retains at most 1,000,000 response records](https://github.com/rakyll/hey/blob/v0.1.4/requester/report.go#L28-L29);
+the helper conservatively refuses reports at that retention limit, beyond which
+response statuses are unobservable. Redirect following is disabled, so a
+redirect to a successful page cannot qualify the original request. Failures
+remain in the result directory; temporary request bodies are removed and owned background
+work is killed and reaped on exit. Keep failed attempts alongside later runs.
+
+Even all-2xx HTTP responses prove only HTTP request throughput. Event responses
+can describe guardrail rejections or extensions of existing intent; `hey` does
+not inspect their bodies. They do not prove newly admitted mitigations, speaker
+acceptance, export or router enforcement.
 
 ---
 
-## HTTP Load Tests (Docker Compose)
+## HTTP load tests (historical Compose report)
 
-End-to-end through nginx -> prefixd -> PostgreSQL on a single machine.
+The original report described nginx -> prefixd -> PostgreSQL on one machine.
+The table is an unqualified historical HTTP request-rate report, not an admitted
+mitigation rate or a current deployment limit.
 
 | Endpoint | Req/sec | Avg Latency | P99 Latency |
 |----------|---------|-------------|-------------|
@@ -32,19 +64,28 @@ End-to-end through nginx -> prefixd -> PostgreSQL on a single machine.
 | `POST /v1/events` (ingestion) | ~4,700 | 1.1 ms | 1.6 ms |
 | `GET /metrics` (under load) | ~680 | 2.9 ms | 7.0 ms |
 
-**Burst test:** 500 requests at 50 concurrency — ~4,930 req/s, zero 5xx errors.
+**Reported burst:** 500 requests at 50 concurrency — ~4,930 req/s, zero 5xx
+errors. The old check did not reject 4xx or transport errors.
 
-**Sustained test:** 60s at 10 concurrency — throughput stable, API healthy after completion, DB pool not exhausted.
+**Reported sustained run:** 60s at 10 concurrency, described as stable throughput
+with a healthy API and an available DB pool afterward. Its request-status and
+pool probes, with no linked raw run evidence, do not qualify current capacity
+or recovery.
 
 ### Context
 
-A typical DDoS detector (FastNetMon, Kentik) generates 10-50 events/sec during an attack. At ~4,700 events/sec, prefixd has **~100x headroom** over realistic production load.
+The previous comparison assumed detector traffic of 10–50 events/sec. That
+assumption and the unqualified request rate do not establish production
+headroom. Customer inventory, admitted actions, database state, audit writes and
+speaker behavior need a dated workload-specific measurement.
 
 ---
 
 ## Micro-Benchmarks (Criterion)
 
-All times are median values from criterion runs with MockRepository (in-memory). These measure pure computation without network or PostgreSQL overhead.
+These were reported as median Criterion values with MockRepository (in-memory).
+They exclude network and PostgreSQL I/O and do not qualify the current code.
+The original inputs and raw run history are not available on this page.
 
 ### Summary
 
@@ -77,7 +118,9 @@ inventory_is_owned_hit   775 ns     Check if IP is in any customer prefix
 inventory_is_owned_miss  1.22 µs    Not owned (full scan)
 ```
 
-Lookup hits are fast (~156ns). Misses are ~8x slower because they must scan all prefixes before returning. For deployments with 500+ customers, a prefix trie could improve miss performance.
+The historical hit/miss figures differ by roughly 8x. Without the original
+inventory and run receipts, they do not establish current scaling or justify a
+particular replacement data structure.
 
 ### Inventory Scaling
 
@@ -88,7 +131,8 @@ Lookup hits are fast (~156ns). Misses are ~8x slower because they must scan all 
 | 100 | 771 ns | 5.8x |
 | 500 | 771 ns | 5.8x (plateaus) |
 
-Lookup time plateaus around 100 customers due to prefix-based matching convergence.
+The reported plateau is limited to these cases; it does not demonstrate general
+inventory scaling without their original inputs.
 
 ### Database Operations (MockRepository)
 
@@ -109,7 +153,8 @@ db_is_safelisted         136 ns     Check safelist with prefix matching
 | 100 | 9.90 µs | 4.7x |
 | 500 | 9.92 µs | 4.7x (LIMIT 50 caps work) |
 
-The LIMIT 50 clause keeps result set processing constant once the table exceeds the page size.
+These MockRepository cases used LIMIT 50. Their plateau is not evidence of
+PostgreSQL list/query scaling.
 
 ### Serialization
 
@@ -125,9 +170,11 @@ uuid_to_string                 22 ns      Format UUID as string
 
 ---
 
-## Bottleneck Analysis
+## Former latency illustration (unqualified)
 
-For a typical event ingestion flow:
+The earlier report mixes component microbenchmarks, an explicit policy estimate
+and unqualified PostgreSQL/RPC figures. No dated end-to-end trace is linked
+here; these figures cannot qualify the total:
 
 ```
 Event received          →  ~0 ns    (network I/O, not measured)
@@ -142,13 +189,21 @@ BGP announcement        →  ~1-10 ms (GoBGP gRPC)
 Total                   →  ~1-10 ms (dominated by BGP gRPC)
 ```
 
-The BGP announcement is the slowest step by design — FlowSpec rules must propagate to routers. All prefixd processing overhead (<5µs) is negligible compared to the DB write (~200µs) and BGP announcement (~1-10ms).
+The former <5µs controller-overhead comparison has no linked trace qualifying
+that total. A successful GoBGP RPC, retained local intent, export and router
+enforcement are separate observations. The unqualified ~1–10ms RPC figure above
+says nothing about propagation or enforcement latency and provides no rustbgpd
+measurement.
 
 ---
 
-## Chaos Test Results
+## Historical recovery report
 
-17/17 tests passing (see `scripts/chaos-test.sh`):
+The original report listed 17/17 passing checks with `scripts/chaos-test.sh`.
+The table preserves those reported outcomes, without dated raw receipts or
+failed attempts that could qualify them. The helper uses fixed container names
+and assumes GoBGP. It is not qualified for the current selected profiles and
+was not run for this documentation correction.
 
 | Scenario | Result |
 |----------|--------|
@@ -164,20 +219,15 @@ The BGP announcement is the slowest step by design — FlowSpec rules must propa
 
 ---
 
-## Performance Recommendations
+## What new qualification needs
 
-### Current State: Production Ready
+Use an owned isolated fixture, record the date, exact revisions, backend,
+hardware, configuration, dataset, load shape and raw output for every attempt.
+Define HTTP success separately from admitted mitigation counts, successful
+speaker RPCs, export and router enforcement. Keep rejected requests and failed
+runs visible rather than presenting a later successful run as the whole history.
 
-The current performance supports:
-- **Event ingestion:** ~4,700 events/sec end-to-end (100x typical load)
-- **API queries:** Sub-3ms P99 for read operations
-- **Burst handling:** 50 concurrent connections, zero errors
-- **Recovery:** Sub-30s full recovery from any component failure
-
-### Future Optimizations (if needed)
-
-1. **Prefix trie for inventory** — improve miss lookups from O(n) to O(log n)
-2. **Batch audit log writes** — accumulate and flush periodically
-3. **PostgreSQL tuning** — shared_buffers, work_mem, WAL settings (defaults used currently)
-4. **PgBouncer** — connection pooling for higher sustained write throughput
-5. **Read replicas** — separate dashboard queries from ingestion path
+Recovery evidence must name the component, fault, sequence and observation
+boundary that were tested. The historical cases above do not establish a
+recovery bound for arbitrary failures or current production readiness. No new
+capacity or recovery measurement was performed for this correction.
