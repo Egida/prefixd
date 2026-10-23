@@ -176,6 +176,8 @@ impl GoBgpAnnouncer {
         Ok(Path {
             nlri: Some(nlri),
             pattrs,
+            // GoBGP interprets a missing timestamp as Unix epoch.
+            age: Some(std::time::SystemTime::now().into()),
             family: Some(family),
             ..Default::default()
         })

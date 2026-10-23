@@ -1020,6 +1020,59 @@ fn items(path: &Path) -> Vec<(u32, Vec<(u32, u64)>)> {
 }
 
 #[tokio::test]
+async fn announcements_set_recent_age_without_changing_readback_or_withdrawal() {
+    let fake = Fake::default();
+    let adds = fake.adds.clone();
+    let deletes = fake.deletes.clone();
+    let (speaker, _server) = serve(fake).await;
+    for (destination, source) in [
+        ("192.0.2.1/32", "198.51.100.0/24"),
+        ("2001:db8::1/128", "2001:db8:1::/48"),
+    ] {
+        let mut wanted = rule(destination);
+        wanted.nlri.src_prefix = Some(source.into());
+        let before = chrono::Utc::now().timestamp();
+        speaker.announce(&wanted).await.unwrap();
+        let after = chrono::Utc::now().timestamp();
+        let add = adds.lock().unwrap().pop().unwrap().path.unwrap();
+        let age = add.age.as_ref().expect("announcement timestamp");
+        assert!((before..=after).contains(&age.seconds));
+        assert!((0..1_000_000_000).contains(&age.nanos));
+
+        let mut observed = add.clone();
+        gobgp_read_back(&mut observed);
+        // Readback metadata does not become route identity or action.
+        for age in [
+            None,
+            Some(prost_types::Timestamp::default()),
+            Some(prost_types::Timestamp {
+                seconds: after + 3600,
+                nanos: 0,
+            }),
+        ] {
+            observed.age = age;
+            let decoded = speaker.parse_flowspec_path(&observed).unwrap();
+            assert_eq!(decoded.nlri_hash(), wanted.nlri_hash());
+            assert_eq!(decoded.nlri.src_prefix, wanted.nlri.src_prefix);
+            assert_eq!(decoded.actions.len(), 1);
+            assert_eq!(
+                decoded.actions[0].action_type,
+                wanted.actions[0].action_type
+            );
+            assert_eq!(decoded.actions[0].rate_bps, wanted.actions[0].rate_bps);
+            assert!(decoded.owner.is_empty());
+        }
+
+        speaker.withdraw(&wanted).await.unwrap();
+        let delete = deletes.lock().unwrap().pop().unwrap().path.unwrap();
+        assert_eq!(delete.nlri, add.nlri);
+        assert_eq!(delete.family, add.family);
+        assert!(delete.age.is_none());
+        assert!(delete.is_withdraw);
+    }
+}
+
+#[tokio::test]
 async fn amplification_components_encode_per_adr_and_read_back_strictly() {
     use crate::domain::{FragmentMatch, PacketLengthRange};
     let fake = Fake::default();
