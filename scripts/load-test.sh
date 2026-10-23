@@ -98,7 +98,7 @@ start_hey() {
     fi
 }
 
-# Keep raw workloads (including failures); only request bodies are temporary.
+# Keep raw workloads (including failures); remove temporary working files.
 cleanup() {
     if [ -n "$FG_PID" ]; then
         stop_hey "$FG_PID" "$FG_OUTPUT"
@@ -335,7 +335,9 @@ test_metrics_under_load() {
     sleep 2
 
     local metrics_ok=0 metrics_p99="" ingestion_ok=0 background_status=0
-    if run_hey metrics 0 -z "$((duration - 3))s" -c 2 "${AUTH_ARGS[@]}" "$API/metrics"; then
+    local metrics_summary="$WORK_DIR/metrics-summary.txt"
+    local ingestion_summary="$WORK_DIR/ingestion-summary.txt"
+    if run_hey metrics 0 -z "$((duration - 3))s" -c 2 "${AUTH_ARGS[@]}" "$API/metrics" > "$metrics_summary"; then
         metrics_ok=1
         metrics_p99="$_hey_latency_p99"
     fi
@@ -344,13 +346,16 @@ test_metrics_under_load() {
     BG_PID=""
     rm -f "$body_file"
     log "Background ingestion output: $BG_OUTPUT"
-    if parse_hey "$BG_OUTPUT" "$background_status"; then
+    if parse_hey "$BG_OUTPUT" "$background_status" > "$ingestion_summary"; then
         ingestion_ok=1
     fi
 
     if [ "$metrics_ok" -ne 1 ] || [ "$ingestion_ok" -ne 1 ]; then
         fail "Metrics-under-load requires successful metrics AND background ingestion workloads"
-    elif awk -v measured="$metrics_p99" 'BEGIN { exit !(measured < 0.5) }'; then
+        return
+    fi
+    cat "$metrics_summary" "$ingestion_summary"
+    if awk -v measured="$metrics_p99" 'BEGIN { exit !(measured < 0.5) }'; then
         pass "Metrics P99 under load: ${metrics_p99}s (target: <0.5s)"
     else
         fail "Metrics too slow under load: ${metrics_p99}s (target: <0.5s)"

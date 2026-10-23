@@ -247,7 +247,7 @@ class LoadWorkloads(unittest.TestCase):
                     "sleep() { :; }\n"
                     'hey() { [[ "$1" == -disable-redirects ]] || return 99; if [[ "${*: -1}" == */metrics ]]; then cat "$foreground"; else cat "$background"; fi; }\n'
                     "test_metrics_under_load 4\n"
-                    'test -z "$BG_PID"\nprintf "FAILURES=%s\\n" "$FAIL"',
+                    'test -z "$FG_PID$BG_PID"\nprintf "FAILURES=%s\\n" "$FAIL"',
                     directory,
                     self.fast_success if foreground == 200 else self.samples[foreground],
                     self.fast_success if background == 200 else self.samples[background],
@@ -258,6 +258,12 @@ class LoadWorkloads(unittest.TestCase):
                 )
                 self.assertEqual(len(list(Path(directory).glob("*.log"))), 2)
                 self.assertEqual(len(list(Path(directory).glob("*.exit"))), 2)
+                for summary in ("Requests/sec:", "Avg latency:", "P99 latency:"):
+                    self.assertEqual(
+                        result.stdout.count(summary),
+                        2 if foreground == background == 200 else 0,
+                        result.stdout,
+                    )
 
     def test_all_probes_use_existing_auth_without_printing_token(self):
         with tempfile.TemporaryDirectory() as directory:
