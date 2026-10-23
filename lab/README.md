@@ -74,6 +74,11 @@ not program a dataplane here. Recorded results are in the
 The lab does not touch the Compose stack or other labs. It uses its own lab
 names and the management subnets 172.31.231.0/24 and 172.31.232.0/24.
 
+For controller-to-speaker tests without a receiving router, use
+[`scripts/test-rustbgpd.sh`](../scripts/test-rustbgpd.sh) or
+[`scripts/test-gobgp.sh`](../scripts/test-gobgp.sh). They create and clean up
+their own isolated fixtures.
+
 ### Blackhole scenario (rustbgpd)
 
 `just interop-frr-blackhole` runs `run-frr.sh rustbgpd blackhole`, which
@@ -192,7 +197,6 @@ target does not change its existing [speaker ownership binding](../docs/how-to/u
 
 | Lab | Router | Virtualization | Notes |
 |-----|--------|----------------|-------|
-| `frr-flowspec.clab.yml` | FRR | None (native container) | Works everywhere |
 | `cjunos-flowspec.clab.yml` | cJunosEvolved | KVM (Intel or AMD) | **Recommended for Juniper testing** |
 | `vjunos-flowspec.clab.yml` | vJunos-router | Nested KVM | Bare metal only (no VMs) |
 
@@ -259,50 +263,12 @@ docker network disconnect clab-mgmt-evo prefixd-gobgp
 sudo clab destroy -t cjunos-flowspec.clab.yml --cleanup
 ```
 
-## FRR Lab
-
-FRR (Free Range Routing) runs natively in containers without KVM. Works on any Linux host.
-
-### Quick Start
-
-```bash
-# Start prefixd stack first
-docker compose --profile gobgp up -d --pull always --no-build
-
-# Configure configs/gobgp.conf with the FRR neighbor and AS from frr-bgpd.conf;
-# the shipped peer is a documentation placeholder.
-
-# Deploy FRR lab
-cd lab
-sudo clab deploy -t frr-flowspec.clab.yml
-
-# Connect prefixd-gobgp to lab network with a fixed IP
-docker network connect clab-mgmt prefixd-gobgp --ip 172.30.30.10
-
-# Restart GoBGP to pick up FRR neighbor from configs/gobgp.conf
-docker restart prefixd-gobgp
-
-# Verify BGP session
-docker exec prefixd-gobgp gobgp neighbor
-
-# Check FlowSpec in FRR
-docker exec clab-frr-flowspec-router vtysh -c "show bgp ipv4 flowspec"
-```
-
-### Cleanup
-
-```bash
-docker network disconnect clab-mgmt prefixd-gobgp
-sudo clab destroy -t frr-flowspec.clab.yml --cleanup
-```
-
----
-
 ## vJunos-router Lab
 
 > **Warning**: vJunos-router **cannot run inside a VM** (documented Juniper limitation).
 > It requires a bare-metal server with KVM (Intel VMX or AMD-V).
-> If you're running in a VM or cloud instance, use cJunosEvolved or FRR instead.
+> If you're running in a VM or cloud instance, use cJunosEvolved or the
+> [maintained FRR interop lab](#flowspec-interop-lab-maintained).
 
 See `vjunos-flowspec.clab.yml` for the topology definition.
 
@@ -312,27 +278,8 @@ See `vjunos-flowspec.clab.yml` for the topology definition.
 
 | Router | RAM | CPU | Boot Time | KVM Required |
 |--------|-----|-----|-----------|--------------|
-| FRR | 256 MB | 1 core | Instant | No |
 | cJunosEvolved | 8 GB | 4 cores | ~3-5 min | Yes |
 | vJunos-router | 5 GB | 4 cores | ~10 min | Yes (bare metal) |
-
-## Legacy helper script
-
-`test-flowspec.sh` is historical and is **not a current qualification gate**.
-It still defaults to the unpublished `http://localhost:8080`, probes obsolete
-`/healthz`, omits the required event timestamp, builds bearer headers through
-unsafe shell word splitting, and reads mitigation `id` instead of
-`mitigation_id`. Optional router checks also do not fail when receipt is absent.
-Setting an endpoint alone does not repair this flow or authenticate it against
-the default credentials-mode deployment. Repair these checks before relying on
-its announce/withdraw result.
-
-For router receipt, use the [FlowSpec interop lab](#flowspec-interop-lab-maintained).
-For maintained controller tests, use the owned fixtures in
-[`scripts/test-gobgp.sh`](../scripts/test-gobgp.sh) and
-[`scripts/test-rustbgpd.sh`](../scripts/test-rustbgpd.sh). They create separate
-containers and do not attach to this lab. Hardware/vendor qualification still
-needs explicit receiving-router and forwarding checks with retained receipts.
 
 ## Troubleshooting
 
@@ -343,7 +290,8 @@ GoBGP is advertising `inet-unicast` alongside `inet-flow`. Configure the neighbo
 The startup config must use `FXP0ADDR` (not `FXP0ADDRESS`) for the management IP token.
 
 ### vJunos: stuck booting in VM
-vJunos does not support nested virtualization. Use cJunosEvolved or FRR instead.
+vJunos does not support nested virtualization. Use cJunosEvolved or the
+[maintained FRR interop lab](#flowspec-interop-lab-maintained).
 
 ### BGP session stuck in Active/Idle
 Check network connectivity between containers and ensure both sides are on the same Docker network.

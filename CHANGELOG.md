@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signed-in operators. Browser preferences remain available when health fails,
   and a retry keeps the signed-in dashboard and open preferences mounted.
 
+### Removed
+
+- The obsolete GoBGP-only lab helper and standalone FRR topology. Use
+  `just interop-frr` for maintained rustbgpd and GoBGP router receipt tests with
+  isolated fixtures and dated results. The Juniper topologies remain available.
+
 ## [0.22.1] - 2026-10-22
 
 prefixd 0.22.1 makes `PrefixdBlackholeReplaced` clear an hour after the last
