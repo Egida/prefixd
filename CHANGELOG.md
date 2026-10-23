@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The separate fuzz lockfile now follows the current controller dependencies
   and includes compatible fixes for its outdated vulnerable dependencies.
+  Local and CI advisory checks now audit both locked graphs.
 
 - The operator menu now waits for authentication and health to resolve before
   showing controls, avoiding a flash of anonymous browser preferences for

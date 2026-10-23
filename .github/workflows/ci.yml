@@ -297,6 +297,15 @@ jobs:
           denyWarnings: false
           createIssues: false
 
+      - name: Audit fuzz dependencies
+        uses: actions-rust-lang/audit@v1
+        with:
+          file: fuzz/Cargo.lock
+          # Same optional, uncompiled SQLx MySQL dependency as the root lockfile.
+          ignore: RUSTSEC-2023-0071
+          denyWarnings: false
+          createIssues: false
+
       - name: Check Rust dependency policy
         uses: EmbarkStudios/cargo-deny-action@v2
         with:

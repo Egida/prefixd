@@ -96,10 +96,11 @@ frontend:
     bun run test
     bun run build
 
-# Match CI's sole unfixed advisory exception. rsa is an optional, uncompiled
-# sqlx MySQL dependency. Other vulnerabilities fail; advisory warnings stay visible.
+# Audit both locked graphs with CI's sole unfixed exception: rsa is an optional,
+# uncompiled sqlx MySQL dependency. Other vulnerabilities fail; warnings stay visible.
 audit-rust:
     cargo audit --ignore RUSTSEC-2023-0071
+    cargo audit --file fuzz/Cargo.lock --ignore RUSTSEC-2023-0071
 
 # Check the dependency policy alongside the advisory-only audit.
 deny:

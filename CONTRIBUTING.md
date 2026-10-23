@@ -82,8 +82,8 @@ Prose-only changes need affected-link checks and `git diff --check`.
 Use `just --list` for focused checks such as `just fmt`, `just python`,
 `just clippy`, `just test-fast`, `just msrv` or `just frontend`. Recipes expose ordinary
 commands, and CI shares them while retaining separate jobs and speaker versions.
-The Rust advisory recipe keeps CI's explicit unfixed `rsa` exception; warnings
-remain visible.
+The Rust advisory recipe audits both the controller and separate fuzz lockfiles
+with CI's explicit unfixed `rsa` exception; warnings remain visible.
 
 The gate preserves caller `CARGO_BUILD_JOBS` and `CARGO_TARGET_DIR`. On a shared
 host, allocate CPUs and set existing worker controls such as
@@ -185,7 +185,8 @@ visible as warnings. Reassess the exact certificate-data license exceptions on
 version changes. The separate full-lock Rust advisory audit retains the RSA exception for SQLx's
 optional, uncompiled MySQL dependency. Cargo-deny's selected graph does not
 currently include it; passing cargo-deny is not an exception-free full-lock audit.
-The Rust advisory and frontend `bun audit` checks remain required in CI.
+The Rust advisory checks cover both `Cargo.lock` and `fuzz/Cargo.lock`; they
+and the frontend `bun audit` check remain required in CI.
 
 ### Optional Git hooks
 
