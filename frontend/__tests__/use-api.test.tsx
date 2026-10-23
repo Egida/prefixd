@@ -1,6 +1,6 @@
 import { act, cleanup, renderHook, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { useEvents, useMitigation, useMitigations, useSignalGroupDetail, useSignalGroupsPaginated } from "@/hooks/use-api"
+import { useEvents, useMitigation, useMitigations, useSignalGroupDetail, useSignalGroupsPaginated, useSpeakerRoutes } from "@/hooks/use-api"
 import { appWrapper, json, settle, useFakeController } from "./support/fake-controller"
 
 const controller = useFakeController()
@@ -15,6 +15,25 @@ describe("real API hooks", () => {
   afterEach(() => {
     cleanup()
     vi.useRealTimers()
+  })
+
+  it("polls local speaker routes through the real API client every five seconds", async () => {
+    controller.route("GET", "/v1/speaker/routes", () => json({ backend: "gobgp", observation_scope: "accepted_local_flow_spec_rib", routes: [] }))
+    vi.useFakeTimers()
+
+    const { result } = renderHook(() => {
+      const { data } = useSpeakerRoutes()
+
+      return { data }
+    }, wrapper())
+
+    await act(() => vi.advanceTimersByTimeAsync(0))
+    expect(controller.calls("GET", "/v1/speaker/routes")).toHaveLength(1)
+    await act(() => vi.advanceTimersByTimeAsync(4999))
+    expect(result.current.data?.backend).toBe("gobgp")
+    expect(controller.calls("GET", "/v1/speaker/routes")).toHaveLength(1)
+    await act(() => vi.advanceTimersByTimeAsync(1))
+    expect(controller.calls("GET", "/v1/speaker/routes")).toHaveLength(2)
   })
 
   it("polls mitigations only when the five-second refresh clock advances", async () => {

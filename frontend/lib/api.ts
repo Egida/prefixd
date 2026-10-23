@@ -314,6 +314,31 @@ export async function getStats(): Promise<Stats> {
   return fetchApi<Stats>("/v1/stats")
 }
 
+export interface LocalFlowSpecRule {
+  nlri: {
+    dst_prefix: string
+    src_prefix?: string | null
+    protocol: number | null
+    dst_ports: number[]
+    src_ports?: number[]
+    fragment?: FragmentMatch | null
+    packet_length?: PacketLengthRange | null
+  }
+  actions: { action_type: "police" | "discard"; rate_bps?: number }[]
+  /** Injection identity only; absent or empty does not establish controller ownership. */
+  owner?: string
+}
+
+export interface SpeakerRoutesResponse {
+  backend: string
+  observation_scope: "retained_local_flow_spec_intent" | "accepted_local_flow_spec_rib" | "adapter_local_flow_spec"
+  routes: LocalFlowSpecRule[]
+}
+
+export async function getSpeakerRoutes(): Promise<SpeakerRoutesResponse> {
+  return fetchApi<SpeakerRoutesResponse>("/v1/speaker/routes")
+}
+
 export interface MitigationsResponse {
   mitigations: Mitigation[]
   count: number

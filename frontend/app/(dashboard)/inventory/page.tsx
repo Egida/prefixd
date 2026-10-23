@@ -9,6 +9,7 @@ import type { ConfigCustomer } from "@/lib/api"
 import { PageHeader } from "@/components/dashboard/page-header"
 import { Tag } from "@/components/dashboard/status-pill"
 import { EmptyState, ErrorState, LoadingRows } from "@/components/dashboard/states"
+import { LocalFlowSpecInventory } from "@/components/dashboard/local-flowspec-inventory"
 
 function CustomerSection({ customer, defaultOpen }: { customer: ConfigCustomer; defaultOpen: boolean }) {
   const [open, setOpen] = useState(defaultOpen)
@@ -118,7 +119,7 @@ export default function InventoryPage() {
     <div className="space-y-6">
       <PageHeader
         title="Inventory"
-        description="Customers, their services and the IP assets prefixd may protect."
+        description="Observed local FlowSpec routes and the customer assets prefixd may protect."
         meta={data ? (
           <span className="text-muted-foreground tabular-nums">
             {data.total_customers} customers · {data.total_services} services · {data.total_assets} IPs
@@ -126,6 +127,9 @@ export default function InventoryPage() {
         ) : undefined}
       />
 
+      <LocalFlowSpecInventory />
+
+      <h2 className="text-sm font-semibold">Customer inventory</h2>
       <div className="relative max-w-md">
         <Search className="absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
         <Input

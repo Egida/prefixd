@@ -65,6 +65,13 @@ export function useStats() {
   )
 }
 
+export function useSpeakerRoutes() {
+  return useSWR("speaker-routes", api.getSpeakerRoutes, {
+    refreshInterval: REFRESH_INTERVAL,
+    revalidateOnFocus: true,
+  })
+}
+
 /** `null` fetches nothing, for a query that depends on data still loading. */
 export function useMitigations(params?: Parameters<typeof api.getMitigations>[0] | null) {
   const key = params === null ? null : params ? ["mitigations", JSON.stringify(params)] : "mitigations"
