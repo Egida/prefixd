@@ -10,9 +10,11 @@ use crate::config::LogFormat;
 
 fn log_filter(level: &str, environment: Option<EnvFilter>) -> EnvFilter {
     environment.unwrap_or_else(|| {
-        // Preserve the existing ERROR fallback for empty or invalid config.
-        let configured = EnvFilter::new(level);
-        EnvFilter::new(format!("sqlx::postgres::notice=warn,{configured}"))
+        EnvFilter::new(if level == "info" {
+            "info,sqlx::postgres::notice=warn"
+        } else {
+            level
+        })
     })
 }
 
@@ -43,14 +45,21 @@ mod tests {
     fn notice_filter_preserves_levels_and_operator_overrides() {
         for (configured, environment, expected) in [
             ("info", None, [false, true, true, true, true]),
+            ("debug", None, [true, true, true, true, true]),
+            ("warn", None, [false, true, true, false, true]),
+            ("error", None, [false, false, true, false, true]),
+            ("off", None, [false, false, false, false, false]),
+            ("info,sqlx=off", None, [false, false, false, true, true]),
             (
                 "info,sqlx::postgres::notice=info",
                 None,
                 [true, true, true, true, true],
             ),
             ("error", Some("info"), [true, true, true, true, true]),
-            ("", None, [false, true, true, false, true]),
-            ("[", None, [false, true, true, false, true]),
+            ("info", Some("error"), [false, false, true, false, true]),
+            ("info", Some("off"), [false, false, false, false, false]),
+            ("", None, [false, false, true, false, true]),
+            ("[", None, [false, false, true, false, true]),
         ] {
             let filter = log_filter(
                 configured,
@@ -76,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn configured_span_and_field_filters_survive_notice_default() {
+    fn configured_span_and_field_filters_are_preserved() {
         for (configured, other_span_enabled) in [
             ("info,prefixd[notice_probe]=debug", true),
             ("info,prefixd[notice_probe{kind=attack.*}]=debug", false),

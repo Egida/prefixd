@@ -48,7 +48,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Routine PostgreSQL NOTICE messages are quiet by default in native, Compose
   and systemd deployments. Warnings, errors and controller INFO remain enabled;
-  explicit logging filters can restore notice diagnostics.
+  custom logging filters retain their chosen levels and can restore notice
+  diagnostics.
 
 - The separate fuzz lockfile now follows the current controller dependencies
   and includes compatible fixes for its outdated vulnerable dependencies.
