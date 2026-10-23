@@ -280,10 +280,10 @@ FRR:     show bgp ipv4 flowspec
 
 For FRR, `just interop-frr` runs the maintained
 [FlowSpec interop lab](../../lab/README.md#flowspec-interop-lab-maintained)
-for both speakers and writes a dated receipt. The
-[legacy Containerlab examples](../../lab/README.md#legacy-topologies) remain
-GoBGP-specific; their helper script needs repair before it can provide current
-qualification.
+for both speakers and writes a dated receipt; see the [recorded FRR results](#frr--verified-control-plane)
+for their versions and limits. The superseded GoBGP/FRR helper and topology have
+been retired. The remaining [legacy Juniper examples](../../lab/README.md#legacy-topologies)
+are GoBGP-specific and do not qualify rustbgpd.
 
 ## Contributing Test Results
 

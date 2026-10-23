@@ -25,38 +25,36 @@ Polling reconciliation repairs missing rules and supported discard/policing acti
 drift for uniquely owned intent. This assumes one running controller per POP and
 exclusive administration of its physical speaker target.
 
-These controller and peer results do not establish vendor forwarding. TTL expiry
-requires the running controller; a separate speaker can continue advertising
-after prefixd stops. For leased routes, the planned rustbgpd injection lease is
-the remedy: the speaker would remove them when the controller stops renewing.
+Manual and detector blackholes have shipped on rustbgpd behind the stricter
+guardrails in [ADR 027](docs/adr/027-blackhole-mitigations.md). A PostgreSQL
+advisory-lock fence keeps a second controller for the same owner in standby when
+both share the database. Separate databases are outside that fence.
+
+TTL expiry requires the running controller for unleased rules; a separate
+speaker can continue advertising after prefixd stops. With rustbgpd 0.79.0 or
+later, opt-in [leased blackholes](docs/reference/configuration.md#leased-blackholes)
+(`blackhole.leased`) and [leased FlowSpec](docs/reference/configuration.md#leased-flowspec)
+(`bgp.rustbgpd.leased_flowspec`) let the speaker remove leased intent within one
+lease after renewal stops. Existing unleased rules stay unleased until withdrawn
+or expired. Neither local intent nor peer health establishes vendor forwarding.
+
+Controller inventory enumeration and the public mitigation, event, audit and
+signal-group cursors preserve tied timestamps. Complete frontend lists and
+server-backed pagination remain work below.
 
 ## Near-term work
 
-- Add blackhole (RTBH) host routes as a second mitigation kind, as decided in
-  [ADR 027](docs/adr/027-blackhole-mitigations.md). The design is accepted and
-  manual and detector blackholes have merged, unleased, behind stricter
-  guardrails than FlowSpec. Enforced detector blackholes are an explicit
-  opt-in; until the rustbgpd owner-scoped injection lease ships, a controller
-  stopped for a long time leaves them announced, mitigated by orphan cleanup
-  on return and down alerts. The lease is the later hardening step.
-  Qualification is at FRR in the containerlab harness. FastNetMon Community
-  users mostly mitigate with blackholes.
-- Fence duplicate controllers with a PostgreSQL advisory lock keyed on the
-  controller's owner. When controllers share a database, one is active per
-  owner and the others wait in standby to take over. The fence protects
-  FlowSpec as well as blackholes. Controllers with separate databases are
-  outside the lock.
 - Add stronger announcement acknowledgements and a complete desired/acknowledged
-  ledger. Shared targets also need ownership evidence that distinguishes another
-  controller's local rule with the same match. That evidence is planned to
-  arrive through the owner-scoped injection lease proposed upstream as rustbgpd
-  ADR-0141. The controller fence covers duplicate controllers on one database;
-  it does not make shared targets supported.
+  ledger, including unleased and GoBGP paths. Opt-in rustbgpd injection owners
+  and lease recovery do not complete that ledger or make shared targets
+  supported. The controller fence covers duplicate controllers on one database;
+  it does not fence other writers to the physical speaker.
 - Qualify router receipt and traffic enforcement separately for each tested
   backend, vendor, software version and topology. Preserve historical GoBGP
   results; qualify rustbgpd against FRR/Juniper and Arista/Cisco independently.
-- Finish complete-list pagination and tied-timestamp cursor correctness, then
-  verify the operator workflow at the tested scale and accessibility settings.
+- Replace bounded frontend subsets with complete server-backed filtering and
+  pagination, then verify the operator workflow at the tested scale and
+  accessibility settings.
 - Keep input validation, authentication, dependency audits and native lint gates
   strict. Address concrete findings without adding speculative configuration.
 - Keep documentation and release guidance aligned with source. Exercise the
