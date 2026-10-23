@@ -26,8 +26,9 @@ release. If a tag can't release, fix forward with the next patch version.
    ```
 
    [`scripts/release-prepare.sh`](../../scripts/release-prepare.sh) sets the
-   Cargo.toml version, runs `cargo update --workspace` and checks that
-   Cargo.lock changed only the `prefixd` entry. It rolls `## [Unreleased]` into
+   Cargo.toml version, runs `cargo update --workspace` for the controller and
+   fuzz manifests, and checks that both Cargo.lock files changed only the
+   `prefixd` entry. It rolls `## [Unreleased]` into
    `## [X.Y.Z] - <today, UTC>` under a fresh empty `## [Unreleased]`, moves the
    compare links at the end of the CHANGELOG and previews the release body. It
    refuses a dirty tree, a version that isn't greater than the current one, and
@@ -197,7 +198,9 @@ is missing, undated or empty.
 `just release-prepare` covers the first two; the rest stay manual.
 
 - [ ] `Cargo.toml` `[package] version` is `X.Y.Z`.
-- [ ] `git diff Cargo.lock` changes only the `prefixd` package version.
+- [ ] `git diff -- Cargo.lock fuzz/Cargo.lock` changes only the `prefixd`
+      package version in each lockfile. The locked scheduled fuzz smoke must
+      still resolve after the bump.
 - [ ] The README **Status** line names the new release and is accurate.
 - [ ] The [upgrade guide](../how-to/upgrading.md) has a section for the
       previous release → `X.Y.Z`.

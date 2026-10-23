@@ -1,6 +1,7 @@
 # Local verification. Tool installation, publication and browser fixtures are separate.
 export RUSTUP_AUTO_INSTALL := "0"
 msrv_toolchain := "1.89.0"
+fuzz_toolchain := "nightly-2026-07-07"
 ruff_version := "0.16.0"
 prometheus_image := "prom/prometheus:v3.15.0"
 
@@ -67,6 +68,16 @@ test:
     just test-gobgp
     just test-all
 
+# Execute every Criterion body once, without collecting performance measurements.
+bench-smoke:
+    cargo test --locked --bench benchmarks -- --test
+
+# Requires the pinned nightly and cargo-fuzz 0.13.2; no speaker or database is used.
+fuzz-smoke:
+    cargo +{{fuzz_toolchain}} fetch --locked --manifest-path fuzz/Cargo.toml
+    cargo +{{fuzz_toolchain}} fuzz run --dev --target-dir "${CARGO_TARGET_DIR:-target}/fuzz-smoke" fuzz_prefix_parse -- -max_total_time=30 -timeout=5 -rss_limit_mb=2048 -max_len=4096
+    cargo +{{fuzz_toolchain}} fuzz run --dev --target-dir "${CARGO_TARGET_DIR:-target}/fuzz-smoke" fuzz_nlri_decode -- -max_total_time=30 -timeout=5 -rss_limit_mb=2048 -max_len=4096
+
 # Requires this exact installed toolchain; never installs one implicitly.
 msrv:
     cargo +{{msrv_toolchain}} check --locked --bins --features bgp-rustbgpd
@@ -85,10 +96,11 @@ frontend:
     bun run test
     bun run build
 
-# Match CI's sole unfixed advisory exception. rsa is an optional, uncompiled
-# sqlx MySQL dependency. Other vulnerabilities fail; advisory warnings stay visible.
+# Audit both locked graphs with CI's sole unfixed exception: rsa is an optional,
+# uncompiled sqlx MySQL dependency. Other vulnerabilities fail; warnings stay visible.
 audit-rust:
     cargo audit --ignore RUSTSEC-2023-0071
+    cargo audit --file fuzz/Cargo.lock --ignore RUSTSEC-2023-0071
 
 # Check the dependency policy alongside the advisory-only audit.
 deny:
