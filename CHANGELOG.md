@@ -46,6 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- GoBGP FlowSpec paths now carry their injection timestamp, so route age starts
+  at announcement instead of Unix epoch.
+
 - The separate fuzz lockfile now follows the current controller dependencies
   and includes compatible fixes for its outdated vulnerable dependencies.
   Local and CI advisory checks now audit both locked graphs.
