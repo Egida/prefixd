@@ -9,3 +9,6 @@ lab/clab-*/
 lab/interop/clab-*/
 lab/interop/.run/
 __pycache__/
+
+# Local repository guidance
+AGENTS.md
