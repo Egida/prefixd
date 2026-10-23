@@ -33,12 +33,15 @@ Each run prints a retained result directory containing raw `hey` output and its
 exit status for every foreground and background workload. Empty/malformed
 output, missing latency data, request errors or any non-2xx response reject the
 workload before throughput/latency checks. Status totals must match the complete
-histogram, and fixed-request bursts must account for every requested response.
+histogram and the exact attempt count in a generator-written completion record
+after the error section. Fixed-request bursts must account for every requested
+response. Interrupted foreground and background workloads retain their exit
+status and partial output without qualifying.
 [`hey` 0.1.4 retains at most 1,000,000 response records](https://github.com/rakyll/hey/blob/v0.1.4/requester/report.go#L28-L29);
-reaching that limit leaves the remaining statuses unobservable, so the helper
-cannot qualify the workload. Redirect following is disabled, so a redirect to a
-successful page cannot qualify the original request. Failures remain in the
-result directory; temporary request bodies are removed and owned background
+the helper conservatively refuses reports at that retention limit, beyond which
+response statuses are unobservable. Redirect following is disabled, so a
+redirect to a successful page cannot qualify the original request. Failures
+remain in the result directory; temporary request bodies are removed and owned background
 work is killed and reaped on exit. Keep failed attempts alongside later runs.
 
 Even all-2xx HTTP responses prove only HTTP request throughput. Event responses

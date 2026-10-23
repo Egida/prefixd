@@ -3,6 +3,7 @@
 
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -19,12 +20,18 @@ SCRIPT = ROOT / "scripts/load-test.sh"
 
 
 class Handler(BaseHTTPRequestHandler):
+    mixed_count = 0
+
     def do_GET(self):
-        if self.path == "/transport":
+        mixed_error = False
+        if self.path == "/mixed-transport":
+            Handler.mixed_count += 1
+            mixed_error = Handler.mixed_count % 2 == 1
+        if self.path == "/transport" or mixed_error:
             self.connection.shutdown(socket.SHUT_RDWR)
             self.connection.close()
             return
-        self.send_response(int(self.path[1:]))
+        self.send_response(200 if self.path == "/mixed-transport" else int(self.path[1:]))
         if self.path == "/302":
             self.send_header("Location", "/200")
         self.send_header("Content-Length", "0")
@@ -41,12 +48,25 @@ class LoadWorkloads(unittest.TestCase):
             raise RuntimeError("hey is required; install it before running this check")
         cls.receipts = Path(tempfile.mkdtemp(prefix="prefixd-load-selftest-"))
         print(f"Raw loopback samples retained in: {cls.receipts}", flush=True)
+        template = subprocess.run(
+            [
+                "bash",
+                "-c",
+                'source "$1"; printf "%s" "$HEY_TEMPLATE"',
+                "load-selftest",
+                str(SCRIPT),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         thread = threading.Thread(target=server.serve_forever)
         thread.start()
         try:
             cls.samples = {}
-            for status in (200, 202, 302, 401, 403, 429, 500, "transport"):
+            for status in (200, 202, 302, 401, 403, 429, 500, "transport", "mixed-transport"):
                 output = cls.receipts / f"hey-{status}.log"
                 with output.open("w") as log:
                     try:
@@ -54,8 +74,10 @@ class LoadWorkloads(unittest.TestCase):
                             [
                                 "hey",
                                 "-disable-redirects",
+                                "-o",
+                                template,
                                 "-n",
-                                "100",
+                                "400" if status == "mixed-transport" else "100",
                                 "-c",
                                 "1",
                                 "-t",
@@ -141,6 +163,10 @@ class LoadWorkloads(unittest.TestCase):
             "bad-latency": success.replace("Average:", "Average: NaN"),
             "duplicate-summary": success + "Summary:\n",
             "request-error": success + "Error distribution:\n  [1] connection refused\n",
+            "missing-completion": success.split("PREFIXD_HEY_COMPLETE")[0],
+            "truncated-completion-count": success.replace("100 END", "1"),
+            "duplicate-completion": success + "PREFIXD_HEY_COMPLETE 100 END\n",
+            "after-completion": success + "unexpected tail\n",
         }
         for label, output in controls.items():
             with self.subTest(label=label):
@@ -149,6 +175,20 @@ class LoadWorkloads(unittest.TestCase):
                 self.assertEqual(self.qualify(path).returncode, 1, label)
         self.assertEqual(self.qualify(self.samples[200], 7).returncode, 1)
 
+    def test_timed_mixed_transport_report_requires_exact_attempts_and_completion(self):
+        mixed = self.samples["mixed-transport"].read_text()
+        self.assertIn("99%", mixed)
+        self.assertIn("PREFIXD_HEY_COMPLETE 400 END", mixed)
+        prefix = mixed.split("Error distribution:\n", 1)[0]
+        for label, output in {
+            "truncated-before-errors": prefix,
+            "hidden-errors-with-completion": prefix + "PREFIXD_HEY_COMPLETE 400 END\n",
+        }.items():
+            with self.subTest(label=label):
+                path = self.receipts / f"control-{label}.log"
+                path.write_text(output)
+                self.assertEqual(self.qualify(path).returncode, 1)
+
     def test_report_sampling_limit_cannot_qualify_an_unobserved_tail(self):
         success = self.fast_success.read_text()
         zero_histogram = re.sub(r"(?m)^(\s+[0-9.]+\s+)\[[0-9]+\]", r"\g<1>[0]", success)
@@ -156,6 +196,9 @@ class LoadWorkloads(unittest.TestCase):
             with self.subTest(count=count):
                 output = zero_histogram.replace("[0]", f"[{count}]", 1)
                 output = re.sub(r"(\[200\]\s+)100 responses", rf"\g<1>{count} responses", output)
+                output = output.replace(
+                    "PREFIXD_HEY_COMPLETE 100 END", f"PREFIXD_HEY_COMPLETE {count} END"
+                )
                 path = self.receipts / f"control-report-limit-{count}.log"
                 path.write_text(output)
                 self.assertEqual(self.qualify(path).returncode, 0 if count < 1000000 else 1)
@@ -243,6 +286,148 @@ class LoadWorkloads(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.check_failed_workload_cleanup(mode)
 
+    def reap_owned_shell(self, process, pid_file):
+        # Keep Bash alive to reap its child even when the regression fails.
+        if pid_file.exists():
+            pid = int(pid_file.read_text())
+            with suppress(ProcessLookupError):
+                if os.getpgid(pid) == process.pid:
+                    os.kill(pid, signal.SIGKILL)
+        if process.poll() is None:
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=10)
+
+    def test_signals_preserve_foreground_status_and_reap_owned_load(self):
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=sig.name):
+                root = self.receipts / sig.name
+                root.mkdir()
+                ready = root / "ready"
+                parent_ready = root / "parent-ready"
+                os.mkfifo(ready)
+                os.mkfifo(parent_ready)
+                descriptor = os.open(ready, os.O_RDONLY | os.O_NONBLOCK)
+                parent_descriptor = os.open(parent_ready, os.O_RDONLY | os.O_NONBLOCK)
+                with (root / "parent.log").open("w") as log:
+                    process = subprocess.Popen(
+                        [
+                            "bash",
+                            "-c",
+                            'source "$1"\nfixture_root=$2; export TMPDIR=$2\n'
+                            "curl() { echo '{\"total_events\":1}'; }\n"
+                            "hey() {\n"
+                            '  trap "" TERM INT\n'
+                            '  printf "%s\\n" "$BASHPID" > "$fixture_root/child.pid"\n'
+                            '  printf "partial workload\\n"\n'
+                            '  printf "ready\\n" > "$fixture_root/ready"\n'
+                            "  exec sleep 60\n}\n"
+                            "wait() {\n"
+                            '  if [[ ! -f "$fixture_root/parent-wait.pid" ]]; then\n'
+                            '    printf "%s\\n" "$1" > "$fixture_root/parent-wait.pid"\n'
+                            '    printf "ready\\n" > "$fixture_root/parent-ready"\n'
+                            '  fi\n  builtin wait "$@"\n}\nmain quick',
+                            "load-selftest",
+                            str(SCRIPT),
+                            str(root),
+                        ],
+                        cwd=ROOT,
+                        start_new_session=True,
+                        stdout=log,
+                        stderr=subprocess.STDOUT,
+                    )
+                    try:
+                        readable, _, _ = select.select([descriptor], [], [], 10)
+                        self.assertTrue(readable, "owned foreground did not become ready")
+                        self.assertEqual(os.read(descriptor, 6), b"ready\n")
+                        readable, _, _ = select.select([parent_descriptor], [], [], 10)
+                        self.assertTrue(readable, "parent did not wait for registered child")
+                        self.assertEqual(os.read(parent_descriptor, 6), b"ready\n")
+                        self.assertEqual(
+                            (root / "parent-wait.pid").read_text(),
+                            (root / "child.pid").read_text(),
+                        )
+                        os.kill(process.pid, sig)
+                        self.assertEqual(process.wait(timeout=10), 128 + sig)
+                    finally:
+                        if process.poll() is None:
+                            with suppress(ProcessLookupError):
+                                os.kill(process.pid, signal.SIGTERM)
+                        self.reap_owned_shell(process, root / "child.pid")
+                        os.close(descriptor)
+                        os.close(parent_descriptor)
+                        ready.unlink()
+                        parent_ready.unlink()
+                        (root / "parent.exit").write_text(f"{process.returncode}\n")
+                (result_dir,) = root.glob("prefixd-load-results-*")
+                output = result_dir / "01-health.log"
+                self.assertEqual(output.read_text(), "partial workload\n")
+                self.assertEqual(output.with_suffix(".exit").read_text(), "137\n")
+                self.assertEqual(self.qualify(output, 137).returncode, 1)
+                self.assertFalse(list(root.glob("prefixd-load-body-*")))
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(int((root / "child.pid").read_text()), 0)
+
+    def test_signals_during_foreground_and_background_registration_are_deferred(self):
+        for role in ("FG_PID", "BG_PID"):
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                with self.subTest(role=role, signal=sig.name):
+                    root = self.receipts / f"register-{role}-{sig.name}"
+                    root.mkdir()
+                    with (root / "parent.log").open("w") as log:
+                        process = subprocess.Popen(
+                            [
+                                "bash",
+                                "-c",
+                                'source "$1"\nRESULTS_DIR=$2; WORK_DIR=$2/body\n'
+                                'mkdir "$WORK_DIR"\nfixture_root=$2; pid_role=$3; probe_signal=$4\n'
+                                "trap cleanup EXIT\ntrap 'handle_signal 143' TERM\n"
+                                "trap 'handle_signal 130' INT\n"
+                                'hey() { trap "" TERM INT; exec sleep 60; }\n'
+                                'if [[ "$pid_role" == FG_PID ]]; then\n'
+                                "  probe_receipt=$2/01-health.exit\n"
+                                "else probe_receipt=$2/01-metrics-ingestion.exit; fi\n"
+                                "printf() {\n"
+                                '  if [[ "$1" == -v && "$2" == "$pid_role" ]]; then\n'
+                                "    probe_child=$4\n"
+                                '    builtin printf "%s\\n" "$probe_child" > "$fixture_root/child.pid"\n'
+                                # The harness still reaps the child if deferred exit regresses.
+                                '    trap \'cleanup; if [[ ! -f "$probe_receipt" ]]; then '
+                                'kill -KILL "$probe_child" 2>/dev/null || true; '
+                                'builtin wait "$probe_child" 2>/dev/null || true; fi\' EXIT\n'
+                                '    kill -s "$probe_signal" "$BASHPID"\n'
+                                '  fi\n  builtin printf "$@"\n}\n'
+                                'if [[ "$pid_role" == FG_PID ]]; then test_health_throughput 4 1\n'
+                                "else test_metrics_under_load 4; fi",
+                                "load-selftest",
+                                str(SCRIPT),
+                                str(root),
+                                role,
+                                sig.name,
+                            ],
+                            cwd=ROOT,
+                            start_new_session=True,
+                            stdout=log,
+                            stderr=subprocess.STDOUT,
+                        )
+                        try:
+                            self.assertEqual(process.wait(timeout=10), 128 + sig)
+                        finally:
+                            self.reap_owned_shell(process, root / "child.pid")
+                            (root / "parent.exit").write_text(f"{process.returncode}\n")
+                    output = root / (
+                        "01-health.log" if role == "FG_PID" else "01-metrics-ingestion.log"
+                    )
+                    self.assertTrue(output.exists())
+                    self.assertEqual(output.with_suffix(".exit").read_text(), "137\n")
+                    self.assertEqual(self.qualify(output, 137).returncode, 1)
+                    self.assertFalse((root / "body").exists())
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(int((root / "child.pid").read_text()), 0)
+
     def check_failed_workload_cleanup(self, mode):
         root = self.receipts / f"cleanup-{mode}"
         root.mkdir()
@@ -285,19 +470,7 @@ class LoadWorkloads(unittest.TestCase):
             try:
                 self.assertEqual(process.wait(timeout=10), 1)
             finally:
-                # Keep Bash alive to reap its child even when the regression fails.
-                if pid_file.exists():
-                    pid = int(pid_file.read_text())
-                    with suppress(ProcessLookupError):
-                        if os.getpgid(pid) == process.pid:
-                            os.kill(pid, signal.SIGKILL)
-                if process.poll() is None:
-                    try:
-                        process.wait(timeout=10)
-                    except subprocess.TimeoutExpired:
-                        with suppress(ProcessLookupError):
-                            os.killpg(process.pid, signal.SIGKILL)
-                        process.wait(timeout=10)
+                self.reap_owned_shell(process, pid_file)
                 ready.unlink(missing_ok=True)
                 (root / "parent.exit").write_text(f"{process.returncode}\n")
         self.assertFalse(work.exists())

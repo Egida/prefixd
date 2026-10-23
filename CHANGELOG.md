@@ -49,7 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - HTTP load checks reject request errors, non-2xx responses and incomplete output
   before qualifying latency or throughput, retain foreground/background results,
   authenticate every probe, and reap aborted background generators. Response
-  counts must reconcile; sampled or short fixed-request runs cannot qualify.
+  counts must reconcile with a generator-written completion record; sampled,
+  truncated or short fixed-request runs cannot qualify. Interrupted foreground
+  workloads retain their exit status and partial output.
   Historical benchmark claims now state their missing qualification and
   distinguish HTTP success from mitigation enforcement.
 

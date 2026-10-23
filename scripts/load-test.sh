@@ -18,7 +18,34 @@ RESULTS_DIR=""
 WORK_DIR=""
 BG_PID=""
 BG_OUTPUT=""
+FG_PID=""
+FG_OUTPUT=""
+REGISTERING_HEY=0
+SIGNAL_STATUS=0
 LOG_SEQUENCE=0
+
+# The generator writes the final attempt count after its complete error section.
+# Go template variables must remain literal until hey renders the report.
+# shellcheck disable=SC2016
+HEY_TEMPLATE='
+Summary:
+  Total: {{formatNumber .Total.Seconds}} secs
+  Slowest: {{formatNumber .Slowest}} secs
+  Fastest: {{formatNumber .Fastest}} secs
+  Average: {{formatNumber .Average}} secs
+  Requests/sec: {{formatNumber .Rps}}
+
+Response time histogram:
+{{histogram .Histogram}}
+Latency distribution:{{range .LatencyDistribution}}
+  {{.Percentage}}%% in {{formatNumber .Latency}} secs{{end}}
+
+Status code distribution:{{range $code,$num := .StatusCodeDist}}
+  [{{$code}}] {{$num}} responses{{end}}
+{{if gt (len .ErrorDist) 0}}Error distribution:{{range $err,$num := .ErrorDist}}
+  [{{$num}}] {{$err}}{{end}}{{end}}
+PREFIXD_HEY_COMPLETE {{.NumRes}} END
+'
 
 if [ -n "${PREFIXD_API_TOKEN:-}" ]; then
     AUTH_ARGS=(-H "Authorization: Bearer ${PREFIXD_API_TOKEN}")
@@ -41,14 +68,44 @@ check_prereqs() {
     fi
 }
 
+stop_hey() {
+    local pid="$1" output="$2" status=0
+    # An aborted workload cannot qualify; do not wait for SIGTERM handling.
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || status=$?
+    printf '%s\n' "$status" > "${output%.log}.exit"
+}
+
+handle_signal() {
+    SIGNAL_STATUS="$1"
+    if [ "$REGISTERING_HEY" -eq 0 ]; then
+        exit "$SIGNAL_STATUS"
+    fi
+    return 0
+}
+
+start_hey() {
+    local pid_variable="$1" output="$2"
+    shift 2
+    : > "$output"
+    # Defer trapped exit only until the owned child's PID is registered.
+    REGISTERING_HEY=1
+    hey -disable-redirects -o "$HEY_TEMPLATE" "$@" > "$output" 2>&1 &
+    printf -v "$pid_variable" '%s' "$!"
+    REGISTERING_HEY=0
+    if [ "$SIGNAL_STATUS" -ne 0 ]; then
+        exit "$SIGNAL_STATUS"
+    fi
+}
+
 # Keep raw workloads (including failures); only request bodies are temporary.
 cleanup() {
+    if [ -n "$FG_PID" ]; then
+        stop_hey "$FG_PID" "$FG_OUTPUT"
+        FG_PID=""
+    fi
     if [ -n "$BG_PID" ]; then
-        # An aborted workload cannot qualify; do not wait for SIGTERM handling.
-        kill -KILL "$BG_PID" 2>/dev/null || true
-        local status=0
-        wait "$BG_PID" 2>/dev/null || status=$?
-        printf '%s\n' "$status" > "${BG_OUTPUT%.log}.exit"
+        stop_hey "$BG_PID" "$BG_OUTPUT"
         BG_PID=""
     fi
     if [ -n "$WORK_DIR" ]; then
@@ -78,6 +135,11 @@ parse_hey() {
     if ! metrics=$(awk -v expected="$expected" '
         function number(value) {
             return value ~ /^[0-9]+([.][0-9]+)?$/
+        }
+        ended && NF { bad=1; next }
+        $1 == "PREFIXD_HEY_COMPLETE" {
+            if (NF != 3 || $2 !~ /^[0-9]+$/ || $3 != "END") bad=1
+            endings++; attempts=$2+0; ended=1; next
         }
         /^Summary:$/ { summaries++; next }
         $1 == "Requests/sec:" {
@@ -120,7 +182,7 @@ parse_hey() {
             if (bad || summaries != 1 || rates != 1 || averages != 1 ||
                 percentiles != 1 || histograms != 1 || buckets != 11 ||
                 distributions != 1 || responses <= 0 || completed >= 1000000 ||
-                responses != completed ||
+                responses != completed || endings != 1 || responses != attempts ||
                 (expected > 0 && responses != expected)) exit 1
             print rate, average, p99
         }
@@ -139,8 +201,11 @@ run_hey() {
     shift 2
     next_output "$label"
     local output="$HEY_OUTPUT"
-    hey -disable-redirects "$@" > "$output" 2>&1 || status=$?
+    FG_OUTPUT="$output"
+    start_hey FG_PID "$output" "$@"
+    wait "$FG_PID" || status=$?
     printf '%s\n' "$status" > "${output%.log}.exit"
+    FG_PID=""
     log "Raw workload output: $output"
     parse_hey "$output" "$status" "$expected"
 }
@@ -264,11 +329,9 @@ test_metrics_under_load() {
 
     next_output metrics-ingestion
     BG_OUTPUT="$HEY_OUTPUT"
-    : > "$BG_OUTPUT"
-    hey -disable-redirects -z "${duration}s" -c 5 -m POST \
+    start_hey BG_PID "$BG_OUTPUT" -z "${duration}s" -c 5 -m POST \
         -H "Content-Type: application/json" "${AUTH_ARGS[@]}" \
-        -D "$body_file" "$API/v1/events" > "$BG_OUTPUT" 2>&1 &
-    BG_PID=$!
+        -D "$body_file" "$API/v1/events"
     sleep 2
 
     local metrics_ok=0 metrics_p99="" ingestion_ok=0 background_status=0
@@ -277,8 +340,8 @@ test_metrics_under_load() {
         metrics_p99="$_hey_latency_p99"
     fi
     wait "$BG_PID" || background_status=$?
-    BG_PID=""
     printf '%s\n' "$background_status" > "${BG_OUTPUT%.log}.exit"
+    BG_PID=""
     rm -f "$body_file"
     log "Background ingestion output: $BG_OUTPUT"
     if parse_hey "$BG_OUTPUT" "$background_status"; then
@@ -389,8 +452,8 @@ main() {
     RESULTS_DIR=$(mktemp -d "${TMPDIR:-/tmp}/prefixd-load-results-XXXXXX")
     WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/prefixd-load-body-XXXXXX")
     trap cleanup EXIT
-    trap 'exit 130' INT
-    trap 'exit 143' TERM
+    trap 'handle_signal 130' INT
+    trap 'handle_signal 143' TERM
     log "Raw workload results retained in: $RESULTS_DIR"
 
     check_prereqs
