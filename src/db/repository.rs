@@ -703,7 +703,112 @@ impl RepositoryTrait for Repository {
         Ok(())
     }
 
+    async fn extend_flowspec_lifetime(
+        &self,
+        request: &crate::domain::LifetimeExtension,
+        fence: &crate::fence::ControllerFence,
+    ) -> Result<crate::domain::LifetimeExtensionOutcome> {
+        use crate::domain::LifetimeExtensionOutcome;
+
+        // Bound preparation, but never cancel an in-flight COMMIT.
+        let (tx, outcome) = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut tx = self.pool.begin_with("BEGIN ISOLATION LEVEL READ COMMITTED").await?;
+            sqlx::query("SET LOCAL statement_timeout = '4s'")
+                .execute(&mut *tx).await?;
+            sqlx::query("SET LOCAL lock_timeout = '3s'")
+                .execute(&mut *tx).await?;
+            // Protect both a registered row and the absent-row mock case from
+            // registration/transfer while this bounded update is in progress.
+            sqlx::query("LOCK TABLE speaker_pop_bindings IN SHARE MODE")
+                .execute(&mut *tx).await?;
+            let target: Option<Uuid> = sqlx::query_scalar(
+                "SELECT target_id FROM speaker_pop_bindings WHERE pop = $1",
+            ).bind(&request.expected.pop).fetch_optional(&mut *tx).await?;
+            if target != request.target_id {
+                return Err(crate::domain::binding_mismatch());
+            }
+            let row = sqlx::query_as::<_, MitigationRow>(
+                "SELECT * FROM mitigations WHERE mitigation_id = $1 FOR UPDATE",
+            ).bind(request.expected.mitigation_id).fetch_optional(&mut *tx).await?
+                .ok_or(PrefixdError::MitigationNotFound(request.expected.mitigation_id))?;
+            let current = Mitigation::from_row(row)?;
+            // now() is the transaction-start clock and would revive a rule that
+            // expired while SELECT FOR UPDATE waited. Read the clock afterwards.
+            let now: DateTime<Utc> = sqlx::query_scalar("SELECT clock_timestamp()")
+                .fetch_one(&mut *tx).await?;
+            request.validate_current(&current, now)?;
+            let (withdrawing, safelisted): (bool, bool) = sqlx::query_as(
+                "SELECT EXISTS (SELECT 1 FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL), EXISTS (SELECT 1 FROM safelist WHERE $2::inet && prefix::inet)",
+            ).bind(current.mitigation_id).bind(&current.match_criteria.dst_prefix)
+                .fetch_one(&mut *tx).await?;
+            if withdrawing {
+                return Err(PrefixdError::Conflict(
+                    "mitigation has a pending withdrawal".into(),
+                ));
+            }
+            // Same 422 refusal as preparation for a safelist that landed meanwhile.
+            if safelisted {
+                return Err(crate::domain::extension_safelisted(&current.match_criteria.dst_prefix));
+            }
+            request.ensure_fence(fence)?;
+            // Decide from the exact sample used for the write. A backward wall-
+            // clock step between reads must never shorten the existing horizon.
+            let row = sqlx::query_as::<_, MitigationRow>(
+                r#"WITH timing AS MATERIALIZED (SELECT clock_timestamp() AS checked_at)
+                UPDATE mitigations m SET
+                    expires_at = timing.checked_at + make_interval(secs => $4::double precision),
+                    updated_at = timing.checked_at
+                FROM timing
+                WHERE mitigation_id = $1 AND updated_at = $2 AND expires_at = $3
+                  AND pop = $5 AND status IN ('active', 'escalated')
+                  AND action_type IN ('discard', 'police') AND origin_mode = 'enforced'
+                  AND withdrawn_at IS NULL AND expires_at > timing.checked_at
+                  AND expires_at < timing.checked_at + make_interval(secs => $4::double precision)
+                  AND NOT EXISTS (SELECT 1 FROM withdrawal_requests WHERE mitigation_id = $1 AND completed_at IS NULL)
+                  AND NOT EXISTS (SELECT 1 FROM safelist WHERE $6::inet && prefix::inet)
+                RETURNING m.*"#,
+            ).bind(current.mitigation_id).bind(current.updated_at).bind(current.expires_at)
+                .bind(f64::from(request.ttl_seconds)).bind(&current.pop)
+                .bind(&current.match_criteria.dst_prefix)
+                .fetch_optional(&mut *tx).await?;
+            let extended = row.is_some();
+            let updated = if let Some(row) = row {
+                let updated = Mitigation::from_row(row)?;
+                Self::insert_audit_on(&mut tx, &request.audit(&updated)).await?;
+                updated
+            } else {
+                current
+            };
+            // Audit insertion may itself await. Refuse and roll back if the
+            // original live authorization elapsed or deletion/safety changed.
+            let (eligible, safelisted): (bool, bool) = sqlx::query_as(
+                "SELECT $1::timestamptz > clock_timestamp() AND NOT EXISTS (SELECT 1 FROM withdrawal_requests WHERE mitigation_id = $2 AND completed_at IS NULL), EXISTS (SELECT 1 FROM safelist WHERE $3::inet && prefix::inet)",
+            ).bind(request.expected.expires_at).bind(updated.mitigation_id)
+                .bind(&updated.match_criteria.dst_prefix).fetch_one(&mut *tx).await?;
+            if !eligible {
+                return Err(PrefixdError::Conflict(
+                    "mitigation expired or began withdrawal during lifetime update".into(),
+                ));
+            }
+            if safelisted {
+                return Err(crate::domain::extension_safelisted(&updated.match_criteria.dst_prefix));
+            }
+            request.ensure_fence(fence)?;
+            let outcome = LifetimeExtensionOutcome {
+                previous_expires_at: request.expected.expires_at,
+                mitigation: updated,
+                extended,
+            };
+            Ok::<_, PrefixdError>((tx, outcome))
+        }).await.map_err(|_| PrefixdError::Internal(
+            "lifetime update timed out; refresh mitigation and audit before retrying".into(),
+        ))??;
+        tx.commit().await?;
+        Ok(outcome)
+    }
+
     async fn get_mitigation(&self, id: Uuid) -> Result<Option<Mitigation>> {
+        let mut connection = self.bounded_read_connection().await?;
         let row = sqlx::query_as::<_, MitigationRow>(
             r#"
             SELECT mitigation_id, scope_hash, pop, customer_id, service_id, victim_ip, vector,
@@ -715,7 +820,7 @@ impl RepositoryTrait for Repository {
             "#,
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *connection)
         .await?;
         match row {
             Some(r) => Ok(Some(Mitigation::from_row(r)?)),

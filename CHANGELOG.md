@@ -35,6 +35,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs in a read-only transaction with a transaction-local server deadline,
   releasing blocked queries and returning its connection to the pool.
 
+- Operators can extend an active enforced FlowSpec rule from its detail page or
+  `POST /v1/mitigations/{id}/extend`, with a required reason and atomic old/new
+  expiry audit. Remaining lifetime stays bounded and never shortens the saved
+  horizon; an unchanged horizon writes no revision or audit. Fresh ownership,
+  safelist, binding and match-policy checks protect the exact existing rule,
+  without creating another mitigation, consuming a quota slot or mutating the
+  speaker. Blackholes, simulations, pending and expired intent are refused.
+  Each read-only preparation read runs in a read-only transaction with a
+  transaction-local server deadline, so timed-out checks release blocked queries
+  and return their connections to the shared database pool.
+
 - Manual FlowSpec discard and police rules accept aligned IPv4/IPv6 destination
   CIDRs in `victim_ip` when operators deliberately relax existing prefix bounds.
   Whole-prefix customer ownership, all safelist overlaps and fresh repair checks
