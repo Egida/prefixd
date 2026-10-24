@@ -517,6 +517,10 @@ pub struct CreateMitigationRequest {
     )]
     operator_id: String,
     reason: String,
+    /// Destination address or exact network CIDR for discard/police. Non-host
+    /// networks need relaxed destination prefix bounds and unambiguous inventory
+    /// ownership of the entire network. Host bits are rejected, never cleared.
+    /// Blackhole remains a bare host address only.
     victim_ip: String,
     /// IP protocol: udp, tcp, icmp (IPv4 protocol 1), icmpv6 (IPv6 protocol 58), or any.
     /// An empty string also selects any protocol. ICMP selectors must match the victim's address family.
@@ -1707,7 +1711,7 @@ pub async fn list_events(
     params(
         ("status" = Option<String>, Query, description = "Comma-separated exact statuses: pending, active, expired, withdrawn, rejected (legacy escalated is still accepted but never produced); every token must be valid and nonempty"),
         ("customer_id" = Option<String>, Query, description = "Filter by customer ID"),
-        ("victim_ip" = Option<String>, Query, description = "Filter by victim IP address"),
+        ("victim_ip" = Option<String>, Query, description = "Filter by exact stored host IP or canonical manual CIDR; no containment matching"),
         ("pop" = Option<String>, Query, description = "Exact case-sensitive POP; omitted or literal 'all' lists every POP. Empty/NUL identifiers are invalid."),
         ("acknowledged" = Option<bool>, Query, description = "Filter by acknowledged status"),
         ("limit" = Option<u32>, Query, description = "Max results (default 100)"),
@@ -1957,10 +1961,10 @@ pub async fn get_mitigation(
     responses(
         (status = 201, description = "Mitigation intent created", body = MitigationResponse),
         (status = 202, description = "Intent created; announcement unconfirmed for this request", body = MitigationResponse),
-        (status = 400, description = "Invalid input, including an unsupported action/rate, protocol/address-family mismatch, a match component the selected speaker cannot encode, or a blackhole whose confirm_victim_ip differs from victim_ip or that carries match fields"),
+        (status = 400, description = "Invalid input, including malformed or unaligned destination CIDRs, ambiguous or incomplete subnet ownership, an unsupported action/rate, protocol/address-family mismatch, a match component the selected speaker cannot encode, or a blackhole whose confirmation differs or that carries match fields"),
         (status = 403, description = "A blackhole requires the Admin role; bearer tokens map to Operator"),
         (status = 409, description = "Conflicting owner, pending withdrawal, an untracked local blackhole route at the prefix, or a FlowSpec match held at the speaker by another injection owner or by none"),
-        (status = 422, description = "Guardrail rejection, including match invariants, the source-prefix, fragment and packet-length opt-ins, max_ports per port list, disabled blackholes and blackhole victim, TTL and quota checks"),
+        (status = 422, description = "Guardrail rejection, including destination prefix bounds, any safelist overlap, match invariants, source-prefix/fragment/packet-length opt-ins, port-list limits, blackhole eligibility, TTL and quota checks"),
     )
 )]
 pub async fn create_mitigation(
@@ -2000,9 +2004,27 @@ pub async fn create_mitigation(
     }
 
     // Validate input
-    let victim_ip = match validate_ip(&req.victim_ip) {
-        Ok(ip) => ip,
+    let destination = if req.victim_ip.contains('/') {
+        crate::domain::parse_flowspec_destination(&req.victim_ip)
+            .map_err(|error| PrefixdError::InvalidRequest(error.to_string()))
+    } else {
+        // Bare-IP validation keeps its existing error contract.
+        validate_ip(&req.victim_ip).map(ipnet::IpNet::from)
+    };
+    let destination = match destination {
+        Ok(prefix) => prefix,
         Err(error) => return Ok(AppError(error).into_response()),
+    };
+    let victim_ip = destination.addr();
+    let is_subnet = destination.prefix_len() != destination.max_prefix_len();
+    let target = if !req.victim_ip.contains('/') {
+        // Preserve the existing host history key and scope spelling. New CIDRs
+        // have one canonical representation; saved host identities stay intact.
+        req.victim_ip.clone()
+    } else if is_subnet {
+        destination.to_string()
+    } else {
+        victim_ip.to_string()
     };
     if let Err(e) = validate_string_len(&req.reason, "reason", MAX_STRING_LEN) {
         return Ok(AppError(e).into_response());
@@ -2056,9 +2078,21 @@ pub async fn create_mitigation(
     }
 
     let inventory = state.inventory.read().await;
-    let customer_id = inventory.lookup_ip(&req.victim_ip).map(|c| c.customer_id);
+    let context = if is_subnet {
+        match inventory.lookup_prefix(&destination) {
+            Ok(Some(context)) => Some(context),
+            Ok(None) => {
+                return Ok(AppError(PrefixdError::InvalidRequest(
+                    "destination CIDR must fit within one inventory customer prefix without conflicting ownership".into(),
+                )).into_response());
+            }
+            Err(error) => return Ok(AppError(error).into_response()),
+        }
+    } else {
+        inventory.lookup_ip(&target)
+    };
+    let customer_id = context.map(|context| context.customer_id);
     drop(inventory);
-    let prefix_len = if victim_ip.is_ipv6() { 128 } else { 32 };
     let src_prefix = match req
         .src_prefix
         .as_deref()
@@ -2076,7 +2110,11 @@ pub async fn create_mitigation(
         service_id: None,
         pop: state.settings.pop.clone(),
         match_criteria: MatchCriteria {
-            dst_prefix: format!("{}/{}", req.victim_ip, prefix_len),
+            dst_prefix: if req.victim_ip.contains('/') {
+                destination.to_string()
+            } else {
+                format!("{}/{}", req.victim_ip, destination.prefix_len())
+            },
             src_prefix,
             protocol,
             dst_ports: req.dst_ports,
@@ -2121,7 +2159,11 @@ pub async fn create_mitigation(
         state.settings.quotas.clone(),
         &state.settings.timers,
     );
-    let is_safelisted = match state.repo.is_safelisted(&req.victim_ip).await {
+    let is_safelisted = match state
+        .repo
+        .is_safelisted(&intent.match_criteria.dst_prefix)
+        .await
+    {
         Ok(v) => v,
         Err(e) => return Ok(AppError(e).into_response()),
     };
@@ -2145,7 +2187,7 @@ pub async fn create_mitigation(
 
     // Create and announce
     let mut mitigation =
-        Mitigation::from_intent(intent, req.victim_ip, crate::domain::AttackVector::Unknown);
+        Mitigation::from_intent(intent, target, crate::domain::AttackVector::Unknown);
     if let Some(cap) = req.expires_at_cap {
         mitigation.expires_at = mitigation.expires_at.min(cap);
         if let Err(error) =
@@ -2188,7 +2230,8 @@ async fn admit_detector_blackhole(
     signal_group_id: Option<Uuid>,
 ) -> crate::error::Result<(Mitigation, Option<AnnouncementOutcome>)> {
     let binding = state.verified_speaker_binding()?;
-    // A snapshot, so a configuration reload never waits behind the speaker add.
+    // Do not hold the inventory RwLock across speaker RPCs. The lifecycle mutex
+    // serializes inventory replacement with this admission.
     let inventory = state.inventory.read().await.clone();
     let admission = crate::guardrails::admit_blackhole(
         state.repo.as_ref(),
@@ -2276,7 +2319,8 @@ async fn create_blackhole(
         ttl_seconds: req.ttl_seconds,
         reason: req.reason,
     };
-    // A snapshot, so a configuration reload never waits behind the speaker add.
+    // Do not hold the inventory RwLock across speaker RPCs. The lifecycle mutex
+    // serializes inventory replacement with this admission.
     let inventory = state.inventory.read().await.clone();
     let admission = match crate::guardrails::admit_blackhole(
         state.repo.as_ref(),

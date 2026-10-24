@@ -7,7 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- Check `guardrails.dst_prefix_minlen` and `dst_prefix_minlen_v6` before
+  upgrading. Earlier releases ignored values below 32 and 128; this release
+  admits manual destination CIDRs down to those lengths. Set them to 32 and 128
+  first if you do not want CIDRs. See
+  [manual destination CIDRs and downgrade](docs/how-to/upgrading.md#manual-destination-cidrs-and-downgrade).
+
+- Inventory load and reload now reject an unparseable customer prefix or asset
+  IP. A failed reload keeps the previous inventory; fix the reported entry and
+  reload again.
+
 ### Added
+
+- Manual FlowSpec discard and police rules accept aligned IPv4/IPv6 destination
+  CIDRs in `victim_ip` when operators deliberately relax existing prefix bounds.
+  Whole-prefix customer ownership, all safelist overlaps and fresh repair checks
+  protect admission; new safelist entries withdraw affected owned rules in full.
+  The dashboard previews the complete match and expiry, keeps CIDRs on their
+  mitigation detail pages, and generates exact-target reports without implying
+  host aggregation. Defaults, detectors, playbooks and RTBH remain host-only.
 
 - The Inventory page shows the selected speaker's local IPv4/IPv6 FlowSpec
   routes, complete matches, actions and injection owners. Observation scope
@@ -61,6 +81,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The HTTP load helper and its report-parser regression suite. Local verification
   and CI no longer require `hey`.
 
+- The obsolete GoBGP-only lab helper and standalone FRR topology. Use
+  `just interop-frr` for maintained rustbgpd and GoBGP router receipt tests with
+  isolated fixtures and dated results. The Juniper topologies remain available.
+
 ### Fixed
 
 - Historical benchmark claims state their missing qualification and distinguish
@@ -101,12 +125,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   showing controls, avoiding a flash of anonymous browser preferences for
   signed-in operators. Browser preferences remain available when health fails,
   and a retry keeps the signed-in dashboard and open preferences mounted.
-
-### Removed
-
-- The obsolete GoBGP-only lab helper and standalone FRR topology. Use
-  `just interop-frr` for maintained rustbgpd and GoBGP router receipt tests with
-  isolated fixtures and dated results. The Juniper topologies remain available.
 
 ### Security
 
