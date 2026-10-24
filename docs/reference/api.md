@@ -514,6 +514,114 @@ When a mitigation was created via multi-source corroboration (correlation engine
 
 When correlation is disabled or the mitigation was created by a single source without corroboration, the `correlation` field is `null` or absent.
 
+### Preview Manual FlowSpec Admission
+
+```http
+POST /v1/mitigations/preview
+Authorization: Bearer <token>
+Content-Type: application/json
+```
+
+Optional, authenticated **Operator** check of the same discard/police request
+body used by [creation](#create-mitigation). Blackhole preview is unavailable.
+The endpoint shares creation's input preparation, whole-prefix ownership,
+canonical source match, stored owner/pending-withdrawal, safelist overlap,
+prefix/TTL/port/match guardrails, active quotas, recent-creation rate and adapter
+capability checks. Configured safelist entries are loaded into the same
+repository safelist at startup.
+
+A successful check returns `200`:
+
+```json
+{
+  "outcome": "admissible",
+  "checked_at": "2026-10-23T09:50:00Z",
+  "mode": "enforced",
+  "speaker_state": "unobserved",
+  "candidate": {
+    "victim_ip": "203.0.112.0/22",
+    "customer_id": "allocation",
+    "service_id": null,
+    "pop": "iad1",
+    "scope": { "dst_prefix": "203.0.112.0/22", "protocol": 17, "dst_ports": [443] },
+    "action": { "action_type": "discard" },
+    "ttl_seconds": 300,
+    "expires_at_cap": null
+  },
+  "failed_check": null,
+  "reason": null
+}
+```
+
+`candidate.scope` preserves every source/protocol/port/fragment/packet-length
+component. Destination scope is canonical even when legacy bare-host identity
+spelling is retained. `ttl_seconds` is the requested lifetime, not a reserved
+expiry; the optional `expires_at_cap` remains an absolute ceiling. `mode` is the
+configured controller mode. A preview never saves an event, mitigation, audit
+entry or withdrawal, and never sends a speaker RPC or updates mutation counters.
+It neither consumes nor reserves a quota/rate slot. Ordinary HTTP request
+metrics and rate limiting still apply.
+
+| HTTP | Outcome | Meaning |
+|------|---------|---------|
+| 200 | `admissible` | Controller-side checks passed at `checked_at` |
+| 400 | `refused` | Invalid destination, action, rate, protocol or source input; blackholes unsupported |
+| 409 | `refused` | Stored ownership, pending withdrawal or target conflict |
+| 422 | `refused` | Guardrail, quota, rate or lifetime refusal |
+| 503 | `unavailable` | A required safety read could not complete; diagnostics are sanitized |
+
+`failed_check` identifies `input`, `target`, `ownership`, `safelist`,
+`guardrails`, `creation_rate`, `capability`, `lifetime` or `timeout`; `reason`
+gives safe detail. A safelisted target is a guardrail refusal (`422`,
+`failed_check: "guardrails"`); `safelist` appears only when the safelist read
+itself fails (`503`, `unavailable`). Invalid match capabilities currently return `400`, as creation does.
+The candidate remains present after successful preparation even when a later
+check refuses it or becomes unavailable. It is null when preparation fails.
+Never interpret a safety-read error as an empty inventory or a passed check.
+
+The preview is a read-only snapshot and does not take the lifecycle mutex, so
+it never delays detector ingest, expiry or withdrawal. Its reads can straddle a
+concurrent change; creation rechecks everything under lifecycle serialization.
+A five-second deadline covers inventory preparation and all safety reads. A
+timeout returns `503`, `outcome: "unavailable"` and `failed_check: "timeout"`,
+retaining the candidate if preparation completed. This deadline does not apply
+to creation, persistence or COMMIT.
+
+Each preview database read runs in its own read-only transaction with a
+transaction-local statement deadline within the remaining request budget,
+leaving time for cleanup. The setting ends with the transaction and the
+connection returns to the pool, so cancelled queries and changed session
+settings cannot retain shared pool capacity or affect normal operations. A server deadline returns `503` with
+`outcome: "unavailable"` at the affected `failed_check` (for example `ownership`);
+the outer request deadline uses `failed_check: "timeout"`. Both preserve an
+already prepared candidate and save no intent. A retry reruns all checks.
+
+Authentication failures use `401`/`403`. Like creation, this POST is restricted
+to the active controller: standby returns `503` with the ordinary
+[error body](#error-responses), not an admission preview. Malformed JSON or field
+types use the framework rejection body, also outside the preview schema.
+
+This is an observation, not an authorization token. Creation reruns all checks
+under lifecycle serialization and still enforces quota/rate admission atomically.
+Other POPs can consume shared capacity after the observation. Speaker-side
+injection ownership, availability, local acceptance, export and router
+installation remain unobserved; creation may still fail or retain unconfirmed
+intent. Dry-run creation remains a persisted simulation, distinct from this
+side-effect-free check.
+
+The dashboard's **Check admission** action is optional. It displays the exact
+server candidate and refusal/unavailability, follows the operator's timezone,
+and clears results whenever an input changes. Creation remains available with
+its ordinary guardrails and always rechecks. An older controller or a malformed
+response is shown as unavailable, never as passed.
+
+The workflow is informed by Wanguard's inspectable action preconditions and
+manual routing controls. Reusing prefixd's own admission policy without adding
+packet inspection is a product decision; those sources do not qualify prefixd
+or prove router enforcement. See the official
+[Response guide](https://docs.andrisoft.com/wanguard/latest/Configuration__Network__Policy__Response.html#response-actions)
+and [Routing guide](https://docs.andrisoft.com/wanguard/latest/Reports__Tools__Routing.html#active-bgp-announcements).
+
 ### Create Mitigation
 
 ```http

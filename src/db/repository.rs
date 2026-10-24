@@ -100,14 +100,84 @@ pub(crate) fn unknown_origin_audit(
     )
 }
 
+/// An ordinary pooled connection, or a bounded read's read-only transaction.
+enum ReadConnection {
+    Pooled(sqlx::pool::PoolConnection<sqlx::Postgres>),
+    ReadOnly(sqlx::Transaction<'static, sqlx::Postgres>),
+}
+
+impl std::ops::Deref for ReadConnection {
+    type Target = PgConnection;
+    fn deref(&self) -> &PgConnection {
+        match self {
+            Self::Pooled(connection) => connection,
+            Self::ReadOnly(transaction) => transaction,
+        }
+    }
+}
+
+impl std::ops::DerefMut for ReadConnection {
+    fn deref_mut(&mut self) -> &mut PgConnection {
+        match self {
+            Self::Pooled(connection) => connection,
+            Self::ReadOnly(transaction) => transaction,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Repository {
     pool: PgPool,
+    read_deadline: Option<tokio::time::Instant>,
 }
 
 impl Repository {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            read_deadline: None,
+        }
+    }
+
+    /// A bounded-read view runs each read in its own `BEGIN READ ONLY`
+    /// transaction with a transaction-local `statement_timeout`. Dropping it
+    /// rolls back, ending the setting, and returns the connection to the pool.
+    async fn bounded_read_connection(&self) -> Result<ReadConnection> {
+        let Some(deadline) = self.read_deadline else {
+            return Ok(ReadConnection::Pooled(self.pool.acquire().await?));
+        };
+        // SQLx records a transaction only after BEGIN's reply; cancelling that
+        // await would return an open transaction to the pool. The detached task
+        // always finishes BEGIN, so a dropped result rolls back normally.
+        let pool = self.pool.clone();
+        let begin = tokio::spawn(async move { pool.begin_with("BEGIN READ ONLY").await });
+        let mut transaction = tokio::time::timeout_at(deadline, begin)
+            .await
+            .map_err(|_| sqlx::Error::PoolTimedOut)?
+            .map_err(|_| sqlx::Error::PoolTimedOut)??;
+        // The server deadline ends before the request deadline, so a cancelled
+        // statement has finished by the time the pool's release ping waits on it.
+        let remaining = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .checked_sub(Duration::from_millis(500))
+            .ok_or(sqlx::Error::PoolTimedOut)?;
+        let milliseconds = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+        if milliseconds == 0 {
+            return Err(sqlx::Error::PoolTimedOut.into());
+        }
+        // pg_settings stores this GUC in milliseconds. Preserve a stricter
+        // server limit; zero means disabled and must never be our new limit.
+        let _: String = sqlx::query_scalar(
+            r#"SELECT pg_catalog.set_config(
+                'statement_timeout',
+                LEAST($1::int, COALESCE(NULLIF(setting::int, 0), $1::int))::text,
+                true
+            ) FROM pg_catalog.pg_settings WHERE name = 'statement_timeout'"#,
+        )
+        .bind(milliseconds)
+        .fetch_one(&mut *transaction)
+        .await?;
+        Ok(ReadConnection::ReadOnly(transaction))
     }
 
     async fn insert_mitigation_on(connection: &mut PgConnection, m: &Mitigation) -> Result<()> {
@@ -194,6 +264,16 @@ impl Repository {
 
 #[async_trait]
 impl RepositoryTrait for Repository {
+    fn for_bounded_reads(
+        self: std::sync::Arc<Self>,
+        deadline: tokio::time::Instant,
+    ) -> Result<std::sync::Arc<dyn RepositoryTrait>> {
+        Ok(std::sync::Arc::new(Self {
+            pool: self.pool.clone(),
+            read_deadline: Some(deadline),
+        }))
+    }
+
     async fn register_speaker_target(
         &self,
         pop: &str,
@@ -417,11 +497,12 @@ impl RepositoryTrait for Repository {
     }
 
     async fn active_mitigation_inventory(&self, pop: Option<&str>) -> Result<Vec<Mitigation>> {
+        let mut connection = self.bounded_read_connection().await?;
         let rows = sqlx::query_as::<_, MitigationRow>(
             "SELECT * FROM mitigations WHERE ($1::text IS NULL OR pop = $1) AND status IN ('pending', 'active', 'escalated')",
         )
         .bind(pop)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await?;
         rows.into_iter().map(Mitigation::from_row).collect()
     }
@@ -471,11 +552,12 @@ impl RepositoryTrait for Repository {
     }
 
     async fn pending_withdrawals(&self, pop: Option<&str>) -> Result<Vec<WithdrawalRequest>> {
+        let mut connection = self.bounded_read_connection().await?;
         Ok(sqlx::query_as::<_, WithdrawalRequest>(
             "SELECT * FROM withdrawal_requests WHERE completed_at IS NULL AND ($1::text IS NULL OR pop = $1) ORDER BY requested_at, operation_id",
         )
         .bind(pop)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *connection)
         .await?)
     }
 
@@ -533,6 +615,11 @@ impl RepositoryTrait for Repository {
 
     async fn insert_mitigation(&self, m: &Mitigation) -> Result<()> {
         Self::insert_mitigation_on(&mut *self.pool.acquire().await?, m).await
+    }
+
+    async fn check_new_mitigation_rate(&self, pop: &str, max: u32) -> Result<()> {
+        Self::check_new_mitigation_rate_on(&mut *self.bounded_read_connection().await?, pop, max)
+            .await
     }
 
     async fn admit_mitigation(
@@ -785,30 +872,33 @@ impl RepositoryTrait for Repository {
     }
 
     async fn count_active_flowspec_by_customer(&self, customer_id: &str) -> Result<u32> {
+        let mut connection = self.bounded_read_connection().await?;
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND customer_id = $1 AND status IN ('pending', 'active', 'escalated')",
         )
         .bind(customer_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *connection)
         .await?;
         Ok(row.0 as u32)
     }
 
     async fn count_active_flowspec_by_pop(&self, pop: &str) -> Result<u32> {
+        let mut connection = self.bounded_read_connection().await?;
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND pop = $1 AND status IN ('pending', 'active', 'escalated')",
         )
         .bind(pop)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *connection)
         .await?;
         Ok(row.0 as u32)
     }
 
     async fn count_active_flowspec_global(&self) -> Result<u32> {
+        let mut connection = self.bounded_read_connection().await?;
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM mitigations WHERE action_type != 'blackhole' AND status IN ('pending', 'active', 'escalated')",
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *connection)
         .await?;
         Ok(row.0 as u32)
     }
@@ -878,6 +968,7 @@ impl RepositoryTrait for Repository {
     }
 
     async fn is_safelisted(&self, target: &str) -> Result<bool> {
+        let mut connection = self.bounded_read_connection().await?;
         // Overlap is symmetric: a broad candidate must not cover a protected
         // host or subnet. Bare addresses retain their /32 or /128 semantics.
         let row: (i64,) = sqlx::query_as(
@@ -887,7 +978,7 @@ impl RepositoryTrait for Repository {
             "#,
         )
         .bind(target)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *connection)
         .await?;
 
         Ok(row.0 > 0)
