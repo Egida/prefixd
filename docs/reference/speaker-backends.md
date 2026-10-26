@@ -294,6 +294,16 @@ configured grace deadline. Reconciliation still restores desired state on its
 normal poll. The daemon's optional timer-only grace window needs a separately
 qualified replay budget and does not prove downstream retention or enforcement.
 
+Injected routes are held from selection after a speaker restart until its
+Graceful Restart peers send End-of-RIB or the restart window
+(`gr_restart_time`, 120 seconds by default) expires; the local view reads
+`selected: false` meanwhile. `MarkReplayComplete` does not end that hold, and a
+Graceful Restart peer that never comes up holds it for the full window. The
+shipped `configs/rustbgpd.toml` sets `graceful_restart = false` on its
+placeholder neighbor for that reason. Enable Graceful Restart on real peers
+that support it. [Export evidence](#export-evidence) describes how prefixd
+reports a held blackhole.
+
 ### Scoped and interface-only neighbors
 
 Peer observations keep an IPv6 link-local endpoint scoped as `fe80::1%eth0`.

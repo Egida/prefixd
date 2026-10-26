@@ -50,6 +50,14 @@ and expiry; a healthy peer alone does not prove recovery. Back up speaker state
 and configuration before changing its version, and review rustbgpd's downgrade
 requirements before reverting it. Do not roll back below v0.80.0.
 
+Replayed routes may also be held from selection after a speaker restart until
+its Graceful Restart peers send End-of-RIB or the restart window
+(`gr_restart_time`, 120 seconds by default) expires; `MarkReplayComplete` does
+not end that hold. Remove or disable Graceful Restart on configured neighbors
+that never come up. The shipped example sets
+`graceful_restart = false` on its placeholder neighbor. See
+[speaker backends](../reference/speaker-backends.md#rustbgpd-configuration).
+
 Health, peer metrics and blackhole export evidence now distinguish scoped IPv6
 link-local neighbors (`fe80::1%eth0`). Interface-only peers use `interface:eth0`
 as their metric name and, until discovery, their observed address. Review any

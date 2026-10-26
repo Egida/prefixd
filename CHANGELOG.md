@@ -19,6 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PrefixdBlackholeNotExported` adds a hint for the new reason and keeps its
   five-minute window, which outlasts the default 120-second hold.
 
+### Fixed
+
+- The example `configs/rustbgpd.toml` disables Graceful Restart on its
+  placeholder neighbor. That neighbor never connects, so after each planned
+  rustbgpd restart in the Compose quickstart, replayed FlowSpec rules were
+  held from selection until the restart window (`gr_restart_time`, 120
+  seconds by default) expired. They are now selected as soon as
+  reconciliation re-adds them. Enable Graceful Restart on real peers that
+  support it.
+
 ## [0.23.0] - 2026-10-26
 
 prefixd 0.23.0 lets manual FlowSpec rules target guarded destination CIDRs
