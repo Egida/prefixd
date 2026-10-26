@@ -1009,7 +1009,7 @@ customers:
     name: "ACME Corporation"
     prefixes:
       - "203.0.113.0/24"
-      - "2001:db8:acme::/48"
+      - "2001:db8:ac00::/48"
     policy_profile: normal
     services:
       - service_id: dns
