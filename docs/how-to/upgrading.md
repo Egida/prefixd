@@ -29,6 +29,42 @@ the protection; drain affected rules or accept that policy change explicitly.
   [mitigation origin mode](#mitigation-origin-mode).
 - **Always back up the database** before upgrading.
 
+## rustbgpd v0.80
+
+prefixd now requires rustbgpd v0.80.0 or later, and Compose pins the immutable
+v0.80.1 image. Upgrade the speaker before prefixd: the new controller refuses
+to start against v0.79.0 (see [rustbgpd minimum version](#rustbgpd-minimum-version)).
+Existing GoBGP selection is unchanged. There is no prefixd database migration
+or target transfer for this speaker version change. Keep the same POP,
+endpoint, credentials and operation mode. Follow rustbgpd's
+[v0.80.0](https://github.com/lance0/rustbgpd/releases/tag/v0.80.0) and
+[v0.80.1](https://github.com/lance0/rustbgpd/releases/tag/v0.80.1) release
+notes for its own configuration and restart requirements, then verify
+readiness, reconciliation and the receiving routers after recreating the
+speaker.
+
+This restart loses process-local injection until reconciliation replays desired
+state. Allow for the configured reconciliation interval and verify exact rules
+and expiry; a healthy peer alone does not prove recovery. Back up speaker state
+and configuration before changing its version, and review rustbgpd's downgrade
+requirements before reverting it. Do not roll back below v0.80.0.
+
+Health, peer metrics and blackhole export evidence now distinguish scoped IPv6
+link-local neighbors (`fe80::1%eth0`). Interface-only peers use `interface:eth0`
+as their metric name and, until discovery, their observed address. Review any
+alerts that select exact peer labels. A malformed or unbound Established peer
+fails observation rather than being reported healthy.
+
+A paged blackhole export read that rustbgpd aborts because the route, its
+Established peers or their export settings changed between pages restarts once
+from the first page; a second abort is an observation error, never a partial
+or empty result.
+
+New v0.80 FlowSpec/batch export reads and replay-complete signaling are not yet
+used. Do not list prefixd in `global.gr_eor_replay_owners`. The optional
+timer-only End-of-RIB grace window must be qualified against the actual replay
+budget; it is not an end-to-end enforcement guarantee.
+
 ## Speaker ownership upgrade
 
 Migration 014 adds immutable `speaker_targets`, one-to-one `speaker_pop_bindings`,
@@ -178,20 +214,21 @@ A production write-only backend remains gated on a durable announcement ledger.
 
 ## rustbgpd minimum version
 
-prefixd requires rustbgpd 0.79.0 or later. At startup it reads the version
+prefixd requires rustbgpd 0.80.0 or later. At startup it reads the version
 that rustbgpd's `GetHealth` reports and exits before reading or writing any
 intent if the daemon is older or reports no readable version:
 
 ```text
-rustbgpd 0.78.0 is older than the minimum 0.79.0; upgrade the speaker first
+rustbgpd 0.79.0 is older than the minimum 0.80.0; upgrade the speaker first
 ```
 
 Upgrade rustbgpd before prefixd. A rustbgpd restart drops its injected rules;
 the running controller re-adds desired rules on its next reconciliation poll.
-Then upgrade prefixd as usual. Don't roll rustbgpd back below 0.79.0 under a
-newer prefixd: the next start refuses, and a running controller treats the
-lease RPCs as unsupported, so leased adds fail and create nothing. GoBGP is
-unaffected.
+Then upgrade prefixd as usual. Don't roll rustbgpd back below 0.80.0 under a
+newer prefixd: the next start refuses. A daemon rolled back while prefixd runs
+reports link-local export rows without interface scope, which fail export
+observation, and below 0.79.0 the lease RPCs are unsupported, so leased adds
+fail and create nothing. GoBGP is unaffected.
 
 ## Controller fence and rolling deploys
 

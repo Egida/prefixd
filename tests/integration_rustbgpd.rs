@@ -43,9 +43,31 @@ async fn live_rustbgpd_controller_roundtrip() {
     let speaker = fixture.connect().await;
     contract::run_readable_contract(&speaker).await.unwrap();
     let health = speaker.daemon_health().await.unwrap();
-    let expected = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.79.0".into());
+    let expected = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.80.1".into());
     assert_eq!(health.version.as_deref(), Some(expected.as_str()));
     assert!(health.ready);
+}
+
+#[tokio::test]
+#[ignore = "requires isolated pinned Linux Docker speaker; run scripts/test-rustbgpd.sh"]
+async fn live_rustbgpd_v080_observes_unbound_interface_neighbor_identity() {
+    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.80.1".into());
+    let fixture = fixture::Speaker::start_observation_neighbors().await;
+    let speaker = fixture.connect().await;
+    let interface_name = format!("interface:{}", fixture::UNBOUND_INTERFACE);
+    // Repeated real daemon reads retain the unbound neighbor's identity.
+    // Its missing interface cannot establish a session.
+    for _ in 0..2 {
+        let peers = speaker.session_status().await.unwrap();
+        assert_eq!(peers.len(), 1, "{peers:?}");
+        let peer = &peers[0];
+        assert_eq!(peer.name, interface_name);
+        assert_eq!(peer.address, interface_name);
+        assert!(!peer.state.is_established(), "{peer:?}");
+    }
+    let health = speaker.daemon_health().await.unwrap();
+    assert_eq!(health.version.as_deref(), Some(version.as_str()));
+    fixture.container.rm().await.unwrap();
 }
 
 #[tokio::test]
@@ -99,7 +121,7 @@ async fn live_rustbgpd_source_prefix_components_are_retained_in_both_families() 
 async fn live_rustbgpd_amplification_components_inject_read_and_delete() {
     let fixture = fixture::Speaker::start().await;
     let speaker = fixture.connect().await;
-    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.79.0".into());
+    let version = std::env::var("PREFIXD_RUSTBGPD_TEST_VERSION").unwrap_or("0.80.1".into());
     // The daemon's own rendering of the injected components (ADR 028 read-back column).
     let rules = contract::amplification_rules();
     for rule in &rules {
