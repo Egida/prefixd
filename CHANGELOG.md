@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- FastNetMon guidance distinguishes its source-build native rustbgpd RTBH
+  action from the prefixd notify path, and explains the exclusive speaker-target
+  requirement and leased/unleased route conflicts.
 - Per-peer FlowSpec export evidence on rustbgpd, keyed by the full canonical
   match and shown on mitigation detail, authenticated health and the dashboard.
   Separate bounded FlowSpec metrics preserve the existing blackhole metrics.
